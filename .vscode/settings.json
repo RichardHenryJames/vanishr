@@ -1,0 +1,6 @@
+{
+    "vscode-nmake-tools.workspaceBuildDirectories": [],
+    "files.watcherExclude": {
+        "**/target/**": true
+    }
+}

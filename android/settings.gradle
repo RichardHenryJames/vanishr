@@ -1,0 +1,21 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        exclusiveContent {
+            forRepository { maven { url = uri('https://build-artifacts.signal.org/libraries/maven/') } }
+            filter { includeGroup('org.signal') }
+        }
+    }
+}
+rootProject.name = 'Vanishr'
+include ':app', ':crypto'
+project(':crypto').projectDir = file('../client-core')

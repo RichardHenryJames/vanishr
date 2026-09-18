@@ -1,0 +1,6 @@
+**
+!infra/
+!infra/Dockerfile
+!relay/
+!relay/target/
+!relay/target/relay-0.1.0-SNAPSHOT.jar

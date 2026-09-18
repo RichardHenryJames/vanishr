@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Vanishr" parent="Theme.Material3.Light.NoActionBar">
+        <item name="android:fontFamily">@font/manrope</item>
+        <item name="fontFamily">@font/manrope</item>
+        <item name="colorPrimary">#146C58</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorPrimaryContainer">#DDF1E9</item>
+        <item name="colorOnPrimaryContainer">#164D3E</item>
+        <item name="colorSecondary">#355CBE</item>
+        <item name="colorSecondaryContainer">#E8EDFA</item>
+        <item name="colorSurface">#FFFFFF</item>
+        <item name="colorSurfaceContainer">#FFFFFF</item>
+        <item name="colorSurfaceContainerHigh">#FFFFFF</item>
+        <item name="colorSurfaceContainerHighest">#F5F8F6</item>
+        <item name="android:fontVariationSettings">"'wght' 500"</item>
+        <item name="colorOnSurface">#182724</item>
+        <item name="colorOnSurfaceVariant">#5C6C67</item>
+        <item name="colorOutline">#DCE4E0</item>
+        <item name="colorError">#B33C4A</item>
+        <item name="android:colorBackground">#F5F8F6</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:navigationBarColor">#F5F8F6</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowBackground">#F5F8F6</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.Vanishr.Dialog</item>
+        <item name="bottomSheetDialogTheme">@style/ThemeOverlay.Vanishr.BottomSheet</item>
+    </style>
+    <style name="Shape.Vanishr" parent="ShapeAppearance.Material3.Corner.Small">
+        <item name="cornerSize">8dp</item>
+    </style>
+    <style name="ThemeOverlay.Vanishr.Dialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
+        <item name="shapeAppearance">@style/Shape.Vanishr</item>
+        <item name="shapeAppearanceCornerExtraLarge">@style/Shape.Vanishr</item>
+        <item name="colorSurfaceContainerHigh">#FFFFFF</item>
+        <item name="android:windowMinWidthMajor">85%</item>
+        <item name="android:windowMinWidthMinor">92%</item>
+    </style>
+    <style name="ThemeOverlay.Vanishr.BottomSheet" parent="ThemeOverlay.Material3.BottomSheetDialog">
+        <item name="bottomSheetStyle">@style/Widget.Vanishr.BottomSheet</item>
+    </style>
+    <style name="Widget.Vanishr.BottomSheet" parent="Widget.Material3.BottomSheet.Modal">
+        <item name="shapeAppearance">@style/Shape.Vanishr</item>
+        <item name="backgroundTint">#FFFFFF</item>
+    </style>
+</resources>

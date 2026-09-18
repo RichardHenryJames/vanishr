@@ -1,0 +1,112 @@
+plugins { id 'com.android.application' }
+
+def releaseKeystore = System.getenv('VANISHR_SIGNING_KEYSTORE')
+def releasePassword = System.getenv('VANISHR_SIGNING_PASSWORD')
+def relayOrigin = System.getenv('VANISHR_RELAY_ORIGIN') ?: ''
+def googleClientId = System.getenv('GOOGLE_WEB_CLIENT_ID') ?: ''
+if ((releaseKeystore != null) != (releasePassword != null)) {
+    throw new GradleException('Both release signing environment variables are required.')
+}
+if (!relayOrigin.isEmpty()) {
+    def origin = new URI(relayOrigin)
+    if (origin.scheme != 'https' || origin.host == null || origin.userInfo != null || origin.query != null || origin.fragment != null || !(origin.path in ['', '/'])) {
+        throw new GradleException('The default relay must be a trusted HTTPS origin without credentials or a path.')
+    }
+}
+
+android {
+    namespace 'app.vanishr.android'
+    compileSdk 36
+    defaultConfig {
+        applicationId 'app.vanishr.android'
+        minSdk 28
+        targetSdk 36
+        versionCode 10
+        versionName '0.2.7'
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+        buildConfigField 'String', 'DEFAULT_RELAY_ORIGIN', groovy.json.JsonOutput.toJson(relayOrigin)
+        buildConfigField 'String', 'GOOGLE_WEB_CLIENT_ID', groovy.json.JsonOutput.toJson(googleClientId)
+        ['FIREBASE_APP_ID', 'FIREBASE_API_KEY', 'FIREBASE_PROJECT_ID', 'FIREBASE_SENDER_ID'].each { name ->
+            buildConfigField 'String', name, groovy.json.JsonOutput.toJson(System.getenv(name) ?: '')
+        }
+    }
+    buildFeatures { buildConfig true }
+    testBuildType providers.gradleProperty('testBuildType').getOrElse('debug')
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+        coreLibraryDesugaringEnabled true
+    }
+    signingConfigs {
+        if (releaseKeystore != null) {
+            release {
+                storeFile file(releaseKeystore)
+                storePassword releasePassword
+                keyAlias 'vanishr-release'
+                keyPassword releasePassword
+            }
+        }
+    }
+    buildTypes {
+        qa {
+            initWith debug
+            applicationIdSuffix '.qa'
+            versionNameSuffix '-qa'
+            matchingFallbacks = ['debug']
+        }
+        release {
+            if (releaseKeystore != null) signingConfig signingConfigs.release
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    packaging {
+        jniLibs {
+            excludes += ['**/libsignal_jni_testing.so']
+        }
+        resources {
+            excludes += ['signal_jni*.dll', 'libsignal_jni*.dylib', 'libsignal_jni_testing.so', 'META-INF/DEPENDENCIES']
+        }
+    }
+}
+
+dependencies {
+    implementation project(':crypto')
+    implementation 'org.signal:libsignal-android:0.102.3'
+    implementation 'com.squareup.okhttp3:okhttp:5.3.2'
+    implementation 'com.google.code.gson:gson:2.14.0'
+    implementation 'androidx.activity:activity:1.11.0'
+    implementation 'androidx.concurrent:concurrent-futures:1.3.0'
+    implementation 'androidx.concurrent:concurrent-futures-ktx:1.3.0'
+    implementation 'com.google.android.material:material:1.13.0'
+    implementation 'androidx.appcompat:appcompat:1.7.1'
+    implementation 'androidx.credentials:credentials:1.6.0'
+    implementation 'androidx.credentials:credentials-play-services-auth:1.6.0'
+    implementation 'com.google.android.libraries.identity.googleid:googleid:1.1.1'
+    implementation 'androidx.exifinterface:exifinterface:1.4.1'
+    implementation 'androidx.work:work-runtime:2.11.2'
+    implementation platform('com.google.firebase:firebase-bom:34.19.0')
+    implementation 'com.google.firebase:firebase-messaging'
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test:runner:1.7.0'
+    androidTestImplementation 'androidx.test.ext:junit:1.3.0'
+    androidTestImplementation 'androidx.test.uiautomator:uiautomator:2.3.0'
+}
+
+tasks.register('exportDependencyInventory') {
+    def destination = layout.buildDirectory.file('reports/distribution/dependencies.json')
+    outputs.file(destination)
+    outputs.upToDateWhen { false }
+    doLast {
+        def artifacts = configurations.releaseRuntimeClasspath.resolvedConfiguration.resolvedArtifacts
+        def inventory = artifacts.findAll { it.moduleVersion.id.group != 'Vanishr' }.collect { artifact ->
+            [group: artifact.moduleVersion.id.group, name: artifact.moduleVersion.id.name,
+             version: artifact.moduleVersion.id.version, file: artifact.file.absolutePath]
+        }.sort { first, second -> "${first.group}:${first.name}" <=> "${second.group}:${second.name}" }
+        def report = destination.get().asFile
+        report.parentFile.mkdirs()
+        report.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(inventory))
+    }
+}

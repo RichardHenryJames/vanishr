@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="sign_in">Sign in</string>
+    <string name="create_account">Create account</string>
+    <string name="replace_device">Replace previous device</string>
+    <string name="identity_verified">Identity verified independently</string>
+    <string name="notifications">New message notifications</string>
+    <string name="working">Working</string>
+</resources>

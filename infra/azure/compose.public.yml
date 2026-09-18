@@ -1,0 +1,53 @@
+services:
+  redis:
+    restart: unless-stopped
+    pids_limit: 64
+    logging: {driver: none}
+
+  postgres:
+    restart: unless-stopped
+    pids_limit: 64
+    logging: {driver: none}
+
+  relay:
+    ports: !reset []
+    restart: unless-stopped
+    pids_limit: 160
+    logging: {driver: none}
+
+  https:
+    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    user: "10002:10002"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 80m
+    memswap_limit: 80m
+    pids_limit: 64
+    restart: unless-stopped
+    logging: {driver: none}
+    ulimits:
+      core: 0
+    environment:
+      VANISHR_HOSTNAME: ${VANISHR_HOSTNAME:?A verified public hostname is required}
+      VANISHR_CERT_EMAIL: ${VANISHR_CERT_EMAIL:?Certificate notification email is required}
+      GOMEMLIMIT: 48MiB
+      GOMAXPROCS: 2
+    ports:
+      - "443:8444"
+      - "80:8080"
+    volumes:
+      - ./azure/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../.secrets/ca.crt:/tls/ca.crt:ro
+      - ../.secrets/caddy-data:/data
+    tmpfs:
+      - /config:rw,noexec,nosuid,size=8m,uid=10002,gid=10002,mode=0700
+    depends_on:
+      relay: {condition: service_healthy}
+    networks: [backend, outbound]
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+      interval: 60s
+      timeout: 15s
+      retries: 3

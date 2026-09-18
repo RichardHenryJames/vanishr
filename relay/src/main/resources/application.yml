@@ -1,0 +1,77 @@
+server:
+  port: ${PORT:8443}
+  ssl:
+    enabled: true
+    key-store: ${TLS_KEYSTORE:file:.secrets/relay.p12}
+    key-store-type: PKCS12
+    key-store-password: ${TLS_KEYSTORE_PASSWORD}
+    enabled-protocols: TLSv1.3,TLSv1.2
+  forward-headers-strategy: none
+  error:
+    include-message: never
+    include-binding-errors: never
+    include-stacktrace: never
+  tomcat:
+    accesslog:
+      enabled: false
+    max-http-form-post-size: 196608B
+    max-swallow-size: 2097168B
+    max-connections: 512
+    threads:
+      max: 64
+  max-http-request-header-size: 8KB
+spring:
+  application:
+    name: vanishr-relay
+  main:
+    banner-mode: off
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/vanishr?sslmode=verify-full}
+    username: ${DATABASE_USER:vanishr}
+    password: ${DATABASE_PASSWORD}
+    hikari:
+      maximum-pool-size: 8
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD}
+      ssl:
+        enabled: true
+        bundle: internal
+      timeout: 3s
+      connect-timeout: 3s
+  ssl:
+    bundle:
+      pem:
+        internal:
+          truststore:
+            certificate: ${INTERNAL_CA:}
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+  servlet:
+    multipart:
+      enabled: false
+  mvc:
+    log-request-details: false
+vanishr:
+  google:
+    web-client-id: ${GOOGLE_WEB_CLIENT_ID:}
+    android-client-ids: ${GOOGLE_ANDROID_CLIENT_IDS:}
+  push:
+    enabled: ${FCM_ENABLED:false}
+    project-id: ${FCM_PROJECT_ID:}
+logging:
+  level:
+    root: WARN
+    org.springframework.web: OFF
+    org.springframework.security: OFF
+    org.springframework.jdbc: OFF
+    io.lettuce: OFF
+    org.signal: OFF
+    com.google.auth: OFF
+    com.google.api.client: OFF
+    com.zaxxer.hikari: OFF
+    org.apache.coyote: OFF
+    org.apache.tomcat: OFF

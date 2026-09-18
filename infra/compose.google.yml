@@ -1,0 +1,15 @@
+services:
+  relay:
+    environment:
+      GOOGLE_WEB_CLIENT_ID: ${GOOGLE_WEB_CLIENT_ID:?A Web OAuth client ID is required}
+      GOOGLE_ANDROID_CLIENT_IDS: ${GOOGLE_ANDROID_CLIENT_IDS:?Allowed Android OAuth client IDs are required}
+      FCM_ENABLED: "true"
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:?A Firebase project ID is required}
+      GOOGLE_APPLICATION_CREDENTIALS: /credentials/fcm.json
+    volumes:
+      - type: bind
+        source: ${FCM_CREDENTIAL_FILE:?A private server-only credential path is required}
+        target: /credentials/fcm.json
+        read_only: true
+        bind:
+          create_host_path: false

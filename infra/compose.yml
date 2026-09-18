@@ -1,0 +1,110 @@
+name: vanishr
+services:
+  redis:
+    image: redis:8.2-alpine@sha256:30abb90e62f14b737010746def3ba99cc79fe19dcdb3d37b41f21fc62e7da19d
+    user: "999:999"
+    command: ["redis-server", "/config/redis.conf"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 384m
+    memswap_limit: 384m
+    ulimits:
+      core: 0
+    tmpfs:
+      - /data:rw,noexec,nosuid,size=16m,mode=1777
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Generate local configuration first}
+    volumes:
+      - ../.secrets/redis.conf:/config/redis.conf:ro
+      - ../.secrets/ca.crt:/tls/ca.crt:ro
+      - ../.secrets/redis.crt:/tls/redis.crt:ro
+      - ../.secrets/redis.key:/tls/redis.key:ro
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli --tls --cacert /tls/ca.crt ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    networks: [backend]
+
+  postgres:
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    user: "70:70"
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 384m
+    memswap_limit: 384m
+    ulimits:
+      core: 0
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=1777
+      - /var/run/postgresql:rw,noexec,nosuid,size=16m,mode=1777
+    environment:
+      POSTGRES_DB: vanishr
+      POSTGRES_USER: vanishr
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Generate local configuration first}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - accounts:/var/lib/postgresql/data
+      - ./postgres-entrypoint.sh:/entrypoint.sh:ro
+      - ./pg_hba.conf:/config/pg_hba.conf:ro
+      - ../.secrets/ca.crt:/tls/ca.crt:ro
+      - ../.secrets/postgres.crt:/tls/postgres.crt:ro
+      - ../.secrets/postgres.key:/tls/postgres.key:ro
+    healthcheck:
+      test: ["CMD-SHELL", "PGSSLMODE=verify-full PGSSLROOTCERT=/tls/ca.crt pg_isready -h localhost -U vanishr -d vanishr"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    networks: [backend]
+
+  relay:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    memswap_limit: 512m
+    ulimits:
+      core: 0
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m,mode=1777
+    ports:
+      - "127.0.0.1:${PORT:-8443}:8443"
+    environment:
+      PORT: 8443
+      DATABASE_URL: jdbc:postgresql://postgres:5432/vanishr?sslmode=verify-full&sslrootcert=/tls/ca.crt
+      DATABASE_USER: vanishr
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?Generate local configuration first}
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Generate local configuration first}
+      TLS_KEYSTORE: file:/tls/relay.p12
+      TLS_KEYSTORE_PASSWORD: ${TLS_KEYSTORE_PASSWORD:?Generate local configuration first}
+      INTERNAL_CA: file:/tls/ca.crt
+      FCM_ENABLED: ${FCM_ENABLED:-false}
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
+    volumes:
+      - ../.secrets/relay.p12:/tls/relay.p12:ro
+      - ../.secrets/ca.crt:/tls/ca.crt:ro
+    depends_on:
+      redis: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "java", "-Xmx48m", "-Dloader.main=app.vanishr.relay.TlsHealthProbe", "-cp", "/app/relay.jar", "org.springframework.boot.loader.launch.PropertiesLauncher"]
+      interval: 10s
+      timeout: 8s
+      retries: 15
+      start_period: 20s
+    networks: [backend, outbound]
+
+volumes:
+  accounts:
+
+networks:
+  backend:
+    internal: true
+  outbound:

@@ -1,0 +1,14 @@
+-keep class org.signal.libsignal.** { *; }
+-keep class app.vanishr.crypto.** { *; }
+-keep class app.vanishr.android.ChatEngine$* { *; }
+-keepattributes Signature,InnerClasses,EnclosingMethod,Record
+-keep class * extends java.lang.Record { *; }
+-keep class androidx.tracing.Trace { *; }
+-keep class kotlin.** { *; }
+-keep class androidx.concurrent.futures.** { *; }
+-keep class com.google.gson.Gson { public *; }
+-keep class com.google.firebase.messaging.RemoteMessage { *; }
+-keep class com.google.firebase.messaging.RemoteMessage$Builder { *; }
+-keep class app.vanishr.android.AndroidVault { *; }
+-keep class app.vanishr.android.RelayApi { *; }
+-keep class app.vanishr.android.PushService { *; }

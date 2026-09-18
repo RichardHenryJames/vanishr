@@ -1,0 +1,33 @@
+services:
+  redis:
+    mem_limit: 80m
+    memswap_limit: 80m
+    command: ["redis-server", "/config/redis.conf", "--maxmemory", "24mb", "--slowlog-log-slower-than", "-1", "--slowlog-max-len", "0"]
+    healthcheck:
+      interval: 30s
+
+  postgres:
+    mem_limit: 128m
+    memswap_limit: 128m
+    environment:
+      POSTGRES_SHARED_BUFFERS: 16MB
+      POSTGRES_WORK_MEM: 1MB
+      POSTGRES_MAINTENANCE_WORK_MEM: 16MB
+      POSTGRES_MAX_CONNECTIONS: 16
+    healthcheck:
+      interval: 30s
+
+  relay:
+    mem_limit: 384m
+    memswap_limit: 384m
+    environment:
+      JAVA_TOOL_OPTIONS: -XX:ActiveProcessorCount=2 -Xms32m -Xmx128m -XX:MaxMetaspaceSize=96m -XX:ReservedCodeCacheSize=32m -XX:MaxDirectMemorySize=64m -Xss512k
+      SERVER_TOMCAT_THREADS_MAX: 12
+      SERVER_TOMCAT_THREADS_MIN_SPARE: 2
+      SERVER_TOMCAT_MAX_CONNECTIONS: 32
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: 3
+      SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: 1
+    healthcheck:
+      interval: 60s
+      timeout: 15s
+      start_period: 90s

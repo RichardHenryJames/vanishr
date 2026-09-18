@@ -1,0 +1,27 @@
+{
+    email {$VANISHR_CERT_EMAIL}
+    http_port 8080
+    https_port 8444
+    auto_https disable_redirects
+    admin off
+    persist_config off
+    log {
+        output discard
+    }
+}
+
+{$VANISHR_HOSTNAME} {
+    header -Server
+    reverse_proxy https://relay:8443 {
+        transport http {
+            tls_server_name relay
+            tls_trust_pool file {
+                pem_file /tls/ca.crt
+            }
+        }
+    }
+}
+
+http://{$VANISHR_HOSTNAME}:8080 {
+    respond "HTTPS required" 426
+}
