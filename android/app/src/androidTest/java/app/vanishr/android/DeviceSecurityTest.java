@@ -31,6 +31,26 @@ public class DeviceSecurityTest {
         assertEquals(android.app.Notification.VISIBILITY_PRIVATE, notification.visibility);
         assertEquals(60_000L, notification.getTimeoutAfter());
         assertTrue(notification.contentIntent.isImmutable());
+        String reference = "a".repeat(43);
+        var routed = new com.google.firebase.messaging.RemoteMessage.Builder("synthetic-sender")
+            .addData("event", "new_message").addData("reference", reference).build();
+        assertTrue(PushService.isWakeSignal(routed));
+        var malformed = new com.google.firebase.messaging.RemoteMessage.Builder("synthetic-sender")
+            .addData("event", "new_message").addData("reference", UUID.randomUUID().toString()).build();
+        assertFalse(PushService.isWakeSignal(malformed));
+        Context context = ApplicationProvider.getApplicationContext();
+        var first = PushService.genericNotification(context, reference);
+        var second = PushService.genericNotification(context, "b".repeat(43));
+        assertNotEquals("A later notification must not retarget an earlier tap", first.contentIntent, second.contentIntent);
+        assertTrue(first.contentIntent.isImmutable());
+        assertEquals("New message", first.extras.getString(android.app.Notification.EXTRA_TEXT));
+        android.content.Intent intent = PushService.notificationIntent(context, reference);
+        assertEquals(PushService.OPEN_NOTIFICATION, intent.getAction());
+        assertEquals(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP, intent.getFlags());
+        assertEquals(reference, intent.getStringExtra(PushService.REFERENCE));
+        assertEquals(reference, intent.getData().getLastPathSegment());
+        assertTrue(intent.getLongExtra(PushService.DEADLINE, 0) <= System.currentTimeMillis() + PushService.ROUTE_LIFETIME);
+        assertEquals(2, intent.getExtras().size());
     }
 
     @Test public void launchedActivityProtectsItsWindowAndHasVisibleControls() {
@@ -85,7 +105,7 @@ public class DeviceSecurityTest {
         java.security.KeyStore keyStore = java.security.KeyStore.getInstance("AndroidKeyStore"); keyStore.load(null);
         var factory = javax.crypto.SecretKeyFactory.getInstance("AES", "AndroidKeyStore");
         var information = (android.security.keystore.KeyInfo) factory.getKeySpec(
-            (javax.crypto.SecretKey) keyStore.getKey(AndroidVault.phoneAlias(AndroidVault.MASTER), null), android.security.keystore.KeyInfo.class);
+            (javax.crypto.SecretKey) keyStore.getKey(AndroidVault.currentAlias(AndroidVault.MASTER), null), android.security.keystore.KeyInfo.class);
         assertFalse("Phone unlock must not require another timed in-app authentication", information.isUserAuthenticationRequired());
         String key = "test/" + UUID.randomUUID();
         byte[] hello = "hello".getBytes(StandardCharsets.UTF_8);
@@ -97,7 +117,7 @@ public class DeviceSecurityTest {
         long deadline = System.currentTimeMillis() + 60_000;
         String alias = AndroidVault.contentAlias(deadline, messageId);
         byte[] encrypted = vault.seal(alias, hello);
-        assertEquals(2, encrypted[0]);
+        assertEquals(AndroidVault.RECORD_VERSION, encrypted[0]);
         assertFalse(new String(encrypted, StandardCharsets.ISO_8859_1).contains("hello"));
         assertArrayEquals(hello, vault.unseal(alias, encrypted));
         AndroidVault.deleteContentKey(deadline, messageId);

@@ -4,7 +4,12 @@ import android.app.Application;
 import com.google.firebase.FirebaseApp;
 import com.google.firebase.FirebaseOptions;
 
-public final class VanishrApplication extends Application {
+public final class VanishrApplication extends Application implements androidx.work.Configuration.Provider {
+    @androidx.annotation.NonNull
+    @Override public androidx.work.Configuration getWorkManagerConfiguration() {
+        return new androidx.work.Configuration.Builder().setMinimumLoggingLevel(android.util.Log.ERROR).build();
+    }
+
     @Override public void onCreate() {
         super.onCreate();
         ExpiryWorker.schedule(this);

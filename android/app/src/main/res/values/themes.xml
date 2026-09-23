@@ -15,9 +15,9 @@
         <item name="colorSurfaceContainerHighest">#F5F8F6</item>
         <item name="android:fontVariationSettings">"'wght' 500"</item>
         <item name="colorOnSurface">#182724</item>
-        <item name="colorOnSurfaceVariant">#5C6C67</item>
-        <item name="colorOutline">#DCE4E0</item>
-        <item name="colorError">#B33C4A</item>
+        <item name="colorOnSurfaceVariant">#67756F</item>
+        <item name="colorOutline">#E2E8E4</item>
+        <item name="colorError">#A63F50</item>
         <item name="android:colorBackground">#F5F8F6</item>
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowLightNavigationBar">true</item>
@@ -41,6 +41,10 @@
     </style>
     <style name="ThemeOverlay.Vanishr.BottomSheet" parent="ThemeOverlay.Material3.BottomSheetDialog">
         <item name="bottomSheetStyle">@style/Widget.Vanishr.BottomSheet</item>
+        <item name="elevationOverlayEnabled">false</item>
+        <item name="android:backgroundDimAmount">0.27</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:navigationBarColor">#FFFFFF</item>
     </style>
     <style name="Widget.Vanishr.BottomSheet" parent="Widget.Material3.BottomSheet.Modal">
         <item name="shapeAppearance">@style/Shape.Vanishr</item>

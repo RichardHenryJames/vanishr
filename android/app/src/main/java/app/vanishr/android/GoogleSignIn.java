@@ -22,6 +22,7 @@ final class GoogleSignIn {
         NO_ACCOUNT("No Google account is available. Add one in your phone settings and try again."),
         UNAVAILABLE("Google sign-in is unavailable. Check Google Play services and try again."),
         INVALID_RESPONSE("Google returned an invalid sign-in response. Try again."),
+        REJECTED("Google sign-in could not be verified. Continue with Google to try again."),
         EXPIRED("Google sign-in expired. Try again."),
         FAILED("Google sign-in could not finish. Try again.");
 
@@ -37,17 +38,21 @@ final class GoogleSignIn {
         return Failure.FAILED;
     }
 
-    static Challenge prepare(String origin, UUID deviceId) throws Exception {
+    static Challenge prepare(String origin) throws Exception {
         try (RelayApi api = new RelayApi(origin, null)) {
-            Challenge challenge = api.call("POST", "/auth/google/challenge", new Start(deviceId), Challenge.class);
-            if (challenge == null || !BuildConfig.GOOGLE_WEB_CLIENT_ID.equals(challenge.clientId())
-                    || challenge.id() == null || !challenge.id().matches("[A-Za-z0-9_-]{43}")
-                    || challenge.nonce() == null || !challenge.nonce().matches("[A-Za-z0-9_-]{43}")
-                    || challenge.expiresAt() <= System.currentTimeMillis()
-                    || challenge.expiresAt() > System.currentTimeMillis() + 330_000)
-                throw new SecurityException("Invalid Google challenge");
-            return challenge;
+            return prepare(api);
         }
+    }
+
+    static Challenge prepare(RelayApi api) throws Exception {
+        Challenge challenge = api.call("POST", "/auth/google/challenge", new Start(null), Challenge.class);
+        if (challenge == null || !BuildConfig.GOOGLE_WEB_CLIENT_ID.equals(challenge.clientId())
+                || challenge.id() == null || !challenge.id().matches("[A-Za-z0-9_-]{43}")
+                || challenge.nonce() == null || !challenge.nonce().matches("[A-Za-z0-9_-]{43}")
+                || challenge.expiresAt() <= System.currentTimeMillis()
+                || challenge.expiresAt() > System.currentTimeMillis() + 330_000)
+            throw new SecurityException("Invalid Google challenge");
+        return challenge;
     }
 
     static CancellationSignal request(Activity activity, Challenge challenge, Callback callback) {

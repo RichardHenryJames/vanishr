@@ -11,7 +11,8 @@ Invoke-WebRequest 'https://raw.githubusercontent.com/google/fonts/main/ofl/manro
 Invoke-WebRequest 'https://cdn.jsdelivr.net/npm/lucide-static@0.468.0/LICENSE' -OutFile (Join-Path $licenses 'LUCIDE-LICENSE.txt')
 $icons = @('arrow-left', 'arrow-up', 'plus', 'lock-keyhole', 'shield-check', 'message-circle', 'image', 'camera',
     'check', 'check-check', 'clock-3', 'eye', 'eye-off', 'settings-2', 'log-out', 'x', 'search', 'chevron-right',
-    'ellipsis-vertical', 'fingerprint', 'wifi-off', 'file-text', 'key-round', 'scan-line', 'bell', 'trash-2', 'circle-alert')
+    'ellipsis-vertical', 'fingerprint', 'wifi-off', 'file-text', 'key-round', 'scan-line', 'bell', 'trash-2', 'circle-alert',
+    'users-round', 'square-pen', 'list-filter', 'user-round-plus')
 $androidNamespace = 'http://schemas.android.com/apk/res/android'
 function Convert-PointList([string]$points) {
     $coordinates = [regex]::Split($points.Trim(), '[,\s]+')

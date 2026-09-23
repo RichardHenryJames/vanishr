@@ -27,6 +27,7 @@ import androidx.test.uiautomator.UiObject2;
 import androidx.test.uiautomator.Until;
 import app.vanishr.crypto.ChatEnvelope;
 import app.vanishr.crypto.ImageCipher;
+import app.vanishr.crypto.ProfileEnvelope;
 import app.vanishr.crypto.SignalClient;
 import org.junit.Assume;
 import org.junit.Test;
@@ -84,13 +85,20 @@ public class ReleaseWorkflowTest {
     }
 
     private void clickIcon(String description) throws Exception {
+        if (description.equals("Profile")) { clickIcon("My profile"); return; }
+        if (description.equals("Add contact")) { clickIcon("New conversation"); awaitText("New conversation"); clickText("Add contact"); return; }
         eventually(() -> {
             java.util.concurrent.atomic.AtomicBoolean clicked = new java.util.concurrent.atomic.AtomicBoolean();
             instrumentation.runOnMainSync(() -> {
                 View control = visibleViews().stream().filter(view -> view.isShown() && view.isEnabled() && view.getWidth() > 0
                         && description.contentEquals(view.getContentDescription() == null ? "" : view.getContentDescription()))
                         .findFirst().orElse(null);
-                if (control != null) clicked.set(control.performClick());
+                if (control != null) {
+                    EditText draft = "Send".equals(description) ? visibleViews().stream().filter(view -> view.isShown() && view instanceof EditText input
+                        && "Message".contentEquals(input.getHint() == null ? "" : input.getHint())).map(view -> (EditText) view).findFirst().orElse(null) : null;
+                    boolean performed = control.performClick();
+                    clicked.set(performed && (!"Send".equals(description) || draft != null && draft.length() == 0));
+                }
             });
             return clicked.get() ? Boolean.TRUE : null;
         });
@@ -111,7 +119,7 @@ public class ReleaseWorkflowTest {
     }
 
     private void awaitText(String text) {
-        boolean visible = device.wait(Until.hasObject(By.text(text)), 30_000);
+        boolean visible = device.wait(Until.hasObject(text.equals("Chats") ? By.desc("New conversation") : By.text(text)), 30_000);
         if (!visible) {
             try { capture("99-release-expected-screen-missing"); }
             catch (Exception ignored) { }
@@ -129,7 +137,50 @@ public class ReleaseWorkflowTest {
         awaitText("Chats");
     }
 
-    private void verifyContactByUsername(String handle, String independentlyVerifiedNumber) throws Exception {
+    private void signOutFromChats() throws Exception {
+        clickIcon("Profile"); clickText("Sign out"); awaitText("Sign out of this device?"); clickText("Sign out"); awaitText("Continue with Google");
+    }
+
+    private void acceptGroupConsent(String title) {
+        awaitText(title);
+        instrumentation.waitForIdleSync();
+        instrumentation.runOnMainSync(() -> visibleViews().stream().filter(view -> view.isShown() && view.isEnabled() && view instanceof CheckBox)
+                .map(view -> (CheckBox)view).findFirst().orElseThrow().setChecked(true));
+    }
+
+    private void groupWorkflow(String ownerHandle,String ownerPassword,String memberHandle,String memberPassword) throws Exception {
+        clickIcon("New group"); fill("Group name","Release group"); acceptGroupConsent("New group"); clickText("Create");
+        awaitText("Invite members"); clickPopupItem("Receiver profile (@"+memberHandle+")");
+        eventually(() -> {
+            var selected = new java.util.concurrent.atomic.AtomicBoolean();
+            instrumentation.runOnMainSync(() -> selected.set(visibleViews().stream().anyMatch(view -> view.isShown()
+                && view instanceof android.widget.CheckedTextView choice && choice.isChecked()
+                && ("Receiver profile (@" + memberHandle + ")").contentEquals(choice.getText()))));
+            return selected.get() ? Boolean.TRUE : null;
+        });
+        clickPopupItem("Invite");
+        awaitText("Group info"); awaitText("2 / 200 members"); capture("16-group-created"); clickText("Done");
+        clickIcon("Back"); signOutFromChats(); signInSavedAccount(memberHandle,memberPassword);
+        awaitText("Release group"); clickText("Release group"); acceptGroupConsent("Group invitation"); clickText("Accept");
+        awaitText("Your private group"); capture("17-group-accepted"); clickIcon("Back"); signOutFromChats();
+        signInSavedAccount(ownerHandle,ownerPassword); clickText("Release group");
+        awaitText("2 members"); fill("Message","Encrypted group hello"); clickIcon("Send");
+        awaitText("0 delivered / 0 of 1 read"); capture("18-group-sent"); clickIcon("Back"); signOutFromChats();
+        signInSavedAccount(memberHandle,memberPassword); clickText("Release group"); awaitText("Encrypted group hello");
+        fill("Message","Encrypted group reply"); clickIcon("Send"); awaitText("0 delivered / 0 of 1 read"); capture("19-group-received");
+        clickIcon("Back"); signOutFromChats(); signInSavedAccount(ownerHandle,ownerPassword); clickText("Release group");
+        awaitText("Encrypted group reply"); awaitText("1 delivered / 1 of 1 read");
+        clickIcon("Conversation options"); clickPopupItem("Group info"); awaitText("Group info");
+        clickIcon("Remove Receiver profile"); awaitText("Remove member?"); clickText("Remove"); awaitText("1 / 200 members");
+        clickText("Done"); clickIcon("Back"); signOutFromChats(); signInSavedAccount(memberHandle,memberPassword);
+        assertTrue("Removed membership must disappear after synchronization",device.wait(Until.gone(By.text("Release group")),30_000));
+        signOutFromChats(); signInSavedAccount(ownerHandle,ownerPassword); clickText("Release group");
+        clickIcon("Conversation options"); clickPopupItem("Group info"); awaitText("Group info"); awaitText("Close group");
+        clickText("Close group"); awaitText("Close group?"); clickText("Close group");
+        awaitText("Chats"); assertFalse(device.hasObject(By.text("Release group"))); capture("20-group-closed");
+    }
+
+    private void verifyContactByUsername(String handle, String independentlyVerifiedNumber, String displayName) throws Exception {
         clickIcon("Add contact");
         fill("Username", handle);
         clickText("Find");
@@ -144,7 +195,8 @@ public class ReleaseWorkflowTest {
         });
         clickText("Add contact");
         assertTrue("Contact verification must finish before opening the contact", device.wait(Until.gone(By.text("Verify contact")), 30_000));
-        awaitText("@" + handle);
+        awaitText(displayName);
+        assertFalse(device.hasObject(By.text("@" + handle)));
     }
 
     private void setContactDisplayName(String name, String username, String profileName) throws Exception {
@@ -265,6 +317,167 @@ public class ReleaseWorkflowTest {
         return values.length == 0 ? "MISSING" : values[0].state();
     }
 
+    private ProfileEnvelope awaitProfilePacket(Peer peer, UUID sender, ProfileEnvelope.Action action, UUID requestId) throws Exception {
+        return eventually(() -> {
+            ProfileEnvelope matching = null;
+            for (ProfilePhotos.Packet packet : peer.api().call("GET", "/profile/packets", null, ProfilePhotos.Packet[].class)) {
+                assertEquals(sender, packet.senderId());
+                byte[] plaintext = peer.crypto().decrypt(sender, new SignalClient.Packet(packet.type(), packet.ciphertext()));
+                ProfileEnvelope envelope;
+                try { envelope = RelayApi.JSON.fromJson(new String(plaintext, StandardCharsets.UTF_8), ProfileEnvelope.class); }
+                finally { Arrays.fill(plaintext, (byte) 0); }
+                envelope.verify(packet.id(), sender, packet.senderDeviceId(), peer.session().userId(), peer.session().deviceId(), packet.expiresAt(), Instant.now());
+                peer.api().call("DELETE", "/profile/packets/" + packet.id(), null, Void.class);
+                if (envelope.action() == action && (requestId == null || requestId.equals(envelope.requestId()))) matching = envelope;
+            }
+            return matching;
+        });
+    }
+
+    private void sendProfilePacket(Peer peer, ChatEngine.Contact recipient, ProfileEnvelope.Action action,
+                                   UUID requestId, long revision, byte[] photo, long deadline) throws Exception {
+        UUID id = action == ProfileEnvelope.Action.REQUEST ? requestId : UUID.randomUUID();
+        ChatEnvelope context = new ChatEnvelope(1, id, peer.session().userId(), peer.session().deviceId(), recipient.userId(),
+                recipient.deviceId(), System.currentTimeMillis(), deadline, ChatEnvelope.Expiry.HOURS_24, "profile-photo", null);
+        byte[] plaintext = RelayApi.JSON.toJson(new ProfileEnvelope(1, action, requestId, revision, photo, context)).getBytes(StandardCharsets.UTF_8);
+        SignalClient.Packet encrypted;
+        try { encrypted = peer.crypto().encrypt(recipient.userId(), plaintext, Instant.now()); }
+        finally { Arrays.fill(plaintext, (byte) 0); }
+        peer.api().call("POST", "/profile/packets", new ProfilePhotos.Send(id, recipient.userId(), recipient.deviceId(), deadline,
+                encrypted.type(), encrypted.ciphertext()), Void.class);
+    }
+
+    private void awaitPhotoAvatar(boolean expected) throws Exception {
+        eventually(() -> {
+            var visible = new java.util.concurrent.atomic.AtomicBoolean();
+            instrumentation.runOnMainSync(() -> visible.set(visibleViews().stream().anyMatch(view -> view.isShown()
+                    && view instanceof android.widget.ImageView image && image.getDrawable() instanceof android.graphics.drawable.BitmapDrawable)));
+            return visible.get() == expected ? Boolean.TRUE : null;
+        });
+    }
+
+    private void presenceWorkflow(Peer peer, ChatEngine.Contact own) throws Exception {
+        var connected = new java.util.concurrent.atomic.AtomicBoolean();
+        try (RelayApi connection = new RelayApi(peer.api().origin(), peer.session().accessToken())) {
+            connection.events(() -> { }, connected::set);
+            eventually(() -> connected.get() ? Boolean.TRUE : null);
+            eventually(() -> {
+                ContactPresence.Status[] status = peer.api().presence(new ContactPresence.Update(List.of(own), null, 0));
+                return Arrays.stream(status).anyMatch(value -> value.peer().equals(own) && value.onlineForMillis() > 0) ? Boolean.TRUE : null;
+            });
+            awaitText("Online"); capture("26-release-peer-online");
+            peer.api().presence(new ContactPresence.Update(List.of(own), own.userId(), 5000));
+            assertTrue("Peer typing must be visible in this chat", device.wait(Until.hasObject(By.text("Typing")), 7000));
+            capture("27-release-peer-typing");
+            peer.api().presence(new ContactPresence.Update(List.of(own), null, 0));
+            awaitText("Online");
+            instrumentation.runOnMainSync(() -> {
+                EditText input = visibleViews().stream().filter(view -> view instanceof EditText field && "Message".contentEquals(field.getHint()))
+                        .map(view -> (EditText) view).findFirst().orElseThrow();
+                input.requestFocus(); input.setText("Unsent presence fixture");
+            });
+            eventually(() -> {
+                ContactPresence.Status[] status = peer.api().presence(new ContactPresence.Update(List.of(own), null, 0));
+                return Arrays.stream(status).anyMatch(value -> value.peer().equals(own) && value.typingForMillis() > 0) ? Boolean.TRUE : null;
+            });
+            fill("Message", "");
+            assertEquals(0, peer.api().call("GET", "/messages/pending", null, ChatEngine.Incoming[].class).length);
+        }
+        assertTrue("Disconnected peer status must disappear", device.wait(Until.gone(By.text("Online")), 15_000));
+        assertFalse(device.hasObject(By.text("Typing")));
+        assertFalse(device.hasObject(By.text("Connected")));
+        capture("28-release-peer-offline-name-only");
+    }
+
+    private void profilePhotoWorkflow(Peer peer, ChatEngine.Contact own) throws Exception {
+        ProfileEnvelope request = awaitProfilePacket(peer, own.userId(), ProfileEnvelope.Action.REQUEST, null);
+        Bitmap bitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888); bitmap.eraseColor(Color.rgb(43, 121, 103));
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        assertTrue(bitmap.compress(Bitmap.CompressFormat.JPEG, 85, bytes)); bitmap.recycle();
+        byte[] photo = bytes.toByteArray();
+        long deadline = Math.min(request.message().expiresAt(), System.currentTimeMillis() + 180_000);
+        try {
+            UUID mutualRequest = UUID.randomUUID();
+            sendProfilePacket(peer, own, ProfileEnvelope.Action.REQUEST, mutualRequest, 0, null, deadline);
+            ProfileEnvelope response = awaitProfilePacket(peer, own.userId(), ProfileEnvelope.Action.UPDATE, mutualRequest);
+            assertNull("The owner's unset photo must be returned only as an encrypted empty update", response.photo());
+            sendProfilePacket(peer, own, ProfileEnvelope.Action.UPDATE, request.requestId(), 1, photo, deadline);
+            awaitPhotoAvatar(true); capture("21-release-private-profile-photo");
+            assertEquals(0, peer.api().call("GET", "/messages/pending", null, ChatEngine.Incoming[].class).length);
+            var publicProfile = peer.api().call("GET", "/users/id/" + own.userId() + "/profile", null, java.util.Map.class);
+            assertFalse(publicProfile.containsKey("photo")); assertFalse(publicProfile.containsKey("photoUrl"));
+            sendProfilePacket(peer, own, ProfileEnvelope.Action.UPDATE, request.requestId(), 2, null, deadline);
+            awaitPhotoAvatar(false); capture("22-release-profile-photo-removed");
+        } finally { Arrays.fill(photo, (byte) 0); }
+    }
+
+    private void notificationWorkflow(ActivityScenario<MainActivity> scenario, Peer peer, ChatEngine.Incoming previous) throws Exception {
+        Context context = instrumentation.getTargetContext();
+        assertTrue("The signed test requires configured Firebase messaging", !BuildConfig.FIREBASE_APP_ID.isEmpty()
+            && !BuildConfig.FIREBASE_API_KEY.isEmpty() && !BuildConfig.FIREBASE_PROJECT_ID.isEmpty() && !BuildConfig.FIREBASE_SENDER_ID.isEmpty());
+        if (android.os.Build.VERSION.SDK_INT >= 33) assertEquals("The app's permission dialog must have granted notifications",
+            android.content.pm.PackageManager.PERMISSION_GRANTED, context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS));
+        clickIcon("Back"); awaitText("Chats");
+        scenario.moveToState(Lifecycle.State.CREATED);
+        ChatEngine.Account account;
+        try (AndroidVault stored = new AndroidVault(context)) {
+            stored.unlock(); byte[] encoded = stored.get("account");
+            try { account = RelayApi.JSON.fromJson(new String(encoded, StandardCharsets.UTF_8), ChatEngine.Account.class); }
+            finally { Arrays.fill(encoded, (byte) 0); }
+        }
+        var preferences = context.getSharedPreferences("preferences", Context.MODE_PRIVATE);
+        assertFalse("Default-on behavior must not depend on a manually saved notification choice", preferences.contains("notifications"));
+        android.app.NotificationManager notifications = context.getSystemService(android.app.NotificationManager.class);
+        notifications.cancelAll();
+        try (RelayApi registration = new RelayApi(account.origin(), account.accessToken())) {
+            scenario.moveToState(Lifecycle.State.RESUMED); awaitText("Chats");
+            clickIcon("Profile"); awaitText("My profile");
+            instrumentation.runOnMainSync(() -> {
+                List<android.widget.CompoundButton> controls = visibleViews().stream().filter(view -> view.isShown() && view instanceof android.widget.CompoundButton)
+                    .map(view -> (android.widget.CompoundButton) view).toList();
+                assertEquals("My profile must have exactly one notification toggle", 1, controls.size());
+                android.widget.CompoundButton control = controls.get(0);
+                assertTrue("Notifications must be available in the signed app", control.isEnabled());
+                assertTrue("Notifications must already be on without toggling the setting", control.isChecked());
+            });
+            assertTrue("Notification registration must finish before testing provider delivery", device.wait(Until.hasObject(By.text("Notifications ready")), 60_000));
+            clickText("Close"); awaitText("Chats");
+            scenario.moveToState(Lifecycle.State.CREATED);
+            try {
+                UUID messageId = UUID.randomUUID();
+                long created = System.currentTimeMillis(); long deadline = created + 180_000;
+                ChatEnvelope envelope = new ChatEnvelope(1, messageId, peer.session().userId(), peer.session().deviceId(), previous.senderId(), previous.senderDeviceId(),
+                        created, deadline, ChatEnvelope.Expiry.HOUR_1, "Notification tap verification", null);
+                byte[] plaintext = RelayApi.JSON.toJson(envelope).getBytes(StandardCharsets.UTF_8);
+                SignalClient.Packet packet;
+                try { packet = peer.crypto().encrypt(previous.senderId(), plaintext, Instant.now()); }
+                finally { Arrays.fill(plaintext, (byte) 0); }
+                ChatEngine.Send message = new ChatEngine.Send(messageId, previous.senderId(), previous.senderDeviceId(), ChatEnvelope.Expiry.HOUR_1,
+                        deadline, packet.type(), packet.ciphertext(), null);
+                var nextSend = new java.util.concurrent.atomic.AtomicLong();
+                eventually(() -> {
+                    if (Arrays.stream(notifications.getActiveNotifications()).anyMatch(notification -> "vanishr-new".equals(notification.getTag()))) return Boolean.TRUE;
+                    long now = System.currentTimeMillis();
+                    if (now >= nextSend.get()) { nextSend.set(now + 5000); peer.api().call("POST", "/messages", message, ChatEngine.Status.class); }
+                    return null;
+                });
+                assertTrue(device.openNotification());
+                UiObject2 alert = device.wait(Until.findObject(By.text("New message")), 10_000);
+                assertNotNull("Actual FCM delivery must produce the generic notification", alert);
+                assertTrue(Arrays.stream(notifications.getActiveNotifications()).anyMatch(notification -> "vanishr-new".equals(notification.getTag())));
+                alert.click();
+                awaitText("Notification tap verification");
+                assertTrue("Notification tap must open a conversation, not its list", device.hasObject(By.desc("Conversation options")));
+                assertEquals("READ", eventually(() -> "READ".equals(status(peer, messageId)) ? "READ" : null));
+                capture("24-release-fcm-notification-chat");
+            } finally {
+                assertTrue(preferences.edit().putBoolean("notifications", false).commit());
+                registration.call("DELETE", "/devices/push", null, Void.class);
+                notifications.cancelAll();
+            }
+        }
+    }
+
     @Test public void signedReleaseUsesRealCredentialsAndExchangesEncryptedContentThroughItsUi() throws Exception {
         Bundle arguments = InstrumentationRegistry.getArguments();
         Assume.assumeTrue("Explicit opt-in is required for synthetic accounts on the live relay", "true".equals(arguments.getString("releaseLive")));
@@ -276,6 +489,9 @@ public class ReleaseWorkflowTest {
         assertTrue("A temporary dedicated-emulator credential is required", pin != null && pin.matches("[0-9]{6}"));
         assertTrue(context.getSystemService(KeyguardManager.class).isDeviceSecure());
         assertEquals(arguments.getString("relayOrigin"), BuildConfig.DEFAULT_RELAY_ORIGIN);
+        if ("true".equals(arguments.getString("releasePush")) && android.os.Build.VERSION.SDK_INT >= 33)
+            assertEquals("The dedicated permission fixture must start without notification permission", android.content.pm.PackageManager.PERMISSION_DENIED,
+                context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS));
         device.wakeUp();
         KeyguardManager keyguard = context.getSystemService(KeyguardManager.class);
         if (keyguard.isDeviceLocked()) {
@@ -296,6 +512,23 @@ public class ReleaseWorkflowTest {
             fill("Username", handle);
             fill("Password", password);
             clickText("Create account");
+            if (android.os.Build.VERSION.SDK_INT >= 33 && !BuildConfig.FIREBASE_APP_ID.isEmpty()
+                    && context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                UiObject2 allow = device.wait(Until.findObject(By.res(java.util.regex.Pattern.compile(".*:id/permission_allow_button"))), 30_000);
+                assertNotNull("Default-on notifications must request Android permission after sign-in", allow);
+                device.waitForIdle();
+                allow.click();
+                try {
+                    assertTrue("Android notification permission dialog must dismiss after Allow", device.wait(Until.gone(
+                            By.res(java.util.regex.Pattern.compile(".*:id/permission_allow_button"))), 10_000));
+                    eventually(() -> context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == android.content.pm.PackageManager.PERMISSION_GRANTED ? Boolean.TRUE : null);
+                } catch (Exception | AssertionError failure) {
+                    File directory = new File(context.getExternalFilesDir(null), "release-check");
+                    assertTrue(directory.isDirectory() || directory.mkdirs());
+                    device.takeScreenshot(new File(directory, "25-notification-permission-failure.png"));
+                    throw failure;
+                }
+            }
             awaitText("Chats");
             capture("03-release-chats");
             clickIcon("Profile");
@@ -342,6 +575,9 @@ public class ReleaseWorkflowTest {
             peer.api().call("POST", "/messages/" + outgoing.id() + "/read", null, Void.class);
             assertTrue(device.wait(Until.hasObject(By.desc("READ")), 30_000));
             capture("04-release-text-receipt");
+            profilePhotoWorkflow(peer, own);
+            if ("true".equals(arguments.getString("releasePush"))) notificationWorkflow(scenario, peer, outgoing);
+            presenceWorkflow(peer, own);
             Bitmap bitmap = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888);
             bitmap.eraseColor(Color.rgb(37, 112, 91));
             ByteArrayOutputStream encoded = new ByteArrayOutputStream();
@@ -388,6 +624,56 @@ public class ReleaseWorkflowTest {
             awaitText(peer.handle());
             assertFalse("Phone unlock must be sufficient", device.hasObject(By.text("Unlock Vanishr")));
             capture("08b-release-phone-unlock");
+            scenario.moveToState(Lifecycle.State.CREATED);
+            ChatEngine.Account expired;
+            AndroidVault savedVault = new AndroidVault(context);
+            try {
+                savedVault.unlock();
+                byte[] savedAccount = savedVault.get("account");
+                try { expired = RelayApi.JSON.fromJson(new String(savedAccount, StandardCharsets.UTF_8), ChatEngine.Account.class); }
+                finally { Arrays.fill(savedAccount, (byte) 0); }
+                assertNotNull("Signed device sessions must include encrypted remembered sign-in", expired.refreshToken());
+                ChatEngine.Account due = new ChatEngine.Account(expired.origin(), expired.handle(), expired.userId(), expired.deviceId(), expired.accessToken(),
+                        System.currentTimeMillis() - 1000, true, expired.refreshToken(), expired.refreshExpiresAt());
+                byte[] encodedAccount = RelayApi.JSON.toJson(due).getBytes(StandardCharsets.UTF_8);
+                try { savedVault.transaction(() -> { savedVault.put("account", encodedAccount); return null; }); }
+                finally { Arrays.fill(encodedAccount, (byte) 0); }
+            } finally { savedVault.close(); }
+            ChatEngine.Account beforeRenewal = expired;
+            scenario.moveToState(Lifecycle.State.RESUMED);
+            awaitText(peer.handle());
+            assertFalse("Ordinary token expiry must not require another password", device.hasObject(By.text("Welcome back.")));
+            fill("Message", "Remembered session renewed"); clickIcon("Send");
+            ChatEngine.Incoming renewedMessage = eventually(() -> {
+                ChatEngine.Incoming[] pending = peer.api().call("GET", "/messages/pending", null, ChatEngine.Incoming[].class);
+                return pending.length == 0 ? null : pending[0];
+            });
+            byte[] renewedPlaintext = peer.crypto().decrypt(own.userId(), new SignalClient.Packet(renewedMessage.type(), renewedMessage.ciphertext()));
+            try { assertEquals("Remembered session renewed", RelayApi.JSON.fromJson(new String(renewedPlaintext, StandardCharsets.UTF_8), ChatEnvelope.class).text()); }
+            finally { Arrays.fill(renewedPlaintext, (byte) 0); }
+            peer.api().call("POST", "/messages/" + renewedMessage.id() + "/read", null, Void.class);
+            capture("23-release-remembered-session-renewed");
+            scenario.moveToState(Lifecycle.State.CREATED);
+            AndroidVault renewedVault = new AndroidVault(context);
+            try {
+                renewedVault.unlock();
+                byte[] savedAccount = renewedVault.get("account");
+                try { expired = RelayApi.JSON.fromJson(new String(savedAccount, StandardCharsets.UTF_8), ChatEngine.Account.class); }
+                finally { Arrays.fill(savedAccount, (byte) 0); }
+                assertNotEquals(beforeRenewal.refreshToken(), expired.refreshToken());
+                assertEquals(beforeRenewal.deviceId(), expired.deviceId());
+                assertNull(renewedVault.get("session-renewal"));
+            } finally { renewedVault.close(); }
+            try (RelayApi rejected = new RelayApi(expired.origin(), expired.accessToken())) { rejected.call("POST", "/auth/logout", null, Void.class); }
+            scenario.moveToState(Lifecycle.State.RESUMED);
+            awaitText("Welcome back.");
+            assertFalse(device.hasObject(By.text("Sign out of this device?")));
+            fill("Username", handle); fill("Password", password); clickText("Sign in");
+            awaitText(peer.handle());
+            assertEquals("Session recovery must preserve the same registered device and public key", own,
+                peer.api().call("GET", "/users/" + handle, null, ChatEngine.Contact.class));
+            assertFalse("Session recovery must not resurrect consumed content", device.hasObject(By.text("One-time release verification")));
+            capture("08c-release-session-recovery");
                 clickIcon("Back");
                 clickIcon("Profile");
                 fill("Display name", "Release profile");
@@ -434,8 +720,8 @@ public class ReleaseWorkflowTest {
                 capture("11-release-another-account");
                 assertFalse(device.hasObject(By.text("Queued while this account is signed out")));
                 ChatEngine.Contact anotherDevice = peer.api().call("GET", "/users/" + anotherHandle, null, ChatEngine.Contact.class);
-                verifyContactByUsername(renamedHandle, identity[0]);
-                clickText("@" + renamedHandle);
+                verifyContactByUsername(renamedHandle, identity[0], "Release profile");
+                clickText("Release profile");
                 setContactDisplayName("xyz", renamedHandle, "Release profile");
                 capture("15-release-contact-display-name");
                 clickIcon("Back");
@@ -459,8 +745,8 @@ public class ReleaseWorkflowTest {
                 assertEquals("READ", eventually(() -> "READ".equals(status(peer, waitingMessage)) ? "READ" : null));
                 assertFalse(device.hasObject(By.text("One-time release verification")));
                 clickIcon("Back");
-                verifyContactByUsername(anotherHandle, switchedIdentity[0]);
-                clickText("@" + anotherHandle);
+                verifyContactByUsername(anotherHandle, switchedIdentity[0], "Receiver profile");
+                clickText("Receiver profile");
                 setContactDisplayName("abc", anotherHandle, "Receiver profile");
                 fill("Message", "Account-switch delivery");
                 clickIcon("Send");
@@ -492,7 +778,7 @@ public class ReleaseWorkflowTest {
                 awaitText("abc");
                 clickText("abc");
                 awaitText("Account-switch delivery");
-                awaitText("@" + renamedOtherHandle);
+                assertFalse(device.hasObject(By.text("@" + renamedOtherHandle)));
                 assertTrue(device.hasObject(By.text("abc")));
                 assertTrue("The sender's retained copy must show the receiver's receipt", device.wait(Until.hasObject(By.desc("READ")), 30_000));
                 capture("14-release-retained-sender-copy");
@@ -500,11 +786,13 @@ public class ReleaseWorkflowTest {
                 clickPopupItem("Profile");
                 awaitText("Contact profile");
                 awaitText("Receiver profile");
+                awaitText("@" + renamedOtherHandle);
                 clickText("Use profile name");
                 assertTrue("Contact profile must close after restoring the profile name", device.wait(Until.gone(By.text("Contact profile")), 30_000));
                 awaitText("Receiver profile");
                 assertEquals("Release profile", peer.api().call("GET", "/users/id/" + own.userId() + "/profile", null, ChatEngine.Profile.class).displayName());
                 clickIcon("Back");
+                groupWorkflow(renamedHandle,password,renamedOtherHandle,anotherPassword);
                 clickIcon("Profile");
                 clickText("Sign out");
                 awaitText("Sign out of this device?");

@@ -21,25 +21,36 @@ import com.google.android.material.textfield.TextInputLayout;
 final class Ui {
     static final int INK = Color.rgb(24, 39, 36);
     static final int PRIMARY = Color.rgb(20, 108, 88);
-    static final int MUTED = Color.rgb(92, 108, 103);
+    static final int MUTED = Color.rgb(103, 117, 111);
     static final int CANVAS = Color.rgb(245, 248, 246);
     static final int SURFACE = Color.WHITE;
-    static final int LINE = Color.rgb(220, 228, 224);
+    static final int LINE = Color.rgb(226, 232, 228);
     static final int TINT = Color.rgb(221, 241, 233);
     static final int BLUE = Color.rgb(53, 92, 190);
     static final int BLUE_TINT = Color.rgb(232, 237, 250);
-    static final int ERROR = Color.rgb(179, 60, 74);
-    static final int ERROR_TINT = Color.rgb(253, 238, 240);
-    static final int WARM = Color.rgb(168, 81, 53);
+    static final int ERROR = Color.rgb(166, 63, 80);
+    static final int ERROR_TINT = Color.rgb(252, 238, 240);
+    static final int WARM = Color.rgb(137, 107, 25);
     private final Context context;
     private final Typeface face;
-    record Field(TextInputLayout layout, TextInputEditText input) { }
+    private final android.util.SparseArray<Typeface> fonts = new android.util.SparseArray<>();
+    record Field(TextInputLayout layout, TextInputEditText input, LinearLayout view) { }
 
     Ui(Context context) { this.context = context; this.face = context.getResources().getFont(R.font.manrope); }
 
     int dp(int value) { return Math.round(value * context.getResources().getDisplayMetrics().density); }
 
-    Typeface font(int weight) { return Typeface.create(face, weight, false); }
+    Typeface font(int weight) {
+        Typeface result = fonts.get(weight);
+        if (result == null) {
+            android.graphics.Paint paint = new android.graphics.Paint();
+            paint.setTypeface(face);
+            paint.setFontVariationSettings("'wght' " + weight);
+            result = paint.getTypeface();
+            fonts.put(weight, result);
+        }
+        return result;
+    }
 
     TextView text(String value, int size, int weight, int color) {
         TextView text = new TextView(context);
@@ -72,16 +83,16 @@ final class Ui {
         MaterialButton button = new MaterialButton(context);
         button.setText(label);
         button.setAllCaps(false);
-        button.setTextSize(15);
+        button.setTextSize(13);
         button.setTypeface(font(700));
         button.setFontVariationSettings("'wght' 700");
         button.setLetterSpacing(0);
-        button.setCornerRadius(dp(8));
+        button.setCornerRadius(dp(6));
         button.setInsetTop(0);
         button.setInsetBottom(0);
-        button.setMinHeight(dp(52));
-        button.setMinimumHeight(dp(52));
-        button.setPadding(dp(20), dp(10), dp(20), dp(10));
+        button.setMinHeight(dp(44));
+        button.setMinimumHeight(dp(44));
+        button.setPadding(dp(17), dp(10), dp(17), dp(10));
         button.setBackgroundTintList(new ColorStateList(new int[][]{new int[]{-android.R.attr.state_enabled}, new int[]{android.R.attr.state_checked}, new int[]{}},
             new int[]{LINE, TINT, primary ? PRIMARY : SURFACE}));
         ColorStateList foreground = new ColorStateList(new int[][]{new int[]{-android.R.attr.state_enabled}, new int[]{}},
@@ -111,11 +122,11 @@ final class Ui {
             default -> resource;
         });
         button.setColorFilter(INK);
-        button.setPadding(dp(13), dp(13), dp(13), dp(13));
+        button.setPadding(dp(12), dp(12), dp(12), dp(12));
         button.setBackground(feedback(Color.TRANSPARENT, 24));
         button.setContentDescription(name);
         button.setTooltipText(name);
-        button.setLayoutParams(new LinearLayout.LayoutParams(dp(48), dp(48)));
+        button.setLayoutParams(new LinearLayout.LayoutParams(dp(44), dp(44)));
         button.setFilterTouchesWhenObscured(true);
         button.setSaveEnabled(false);
         button.setOnClickListener(view -> action.run());
@@ -134,12 +145,24 @@ final class Ui {
     TextView avatar(String name, int size, int color) {
         String trimmed = name.strip();
         String initials = trimmed.isEmpty() ? "?" : trimmed.substring(0, trimmed.offsetByCodePoints(0, 1)).toUpperCase(java.util.Locale.ROOT);
-        TextView avatar = text(initials, size >= 64 ? 25 : 18, 700, color);
+        TextView avatar = text(initials, size >= 64 ? 25 : size <= 40 ? 13 : 16, 800, color);
         avatar.setGravity(Gravity.CENTER);
-        avatar.setBackground(background(color == BLUE ? BLUE_TINT : TINT, size / 2, 0));
+        avatar.setBackground(background(color == BLUE ? BLUE_TINT : color == ERROR ? ERROR_TINT : color == WARM ? Color.rgb(247, 239, 214) : TINT, size / 2, 0));
         avatar.setLayoutParams(new LinearLayout.LayoutParams(dp(size), dp(size)));
         avatar.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         return avatar;
+    }
+
+    int avatarColor(java.util.UUID id) {
+        return switch (Math.floorMod(id.hashCode(), 4)) { case 0 -> PRIMARY; case 1 -> BLUE; case 2 -> ERROR; default -> WARM; };
+    }
+
+    ImageView groupAvatar(int size, int color) {
+        ImageView image = symbol(R.drawable.ic_users_round, size, color);
+        int inset = Math.max(6, (size - 23) / 2);
+        image.setPadding(dp(inset), dp(inset), dp(inset), dp(inset));
+        image.setBackground(background(color == BLUE ? BLUE_TINT : TINT, 8, 0));
+        return image;
     }
 
     View spacer(int height) {
@@ -158,10 +181,14 @@ final class Ui {
     }
 
     Field field(String name, int type) {
+        LinearLayout container = new LinearLayout(context); container.setOrientation(LinearLayout.VERTICAL); container.setSaveEnabled(false);
+        TextView label = text(name, 11, 700, MUTED);
+        LinearLayout.LayoutParams labelSize = new LinearLayout.LayoutParams(-1, -2); labelSize.bottomMargin = dp(7);
+        container.addView(label, labelSize);
         TextInputLayout wrapper = new TextInputLayout(context);
-        wrapper.setHint(name);
+        wrapper.setHintEnabled(false);
         wrapper.setBoxBackgroundMode(TextInputLayout.BOX_BACKGROUND_OUTLINE);
-        wrapper.setBoxCornerRadii(dp(8), dp(8), dp(8), dp(8));
+        wrapper.setBoxCornerRadii(dp(6), dp(6), dp(6), dp(6));
         wrapper.setBoxBackgroundColor(SURFACE);
         wrapper.setBoxStrokeColor(PRIMARY);
         wrapper.setDefaultHintTextColor(ColorStateList.valueOf(MUTED));
@@ -170,20 +197,21 @@ final class Ui {
         wrapper.setSaveEnabled(false);
         TextInputEditText input = new TextInputEditText(wrapper.getContext());
         input.setInputType(type);
-        input.setTextSize(15);
+        input.setTextSize(14); input.setHint(name); input.setId(View.generateViewId());
         input.setTypeface(font(500));
         input.setFontVariationSettings("'wght' 500");
         input.setTextColor(INK);
         input.setLetterSpacing(0);
-        input.setPadding(dp(16), dp(18), dp(16), dp(18));
-        input.setMinHeight(dp(58));
+        input.setPadding(dp(12), dp(10), dp(12), dp(10));
+        input.setMinHeight(dp(48));
         input.setSaveEnabled(false);
         input.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
         input.setImeOptions(EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
         input.setFilterTouchesWhenObscured(true);
         if ((type & InputType.TYPE_TEXT_FLAG_MULTI_LINE) == 0) input.setSingleLine(true);
         wrapper.addView(input, new LinearLayout.LayoutParams(-1, -2));
-        return new Field(wrapper, input);
+        container.addView(wrapper, new LinearLayout.LayoutParams(-1, -2)); label.setLabelFor(input.getId());
+        return new Field(wrapper, input, container);
     }
 
     void inlineSave(Field field, String name, Runnable action) {

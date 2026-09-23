@@ -1,0 +1,23 @@
+# Vanishr
+
+> Vanishr is an independent, open-source Android development app for end-to-end encrypted disappearing text, photos and invite-only groups. It is not independently security-audited and is not recommended for real sensitive conversations yet.
+
+## Official public pages
+
+- [Vanishr](https://vanishr-download.vercel.app/): Product overview and current development status.
+- [Android download](https://vanishr-download.vercel.app/android/): Signed APK, requirements, installation, checksums, current release and matching source.
+- [Security model](https://vanishr-download.vercel.app/security/): Encryption, independent contact verification, expiry, metadata and limitations.
+- [Website privacy](https://vanishr-download.vercel.app/privacy/): Website-only opt-in analytics, hosting data and consent controls.
+
+## Important distinctions
+
+- Android 9 or later with a phone screen lock is required. There is no iOS or browser chat client.
+- Direct messages use official libsignal sessions; private groups use libsignal sender keys with explicit verified-owner trust. Vanishr is not affiliated with or endorsed by Signal or Google.
+- Usernames discover contacts but do not prove identity. Independent safety-number verification is required.
+- Profile photos are exchanged only by mutually added, verified direct contacts. They never appear in username search. Group membership alone grants no photo access.
+- View-once and timed expiry cannot stop a malicious recipient from preserving a copy. Do not describe disappearing messages as impossible to save.
+- The relay sees account/routing metadata and ciphertext, not client plaintext or private decryption keys.
+- The Android app has no analytics SDK. Optional website analytics is a separate consent choice and receives no chat data.
+- The matching release source archive is authoritative for a signed APK; repository HEAD may lag. Functional tests are not an independent security audit.
+
+This optional summary helps readers locate public facts. It is not a special indexing protocol or a guarantee of inclusion in AI answers.

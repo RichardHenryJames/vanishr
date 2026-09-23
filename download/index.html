@@ -3,44 +3,87 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="robots" content="noindex, nofollow">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <meta name="description" content="Vanishr is an Android app for end-to-end encrypted disappearing messages, photos and private groups. Explore its privacy model and download the signed development build.">
   <meta name="referrer" content="no-referrer">
-  <title>Vanishr | Android Download</title>
+  <title>Vanishr | Encrypted Disappearing Chat for Android</title>
+  <link rel="canonical" href="https://vanishr-download.vercel.app/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Vanishr">
+  <meta property="og:title" content="Vanishr | Encrypted Disappearing Chat for Android">
+  <meta property="og:description" content="Private chats, disappearing messages and invite-only groups. Explore the Android app and its privacy boundaries.">
+  <meta property="og:url" content="https://vanishr-download.vercel.app/">
+  <meta property="og:image" content="https://vanishr-download.vercel.app/assets/social.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Vanishr for Android, with a native chat screen using fictional test data">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="theme-color" content="#146c58">
+  <meta name="ga4-measurement-id" content="__GA4_ID__">
+  __SEARCH_VERIFICATION__
   <link rel="icon" href="/icon.png" type="image/png">
+  <link rel="preload" href="/assets/manrope.ttf" as="font" type="font/ttf" crossorigin>
   <link rel="stylesheet" href="/site.css">
+  <script defer src="/assets/lucide.min.js"></script>
+  <script defer src="/site.js"></script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Organization","@id":"https://vanishr-download.vercel.app/#organization","name":"Vanishr","url":"https://vanishr-download.vercel.app/","logo":"https://vanishr-download.vercel.app/icon.png","sameAs":["https://github.com/RichardHenryJames/vanishr"]},{"@type":"WebSite","@id":"https://vanishr-download.vercel.app/#website","name":"Vanishr","url":"https://vanishr-download.vercel.app/","inLanguage":"en","publisher":{"@id":"https://vanishr-download.vercel.app/#organization"}},{"@type":"MobileApplication","@id":"https://vanishr-download.vercel.app/#app","name":"Vanishr","url":"https://vanishr-download.vercel.app/android/","description":"Open-source Android development build for end-to-end encrypted disappearing text, photos and invite-only groups. Not independently security-audited.","operatingSystem":"Android 9 or later","applicationCategory":"CommunicationApplication","softwareVersion":"__VERSION__","downloadUrl":"https://vanishr-download.vercel.app/vanishr-__VERSION__.apk","screenshot":"https://vanishr-download.vercel.app/assets/chat.png","isAccessibleForFree":true,"license":"https://vanishr-download.vercel.app/LICENSE.txt","publisher":{"@id":"https://vanishr-download.vercel.app/#organization"}}]}</script>
 </head>
 <body>
-  <main>
-    <header class="identity">
-      <img src="/icon.png" width="76" height="76" alt="Vanishr app mark">
-      <div><p class="eyebrow">ANDROID / RELEASE CANDIDATE</p><h1>Vanishr</h1></div>
-    </header>
-    <section class="release" aria-labelledby="release-title">
-      <div class="release-heading"><h2 id="release-title">Android download</h2><span class="version">__VERSION__</span></div>
-      <p class="warning">Release candidate on test hosting. Google sign-in is limited to approved test accounts; live push delivery is not yet verified. Not independently security-audited.</p>
-      <a class="download" href="/vanishr-__VERSION__.apk" download>Download Android APK</a>
-      <dl class="facts">
-        <div><dt>Android</dt><dd>9 or later</dd></div>
-        <div><dt>Size</dt><dd>__APK_SIZE__ MiB</dd></div>
-        <div><dt>Released</dt><dd>__RELEASED_ON__</dd></div>
-      </dl>
-      <p class="requirements">A device screen lock and independent contact identity verification are required. The cloud relay is prefilled. This is not a browser chat client.</p>
-      <details>
-        <summary>Signature and file verification</summary>
-        <p>APK SHA-256</p><code>__APK_SHA256__</code>
-        <p>Signing certificate SHA-256</p><code>c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c</code>
-        <p>Install over the existing signed release to retain encrypted data. Do not uninstall or clear app data. A signed release cannot update a debug-signed installation.</p>
-      </details>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="wrap nav-wrap">
+      <a class="brand" href="/" aria-label="Vanishr home"><img src="/icon.png" width="32" height="32" alt=""><span>vanishr</span></a>
+      <nav class="desktop-nav" aria-label="Main"><a href="#inside">The app</a><a href="/security/">Security</a><a href="/android/" class="nav-download">Get Android <i data-lucide="arrow-down-to-line" aria-hidden="true"></i></a></nav>
+      <details class="mobile-nav"><summary aria-label="Navigation menu"><i data-lucide="menu" aria-hidden="true"></i><span>Menu</span></summary><nav aria-label="Mobile"><a href="/#inside">The app</a><a href="/security/">Security</a><a href="/android/">Download Android</a><a href="/privacy/">Privacy</a></nav></details>
+    </div>
+  </header>
+  <main id="main">
+    <section class="hero" aria-labelledby="hero-title">
+      <picture class="hero-media"><source media="(max-width: 600px)" srcset="/assets/app-overview-mobile.jpg"><img src="/assets/app-overview.jpg" width="1600" height="840" fetchpriority="high" alt="Native Vanishr conversation, chat and profile screens with fictional test data"></picture>
+      <div class="hero-copy wrap">
+        <p class="eyebrow"><span class="status-dot"></span> OPEN-SOURCE ANDROID MESSENGER</p>
+        <h1 id="hero-title">Vanishr</h1>
+        <p class="hero-description">End-to-end encrypted conversations.<br>Messages with an expiry, not a forever.</p>
+        <div class="actions"><a class="button primary" href="/android/">Get Vanishr for Android <i data-lucide="arrow-down-to-line" aria-hidden="true"></i></a><a class="text-link" href="/security/">Read the privacy model <i data-lucide="arrow-up-right" aria-hidden="true"></i></a></div>
+      </div>
     </section>
-    <section class="sources" aria-labelledby="source-title">
-      <h2 id="source-title">Source &amp; licenses</h2>
-      <a class="file" href="/vanishr-__VERSION__-source.zip" download><span>Vanishr application source</span><span>ZIP</span></a>
-      <a class="file" href="/libsignal-0.102.3-source.tar.gz" download><span>libsignal 0.102.3 source</span><span>TAR.GZ</span></a>
-      <a class="file" href="/THIRD-PARTY-NOTICES.txt"><span>Third-party notices</span><span>TXT</span></a>
-      <a class="file" href="/LICENSE.txt"><span>GNU AGPL version 3</span><span>TXT</span></a>
-      <p>Free software, without warranty. Third-party components retain their own licenses. The source downloads correspond to this signed release candidate.</p>
+    <div class="release-strip"><div class="wrap"><span><span class="status-dot"></span> __VERSION__ / DEVELOPMENT BUILD</span><span>Android 9+ <span aria-hidden="true">/</span> Signed APK <span aria-hidden="true">/</span> No app analytics</span></div></div>
+    <section class="section wrap" id="inside" aria-labelledby="inside-title">
+      <div class="section-heading"><p class="eyebrow">A LITTLE LESS PERMANENT</p><h2 id="inside-title">A conversation, not an archive.</h2><p>Vanishr is an Android app for one-to-one chats and invite-only groups. Send text and photos, set their lifetime, and keep private keys on your device.</p></div>
+      <div class="feature-grid">
+        <article class="feature"><i data-lucide="timer" aria-hidden="true"></i><h3>Choose what lasts</h3><p>View-once messages or a one-hour, six-hour or 24-hour deadline. Expiry is bounded on the client and relay, even when a recipient stays offline.</p><a href="/security/#disappearing">What disappearing means <i data-lucide="arrow-up-right" aria-hidden="true"></i></a></article>
+        <article class="feature"><i data-lucide="fingerprint" aria-hidden="true"></i><h3>Know your contact</h3><p>Find a username, then compare safety numbers through an independent trusted channel. A name or search result is not proof of identity.</p><a href="/android/#first-conversation">Start a verified chat <i data-lucide="arrow-up-right" aria-hidden="true"></i></a></article>
+        <article class="feature"><i data-lucide="users-round" aria-hidden="true"></i><h3>Keep your circle private</h3><p>Invite-only groups support up to 200 people. Profile photos are shared only between mutually added, verified contacts, never in username search.</p><a href="/security/#profile-photos">Who sees your photo <i data-lucide="arrow-up-right" aria-hidden="true"></i></a></article>
+      </div>
     </section>
-    <footer><span>Vanishr</span><span>No site analytics or advertising.</span></footer>
+    <section class="product-band" aria-labelledby="product-title"><div class="wrap">
+      <div class="section-heading"><p class="eyebrow">INSIDE THE ANDROID APP</p><h2 id="product-title">Simple screens. Deliberate boundaries.</h2><p>Compact conversations, a familiar composer, and a profile you control.</p></div>
+      <div class="screen-gallery">
+        <figure><img src="/assets/conversations.png" width="480" height="960" loading="lazy" decoding="async" alt="Vanishr conversation list with search and an unread filter"><figcaption><strong>Your conversations</strong><span>Search saved chats without a permanent message archive.</span></figcaption></figure>
+        <figure><img src="/assets/chat.png" width="480" height="960" loading="lazy" decoding="async" alt="Vanishr encrypted chat showing messages, expiry and image attachment controls"><figcaption><strong>Text, photos, then gone</strong><span>Choose a deadline or send something view-once.</span></figcaption></figure>
+        <figure><img src="/assets/profile.png" width="480" height="960" loading="lazy" decoding="async" alt="Vanishr My profile sheet with a profile photo and editable name and username"><figcaption><strong>A profile on your terms</strong><span>Change your name, username and private profile photo.</span></figcaption></figure>
+      </div>
+      <p class="caption">Actual app screens with fictional test data. Phone rendering and text sizes can vary.</p>
+    </div></section>
+    <section class="section wrap security-summary" aria-labelledby="security-title">
+      <div class="section-heading"><p class="eyebrow">PRIVACY, WITH THE DETAILS INCLUDED</p><h2 id="security-title">Encrypted is a design.<br>Trust is a decision.</h2><p>The client uses official libsignal for direct sessions and group sender keys. The relay routes ciphertext and does not hold message-decryption keys.</p><a class="text-link" href="/security/">Security model and limitations <i data-lucide="arrow-up-right" aria-hidden="true"></i></a></div>
+      <div class="boundary-list"><div><i data-lucide="key-round" aria-hidden="true"></i><p><strong>Device-owned keys</strong><span>Android Keystore protects local encrypted state. A phone screen lock is required.</span></p></div><div><i data-lucide="eye-off" aria-hidden="true"></i><p><strong>No private-chat tracking</strong><span>No app analytics, advertising, or cloud chat backups. Website analytics is a separate opt-in choice.</span></p></div><div><i data-lucide="file-code-2" aria-hidden="true"></i><p><strong>Source available</strong><span>Download the application source and third-party notices corresponding to the signed release.</span></p></div></div>
+    </section>
+    <section class="development-band"><div class="wrap development-inner"><i data-lucide="flask-conical" aria-hidden="true"></i><div><h2>For testing, with care.</h2><p>Vanishr is a development build, not an independently audited production messenger. Do not use it for real sensitive conversations yet. Google sign-in is limited to approved test accounts; live push delivery and wider device acceptance remain unverified.</p></div><a href="/security/#development">Read before installing <i data-lucide="arrow-up-right" aria-hidden="true"></i></a></div></section>
+    <section class="section wrap faq" aria-labelledby="faq-title">
+      <div class="section-heading"><p class="eyebrow">A FEW STRAIGHT ANSWERS</p><h2 id="faq-title">About Vanishr</h2></div>
+      <div class="faq-list">
+        <details><summary>What is Vanishr?</summary><p>Vanishr is an open-source Android messenger for end-to-end encrypted, disappearing text and photos in direct chats and invite-only private groups. This website distributes its signed development APK and corresponding source.</p></details>
+        <details><summary>Is Vanishr free?</summary><p>The development APK and source downloads are free. Vanishr is distributed under the GNU AGPL version 3, without warranty. Third-party components retain their own licenses.</p></details>
+        <details><summary>Does it work on iPhone or in a browser?</summary><p>No. The current native app requires Android 9 or later and a configured phone screen lock. This website is an information and download site, not a browser chat client.</p></details>
+        <details><summary>Can everyone see my profile photo?</summary><p>No. Username search does not show photos. Both people must add and independently verify each other as contacts before the trusted clients exchange encrypted profile photos. Group membership alone does not grant access.</p></details>
+        <details><summary>Can a disappearing message still be saved?</summary><p>Yes. A recipient can photograph a screen, modify their client, or otherwise retain content. Expiry and screenshot protections reduce accidental retention but cannot guarantee that every copy disappears.</p></details>
+        <details><summary>Is Vanishr affiliated with Signal or Google?</summary><p>No. Vanishr uses the official libsignal library for its encryption sessions and offers optional Google sign-in. It is not an official Signal or Google product, and those integrations are not an endorsement.</p></details>
+      </div>
+    </section>
+    <section class="download-band"><div class="wrap"><div><p class="eyebrow">VANISHR __VERSION__</p><h2>Try the Android build.</h2><p>Signed APK. Matching source. No mystery download.</p></div><a class="button primary" href="/android/">Download &amp; release details <i data-lucide="arrow-down-to-line" aria-hidden="true"></i></a></div></section>
   </main>
+  <footer class="site-footer"><div class="wrap"><a class="brand" href="/">vanishr</a><nav aria-label="Footer"><a href="/android/">Download</a><a href="/security/">Security</a><a href="/privacy/">Privacy</a><a href="https://github.com/RichardHenryJames/vanishr">Source project</a><button type="button" data-consent-open>Cookie settings</button></nav><p>Open-source development software. No warranty. No advertising.</p></div></footer>
+  __CONSENT_PANEL__
 </body>
 </html>

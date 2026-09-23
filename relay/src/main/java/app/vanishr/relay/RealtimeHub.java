@@ -44,6 +44,12 @@ public class RealtimeHub extends TextWebSocketHandler implements WebSocketConfig
     @Override public void afterConnectionClosed(WebSocketSession session, CloseStatus status) { sessions.remove(actor(session).deviceId(), session); }
     @Override protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception { session.close(CloseStatus.POLICY_VIOLATION); }
 
+    public String connection(RelayTypes.Actor actor) {
+        WebSocketSession session = sessions.get(actor.deviceId());
+        return session != null && session.isOpen() && actor.equals(actor(session))
+                && auth.activeSession((String) session.getAttributes().get("sessionKey"), actor) ? session.getId() : null;
+    }
+
     public void wake(UUID deviceId) {
         WebSocketSession session = sessions.get(deviceId);
         if (session == null) return;

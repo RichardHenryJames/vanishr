@@ -1,6 +1,7 @@
 #requires -Version 7.4
-param([string]$Serial = 'emulator-5582', [uri]$RelayOrigin, [switch]$Live)
+param([string]$Serial = 'emulator-5582', [uri]$RelayOrigin, [switch]$Live, [switch]$Push)
 $ErrorActionPreference = 'Stop'
+if ($Push -and -not $Live) { throw 'Live FCM testing also requires -Live.' }
 $root = Split-Path $PSScriptRoot -Parent
 $sdk = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { Join-Path $env:LOCALAPPDATA 'Android/Sdk' }
 $adb = Join-Path $sdk 'platform-tools/adb.exe'
@@ -20,8 +21,18 @@ $hash = (Get-FileHash $apk -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($LASTEXITCODE -ne 0) { throw 'The signed release could not be installed.' }
 & $adb -s $Serial install --no-streaming -r $testApk
 if ($LASTEXITCODE -ne 0) { throw 'The signed test package could not be installed.' }
+foreach ($package in @('app.vanishr.android', 'app.vanishr.android.test')) {
+    & $adb -s $Serial shell cmd package compile -m speed -f $package
+    if ($LASTEXITCODE -ne 0) { throw 'Signed test package precompilation failed.' }
+}
 & $adb -s $Serial shell pm clear app.vanishr.android | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Could not reset the dedicated release fixture.' }
+if ($Push -and [int]((& $adb -s $Serial shell getprop ro.build.version.sdk).Trim()) -ge 33) {
+    & $adb -s $Serial shell pm revoke app.vanishr.android android.permission.POST_NOTIFICATIONS
+    if ($LASTEXITCODE -ne 0) { throw 'Could not reset the dedicated notification-permission fixture.' }
+    & $adb -s $Serial shell pm clear-permission-flags app.vanishr.android android.permission.POST_NOTIFICATIONS user-set user-fixed
+    if ($LASTEXITCODE -ne 0) { throw 'Could not clear the dedicated notification-permission prompt flags.' }
+}
 $credential = [System.Security.Cryptography.RandomNumberGenerator]::GetInt32(100000, 999999).ToString()
 $credentialSet = $false
 $results = Join-Path $root '.tools/release-verification'
@@ -46,6 +57,7 @@ try {
     Run-Instrumentation -TestArguments @('-e', 'class', 'app.vanishr.android.DeviceSecurityTest') -ReportName 'device-security.txt' -AllowSkipped $true
     if ($Live) {
         Run-Instrumentation -TestArguments @('-e', 'class', 'app.vanishr.android.ReleaseWorkflowTest', '-e', 'releaseLive', 'true',
+            '-e', 'releasePush', $Push.IsPresent.ToString().ToLowerInvariant(),
             '-e', 'devicePin', $credential, '-e', 'relayOrigin', $RelayOrigin.GetLeftPart([System.UriPartial]::Authority)) -ReportName 'live-ui.txt'
     }
     Write-Output "Verified signed APK SHA-256: $hash"

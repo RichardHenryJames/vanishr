@@ -1,5 +1,5 @@
 #requires -Version 7.4
-param([switch]$PrepareNoticesOnly, [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.2.7')
+param([switch]$PrepareNoticesOnly, [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.3.9')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $tools = Join-Path $root '.tools'
@@ -67,7 +67,9 @@ $sourcePaths = @('LICENSE', 'NOTICE.md', 'README.md', 'pom.xml', '.gitignore', '
     'infra/Dockerfile', 'infra/compose.yml', 'infra/compose.low-memory.yml', 'infra/pg_hba.conf', 'infra/postgres-entrypoint.sh',
     'scripts/build-android.ps1', 'scripts/new-local-config.ps1', 'scripts/package-apk.ps1', 'scripts/start-local.ps1', 'scripts/test-android.ps1',
     'scripts/test-release.ps1', 'scripts/prepare-ui-assets.ps1', 'scripts/verify.ps1', 'scripts/read-google-config.ps1', 'scripts/prepare-download.ps1',
-    'download/index.html', 'download/site.css', 'download/vercel.json')
+    'scripts/render-website.ps1', 'scripts/prepare-website.ps1', 'scripts/prepare-site-assets.ps1',
+    'download/index.html', 'download/site.css', 'download/site.js', 'download/site-settings.json', 'download/vercel.json',
+    'download/android', 'download/security', 'download/privacy', 'download/assets', 'download/robots.txt', 'download/sitemap.xml', 'download/llms.txt')
 foreach ($relative in $sourcePaths) {
     $destination = Join-Path $source $relative
     New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
@@ -102,11 +104,6 @@ Copy-Item $apkFile (Join-Path $stage "vanishr-$Version.apk")
 Copy-Item (Join-Path $tools 'libsignal-v0.102.3.tar.gz') (Join-Path $stage 'libsignal-0.102.3-source.tar.gz')
 Copy-Item (Join-Path $noticesDirectory 'LICENSE.txt') (Join-Path $stage 'LICENSE.txt')
 Copy-Item (Join-Path $noticesDirectory 'NOTICES.txt') (Join-Path $stage 'THIRD-PARTY-NOTICES.txt')
-Copy-Item (Join-Path $root 'download/site.css') $stage
-$vercel = Get-Content (Join-Path $root 'download/vercel.json') -Raw | ConvertFrom-Json
-$vercel.headers[1].source = "/vanishr-$Version.apk"
-($vercel.headers[1].headers | Where-Object key -eq 'Content-Disposition').value = "attachment; filename=vanishr-$Version.apk"
-[System.IO.File]::WriteAllText((Join-Path $stage 'vercel.json'), ($vercel | ConvertTo-Json -Depth 12), [System.Text.UTF8Encoding]::new($false))
 $apk = Get-Item (Join-Path $stage "vanishr-$Version.apk")
 $hash = (Get-FileHash $apk.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
 $update = [ordered]@{
@@ -119,8 +116,6 @@ $update = [ordered]@{
     size = $apk.Length
 }
 [System.IO.File]::WriteAllText((Join-Path $stage 'updates.json'), ($update | ConvertTo-Json), [System.Text.UTF8Encoding]::new($false))
-$html = (Get-Content (Join-Path $root 'download/index.html') -Raw).Replace('__VERSION__', $Version).Replace('__APK_SHA256__', $hash).Replace('__APK_SIZE__', [math]::Round($apk.Length / 1MB, 1).ToString([Globalization.CultureInfo]::InvariantCulture)).Replace('__RELEASED_ON__', $apk.LastWriteTimeUtc.ToString('d MMMM yyyy', [Globalization.CultureInfo]::InvariantCulture))
-[System.IO.File]::WriteAllText((Join-Path $stage 'index.html'), $html, [System.Text.UTF8Encoding]::new($false))
 Add-Type -AssemblyName System.Drawing
 $bitmap = [System.Drawing.Bitmap]::new(152, 152)
 $drawing = [System.Drawing.Graphics]::FromImage($bitmap)
@@ -132,8 +127,9 @@ try {
     $drawing.DrawString('V', $font, $brush, 38, 29)
     $bitmap.Save((Join-Path $stage 'icon.png'), [System.Drawing.Imaging.ImageFormat]::Png)
 } finally { $brush.Dispose(); $font.Dispose(); $drawing.Dispose(); $bitmap.Dispose() }
-$total = (Get-ChildItem $stage -File | Measure-Object Length -Sum).Sum
+$null = & (Join-Path $PSScriptRoot 'render-website.ps1') -Stage $stage
+$total = (Get-ChildItem $stage -Recurse -File | Measure-Object Length -Sum).Sum
 if ($total -ge 99000000) { throw 'Static bundle exceeds the safe Vercel Hobby upload size.' }
-Get-ChildItem $stage -File | Select-Object Name, Length
+Get-ChildItem $stage -Recurse -File | Select-Object Name, Length
 Write-Output "Static deployment bytes: $total. No Azure credentials, private signing keys or server environment files are included."
 Write-Output "Dependencies with unpublished optional source artifacts: $($unavailable.Count). Inspect dependency-sources/unavailable-artifacts.txt before redistribution."

@@ -77,8 +77,11 @@ only in the Signal-authenticated encrypted envelope, never in upload metadata.
 ## 6. Rotation and local storage
 
 Signal session keys ratchet as libsignal specifies. Prekeys are published in
-batches of 16, expire on the relay after 24 hours and are checked/replenished on
-login and hourly foreground sync. Locally, obsolete signed/private prekeys
+batches of up to 32 and expire on the relay after 24 hours. Direct-only clients
+target 16 keys and check on login/hourly sync. Group clients target 224 within
+the server's 256-key bound and replenish incrementally every 30 seconds while
+foregrounded, so large-group enrollment can take several sync cycles. Locally,
+obsolete signed/private prekeys
 are pruned after 48 hours, covering the maximum publication plus delivery
 window. The long-term identity is stable until explicit device replacement.
 
@@ -92,21 +95,27 @@ older vault-file copy does not retain the local content key. Deletion of flash
 blocks, secure-element internals and earlier ratchet snapshots is not proven.
 
 New vault and content keys use `setUserAuthenticationRequired(false)` and
-`setUnlockedDeviceRequired(true)`. Key creation requires a configured Android
-screen lock; storage access additionally checks `KeyguardManager.isDeviceLocked()`.
-There is no separate app credential prompt or five-minute authentication window.
-Foreground startup and return after phone unlock open storage automatically.
-UI content clears on pause; asynchronous results are bound to the current
-foreground screen generation. An already-unlocked phone permits app access.
+set `setUnlockedDeviceRequired(true)` only when generated on Android 15 or later.
+Android 14 and below use the explicitly approved compatibility policy: no extra
+Keystore unlock restriction, avoiding Android 12-14 weak-biometric/profile bugs.
+Every storage access requires `KeyguardManager.isDeviceSecure()` and rejects
+`isDeviceLocked()`. On older Android this lock boundary is app-enforced, not an
+independent Keystore authorization. Keys remain nonexportable AES-256-GCM with
+random IVs and authenticated records. Existing keys keep their creation policy
+after OS upgrades. There is no separate app credential prompt or authentication
+timer. Android-accepted face/fingerprint unlock can open storage; the system may
+still demand a device credential after reboot or biometric lockout. UI content
+clears on pause and callbacks remain bound to the foreground screen generation.
 
-Local protected-record version 2 uses new `.phone` key aliases; AES-GCM AAD
-remains the logical alias. Version 1 is read only for migration. The vault root
-is re-encrypted atomically, and active/parked content records migrate in a vault
-transaction without opening, consuming or resetting expiry. Old keys are removed
-only after their replacement ciphertext commits. Failed migration keeps the
-affected ciphertext and old keys; it never clears an account to recover access.
-Legacy keys may need a recent normal phone PIN/pattern/password unlock once.
-Missing or invalidated legacy keys cannot be recovered by this migration.
+Local protected-record version 3 uses `.phone.v3` key aliases; AES-GCM AAD remains
+the logical alias. Version 1 (original alias) and version 2 (`.phone`) are read only
+for migration. The vault root is re-encrypted atomically; active/parked content
+records migrate in a vault transaction without viewing, consuming or resetting
+expiry. Old keys are removed only after their replacement ciphertext commits.
+Failed migration preserves the affected ciphertext and old key. A blocked old
+key may require one recent phone PIN/pattern/password unlock before migration;
+missing or invalidated legacy keys cannot be recovered by changing key policy.
+The app never deletes and recreates an old key just to bypass its authorization.
 
 View-once content keys are deleted before rendering; a crash at that point
 loses the content intentionally. An outgoing view-once local copy is erased
@@ -124,6 +133,31 @@ reused. Outstanding old-device delivery is inaccessible to the new identity
 and expires normally. Contacts must remove the old pin/session and independently
 verify the new identity. This does not recover messages or erase a lost phone.
 No password-reset or private-key recovery service is implemented.
+
+## Group encryption
+
+SignalGroup delegates to the official libsignal GroupSessionBuilder and GroupCipher
+sender-key APIs. Each sender has independent signing/chain state per group epoch.
+SenderKeyDistributionMessage bytes travel only inside authenticated pairwise
+Signal controls. GroupRoster uses an unambiguous, sorted binary representation
+and SHA-256 digest to bind every account/device/public key; the digest is carried
+inside the owner's encrypted Signal message, not trusted on its own from the relay.
+GroupEnvelope binds group, epoch, revision, sender, message ID, media and absolute
+expiry. No custom cipher, handshake or signature primitive replaces libsignal.
+
+Membership changes create a fresh epoch with fresh sender keys. Old members cannot
+decrypt the new epoch without its distributions; new members receive no earlier
+epoch distributions. Old epoch state remains only for the bounded delivery window.
+Current distribution state can be refreshed through new authenticated controls;
+replayed packets do not reset ratchets. Content-key deletion and view-once rules
+remain per local member copy. Images retain independent AES-GCM keys and one
+shared encrypted blob; each recipient's access is revoked independently.
+
+This uses a verified-owner group trust model, not all-pairs independent identity
+verification or Signal's complete private-group service. Membership is visible
+to the relay and owner compromise is a trust-boundary compromise. Direct chats
+still require independently verified saved contacts; group-approved identities
+alone cannot silently start a trusted direct conversation.
 
 ## Dependencies and review
 

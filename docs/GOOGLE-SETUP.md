@@ -25,8 +25,17 @@ limit remains On and temporary artifact storage was removed.
 Official Google authentication plus an FCM `validate_only` request succeeded;
 that request did not deliver a notification. Live relay checks also verified the
 matching OAuth audience, five-minute challenge deadline, invalid-token rejection
-and consumed-challenge replay rejection. Actual Google account sign-in and
-background device notification delivery remain unverified.
+and consumed-challenge replay rejection. Those checks alone did not verify
+actual Google account sign-in or background notification delivery.
+
+On 2026-09-21, the signed 0.3.5 workflow verified actual FCM delivery on the
+dedicated Google Play-enabled release emulator. It enabled the shipped My profile
+notification toggle, waited for device-token upload, backgrounded the activity,
+sent an encrypted message and tapped the generic notification in Android's shade.
+The app opened the matching verified chat and returned its receipt. The full
+signed workflow passed, including session, group and account-switch checks.
+No provider/sender credential was changed to make the test pass. This does not
+verify physical-phone, Doze/force-stop or real Google sign-in acceptance.
 
 On 2026-09-17, the signed 0.2.1 APK was tested on `Vanishr_Release_Test`
 with real Android input and device-credential authentication. Tapping
@@ -67,6 +76,14 @@ account restoration no longer treats an old saved username as an identity mismat
 origin, provider and authenticated UUID still must match. Shared display names
 are explicitly edited, never imported from Google. Private contact names remain
 local to the naming account and do not affect either user's profile.
+
+In 0.3.6, notifications default on for an unset preference. The signed live test
+started without Android notification permission, accepted the real system Allow
+dialog after signup, and verified automatic registration without toggling My
+profile. Actual FCM delivery and tap-to-chat passed in the complete signed
+workflow. Existing saved Off values remain respected; some older versions also
+wrote Off during sign-out, so those installations may need one explicit enable.
+Sign-out now suspends active delivery without replacing the user's preference.
 
 ## Owner steps
 
@@ -174,10 +191,22 @@ deployment or signed build does not satisfy the live acceptance checks below.
   wrong-account selection, expired/replayed challenge rejection and returning
   login. Google login authenticates the account; independently verified Signal
   peer identities still govern chat encryption.
-- Enable notifications and grant Android notification permission. Send an
+- On a fresh 0.3.6 installation, leave the default-on profile setting unchanged
+   and grant Android notification permission after sign-in. An existing saved Off
+   choice remains off and can be enabled explicitly in My profile. Wait for
+   `Notifications ready` in My profile, which confirms device-token upload to the
+   relay but does not itself prove provider delivery. Send an
   encrypted message from another account while the recipient app is backgrounded.
   Verify that the visible notification contains only `Vanishr` / `New message`,
-  never a sender, text, image or key, and opens the locked application.
+   never a sender, text, image or key. On 0.3.5, an optional random routing reference
+   is resolved only after phone unlock and authenticated sync. Tapping should open
+   the matching verified chat, not a photo/view-once viewer; stale/read or invalid
+   references should return to the list. Test cold start and an existing activity.
+- Use `scripts/test-release.ps1 -Live -Push` on the dedicated release emulator
+   for the opt-in actual FCM registration/delivery/shade-tap gate. A successful
+   local PendingIntent test without this gate is not live-provider evidence. The
+   script resets permission only for the dedicated synthetic release fixture;
+   the test clicks the real Android Allow prompt rather than granting via shell.
 - Disable notifications and verify no notification is displayed and the relay
   registration is removed. Check token replacement, sign-out, device replacement,
   provider rejection and expiry. Doze, force-stop and OEM restrictions can delay

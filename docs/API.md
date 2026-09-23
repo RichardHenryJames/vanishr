@@ -8,8 +8,12 @@ multipart uploads, plaintext content fields, or permanent media URLs.
 
 Authentication header: `Authorization: Bearer <43-character random token>`.
 `ENROLL` tokens last five minutes and can only enroll a device, inspect identity,
-or log out. `DEVICE` tokens last 60 minutes; every request checks current device
-generation. Server stores SHA-256 token digests, never raw bearer tokens.
+or log out. `DEVICE` access tokens last 60 minutes; every request checks current
+device generation. Device sessions also have a rotating 30-day renewal token,
+which cannot be used as an access bearer. Server stores SHA-256 token digests,
+never raw bearer or renewal tokens. Rotation atomically retires the previous
+access/renewal pair and creates both bounded replacements. Redis remains
+nonpersistent, so a Redis reset requires sign-in again.
 Passwords are 16-64 characters, at most 72 UTF-8 bytes, hashed using BCrypt cost
 12. Passwords are authentication secrets carried by TLS, not E2EE content.
 
@@ -18,6 +22,8 @@ a ten-per-minute source-IP budget. Google challenges have a separate ten-per-min
 budget. Authenticated `/auth/me` and `/auth/logout` do not consume either budget;
 the overall IP/device limits still apply. Password login also retains its separate
 five-per-minute username limit. A 429 response means retry later, not device loss.
+Renewal has a separate 30/minute source-IP and 6/minute credential-digest limit,
+independent of login attempts. No access bearer is required or sent on renewal.
 
 ## Endpoints
 
@@ -26,13 +32,15 @@ five-per-minute username limit. A 429 response means retry later, not device los
 | `GET /health` | Public | `{status:"up"}` | None |
 | `POST /auth/register` | Public, IP rate limit | `{handle,password}` -> token object, 201 | Account/BCrypt verifier persists; enrollment token 5 min |
 | `POST /auth/login` | Public, IP + handle limits | `{handle,password,deviceId?}` -> token object | 5 min enrollment or 60 min device token |
+| `POST /auth/refresh` | Renewal credential, separate rate limits | `{refreshToken,nextRefreshToken?}` -> device token object | Single-use rotation, 60 min access + 30 day renewal; validates current account/device generation |
 | `POST /auth/google/challenge` | Public, IP rate limit; provider configuration required | `{deviceId?}` -> `{id,nonce,clientId,expiresAt}` | One-use challenge, 5 min |
 | `POST /auth/google` | Public, IP rate limit; Google token verification | `{challengeId,idToken}` -> `{session,handle}` | Consumes challenge on the first attempt; normal enrollment/device token TTL |
 | `GET /auth/me` | ENROLL or DEVICE | `{userId,deviceId}` | None added |
-| `POST /auth/logout` | ENROLL or DEVICE | Empty -> 204 | Deletes current token and device push token; preserves registered device and queued ciphertext |
+| `POST /auth/logout` | ENROLL or DEVICE | Empty -> 204 | Atomically deletes current access/renewal pair and removes device push token; preserves registered device and queued ciphertext |
 | `POST /devices` | ENROLL, account owner | `{deviceId,identityKey,replaceExisting}` -> device token, 201 | Same device/key with `replaceExisting:false` resumes without changing generation/prekeys; a different device/key needs explicit replacement; consumes enrollment token |
-| `POST /devices/push` | DEVICE owner | `{token}` -> 204 | Provider token in Redis, 24h; refreshed only by client |
-| `DELETE /devices/push` | DEVICE owner | Empty -> 204 | Removes push token immediately |
+| `POST /devices/push` | DEVICE owner | `{token,routeHints?}` -> 204 | Provider token and routing capability in Redis, atomic 24h TTL; omitted/false capability retains legacy event-only pushes |
+| `DELETE /devices/push` | DEVICE owner | Empty -> 204 | Removes push token and current routing reference immediately |
+| `POST /notifications/resolve` | DEVICE owner, 20/min/device | `{reference}` -> `{userId,deviceId,conversationId,messageId,expiresAt}` | Recipient-bound opaque reference; at most one mapping/device, atomic <=5min/message-deadline TTL; 404 when missing, wrong, expired or superseded |
 | `GET /users/{handle}` | DEVICE | `{userId,deviceId,identityKey}` | No new state; account lookup exposes chosen handle |
 | `GET /users/id/{userId}` | DEVICE | Same public contact object | No new state |
 | `GET /account/username` | DEVICE owner | `{userId,handle}` | Current account username |
@@ -40,7 +48,7 @@ five-per-minute username limit. A 429 response means retry later, not device los
 | `GET /account/profile` | DEVICE owner | `{userId,handle,displayName}` | Display name is nullable until explicitly saved |
 | `PATCH /account/profile` | DEVICE owner; 10/min/account | `{displayName}` -> profile | Updates only authenticated account; 1-40 characters, not unique |
 | `GET /users/id/{userId}/profile` | DEVICE | `{userId,handle,displayName}` | Shared account metadata; private nicknames are never returned |
-| `POST /keys` | DEVICE owner | `{keys:[PublicBundle,...]}` -> 204 | 1-32 per request, at most 64 available; 24h public-key TTL; cleanup every minute |
+| `POST /keys` | DEVICE owner | `{keys:[PublicBundle,...]}` -> 204 | 1-32 per request, at most 256 available; 24h public-key TTL; cleanup every minute |
 | `GET /keys` | DEVICE owner | `{remaining}` | None added |
 | `POST /keys/{userId}/claim` | DEVICE, claim limit | Empty -> PublicBundle | Atomic consumption; 409 when exhausted; POST avoids cached/destructive GET |
 | `POST /messages` | DEVICE sender; active recipient | SendRequest -> Status, 201 | Atomic ciphertext + deadline; ID retries must match exactly; no lifetime extension |
@@ -53,6 +61,7 @@ five-per-minute username limit. A 429 response means retry later, not device los
 | `GET /media/{id}` | DEVICE bound recipient, attached live message only | Encrypted octet stream | No public URL; inaccessible after message deletion or expiry |
 | `DELETE /media/{id}` | DEVICE uploading sender, unattached only | Empty -> 204 | Deletes detached upload; attached media must be deleted via message |
 | `GET /events` (WSS upgrade) | DEVICE, bearer header at handshake | Server sends `{event:"new_message"}` only | One socket per device; token/generation rechecked; no payload or sender in event |
+| `POST /presence` | DEVICE, live WSS, 45/min/device | `{contacts:[{userId,deviceId,identityKey}],typingTo?,typingForMillis}` -> `[{peer,onlineForMillis,typingForMillis}]` | Mutual pinned identities; up to 128 unique non-self contacts; atomic 12s TTL; typing <=5s; no draft text/history |
 
 All message/media bodies crossing this boundary are ciphertext; public-key and
 auth endpoints intentionally handle public/authentication material. The relay
@@ -60,9 +69,98 @@ cannot cryptographically prove an arbitrary malicious client submitted real
 ciphertext. It has no plaintext message field or decrypt functionality, and
 tests demonstrate the official client's encryption-before-upload path.
 
+## Online and typing
+
+Only mutually listed direct contacts with matching pinned device/key identities
+and live authenticated websocket connections receive status. Reconnecting cannot
+revive an old heartbeat. Redis retains a session digest and connection reference,
+not a bearer token. Response durations are milliseconds remaining, not last-seen
+timestamps. Clients subtract request time and keep status only in memory.
+
+`typingTo` must belong to `contacts` with `typingForMillis` from 1 through 5000;
+null/absent typing requires zero. Empty audiences stop sharing on the next
+heartbeat. Unknown fields, duplicate/self recipients, invalid key encoding,
+oversized audiences and unenrolled callers fail closed. Presence does not wake
+FCM, queue chat content or appear in account lookup. This temporary audience and
+activity metadata is visible to the relay over TLS, not end-to-end encrypted.
+
+## Notification routing
+
+Legacy FCM data is `{event:"new_message"}`. A client that registers
+`routeHints:true` may receive `{event:"new_message",reference:"..."}` for direct
+or group messages. The reference is a 43-character Base64url encoding of 32
+random bytes; it does not encode a message, sender, chat or account identifier.
+The provider payload has no notification object, keeps a 60-second TTL and the
+existing single `new_message` collapse key. Control/invitation wake events may
+remain generic. Current routing metadata is available only through the
+authenticated resolution endpoint, never through a public URL or the push data.
+
+The relay stores the reference digest, not the raw value. Its destination expires
+within five minutes and never after the triggering message. A newer reference
+replaces the previous destination. The client treats the result as an untrusted
+hint: it must sync and find a matching verified, unexpired incoming unread entry
+before opening a chat. Resolution does not consume messages or view-once content.
+Opt-out/sign-out remove the mapping; device replacement fails current-session
+authorization. No new durable database table or plaintext content field is added.
+
+## Private profile packets
+
+These DEVICE-only endpoints relay Signal ciphertext separately from messages and
+groups. They never return a profile photo or URL through username/account lookup.
+The receiving client enforces mutual saved-contact verification before sharing.
+
+| Method / Path | Contract |
+| --- | --- |
+| `POST /profile/packets` | `{id,recipientId,recipientDeviceId,expiresAt,type,ciphertext}`; type 2/3, ciphertext 32-65536 bytes, current recipient device, deadline at most 24h, 30 sends/minute/device |
+| `GET /profile/packets` | Up to 16 packets addressed only to the authenticated device; at most 64 queued packets/device; sender account/device added by the relay |
+| `DELETE /profile/packets/{id}` | Recipient-only acknowledgement; removes payload and inbox entry, retains a bounded retry tombstone until the original deadline |
+
+Packet and inbox writes receive bounded TTLs atomically. Conflicting retries fail;
+acknowledged packets cannot be resurrected, and retries cannot extend deadlines.
+No plaintext profile image, private contact graph or new database table is added.
+
+## Group endpoints
+
+All routes below require a DEVICE session. The relay knows group membership but
+does not receive the group name, plaintext messages or sender keys. Group IDs are
+client-generated UUIDs; membership revisions/epochs are assigned by the relay and
+authenticated by the owner over Signal. A revision mismatch returns 409
+`group_changed`. A different enrolled key returns `group_identity_changed`.
+
+| Method / Path | Contract |
+| --- | --- |
+| `GET /groups` | Current device's memberships/invitations; at most 40 records including bounded closed-group tombstones |
+| `POST /groups` | `{id}`; creates owner membership, up to 20 groups/invitations per account |
+| `GET /groups/{id}` | Member/invitee-only snapshot `{id,ownerId,revision,epoch,closed,members}` |
+| `POST /groups/{id}/invitations` | Owner-only `{revision,members:[{userId,deviceId,identityKey}]}`; max 200 total including owner/invitees; invitations expire in 24h |
+| `POST /groups/{id}/accept` | Invitee-only `{revision}`; activates membership and changes revision/epoch |
+| `DELETE /groups/{id}/members/{userId}?revision=...` | Owner removes a member, or member declines/leaves; active removal changes revision/epoch |
+| `DELETE /groups/{id}?revision=...` | Owner closes group; metadata tombstone removed within 24h plus cleanup interval |
+| `POST /groups/{id}/keys` | `{revision,users:[UUID]}`; up to 32 members' one-time public bundles, unavailable bundles omitted |
+| `POST /groups/{id}/controls` | `{revision,packets:[ControlSend]}`; up to 32 encrypted Signal controls, each recipient-bound and <=24h; only owner can address invited members |
+| `GET /groups/{id}/controls` | Up to 64 controls addressed to the current member/invitee device |
+| `DELETE /groups/{id}/controls/{packet}` | Recipient acknowledges control; TTL-bounded retry tombstone prevents resurrection |
+| `POST /groups/{id}/messages` | `{id,epoch,revision,expiry,expiresAt,ciphertext,mediaId?,media?}`; optional encrypted image <=2 MiB+16 bytes, 3 MB request bound |
+| `GET /groups/{id}/messages` | Up to 32 queued messages for the current active recipient; delivery removes an item from this list |
+| `GET /groups/{id}/status` | Sender-only `{id,expiresAt,recipients,delivered,read,state}` aggregates, <=256 live receipts |
+| `POST /groups/{id}/messages/{message}/{delivered\|read\|delete}` | Per-member acknowledgement; sender delete revokes all remaining relay copies |
+| `GET /groups/{id}/messages/{message}/media` | Encrypted shared image; only an active original recipient whose copy has not been consumed |
+
+ControlSend: `{id,recipientId,recipientDeviceId,epoch,revision,expiresAt,type,ciphertext}`.
+Controls use Signal message type 2/3; ordinary group messages use official sender-key
+ciphertext. Membership changes serialize with sends using a database row lock.
+Queue capacity, rate-limit and memory-pressure responses do not enable persistence.
+Read counts are relay metadata, not cryptographic evidence of viewing.
+
 ## Formats
 
-Token: `{userId,deviceId,accessToken,expiresAt}`. Enrollment deviceId is null.
+Token: `{userId,deviceId,accessToken,expiresAt,refreshToken,refreshExpiresAt}`.
+Enrollment deviceId and refreshToken are null, with refreshExpiresAt zero.
+Renewal handles are 43-character Base64url encodings of 32 random bytes. The
+Android client securely generates and commits nextRefreshToken before rotation;
+after an interrupted response it can retry that prepared handle once. A reused
+or colliding replacement is rejected. A client that omits the optional next
+handle receives a server-generated replacement but must manage response loss.
 Do not log or paste token responses into bug reports.
 
 Username/profile update bodies contain no target user ID. Unknown fields are
@@ -111,7 +209,11 @@ Google email, name, photo, access tokens or refresh tokens. It does not merge
 accounts with password accounts by email. `display_name` is set only by an explicit
 authenticated profile edit; it is not imported from Google's token.
 
-No message, conversation, attachment, media-key, private-key, profile, contact,
+`private_groups(id UUID PK, owner_id UUID FK, revision BIGINT, epoch UUID, closed_at TIMESTAMPTZ)`
+
+`group_members(group_id UUID FK, user_id UUID FK, device_id UUID, identity_key VARCHAR(64), state VARCHAR(8), invited_until BIGINT, PK(group_id,user_id))`
+
+No message-content, attachment, media-key, private-key, profile, contact,
 search, content-index or permanent receipt tables. The bounded display-name field
 lives on `accounts`; no private contact-name mapping is stored. Deleting/replacing a device
 cascades its public prekeys. Account erasure/recovery administration is not yet
@@ -129,6 +231,9 @@ an exposed product workflow; do not add a content-recovery API.
 | `google:` | Device binding, nonce and deadline under a hashed challenge ID | 5min; consumed on the first sign-in attempt |
 | `push:` | Provider device token | 24h |
 | `rate:` | Hashed-IP/account or device counters | 60s |
+| `gm:`, `gb:` | One shared group ciphertext/image | Original deadline, <=24h |
+| `gr:`, `gi:` | Per-member states and expiry-scored group message IDs | Original deadline / <=24h index |
+| `gc:`, `gcr:`, `gci:` | Recipient-bound encrypted Signal controls, retry digests and index | <=24h, bounded at creation |
 
 Runtime requires nonpersistent single-node Redis. Lua scripts atomically attach
 media and enqueue/acknowledge delivery, never reset content lifetime on retries.

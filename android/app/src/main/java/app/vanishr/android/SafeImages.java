@@ -5,6 +5,7 @@ import android.graphics.*;
 import androidx.exifinterface.media.ExifInterface;
 import android.net.Uri;
 import app.vanishr.crypto.ImageCipher;
+import app.vanishr.crypto.ProfileEnvelope;
 
 import java.io.*;
 import java.util.Arrays;
@@ -47,6 +48,37 @@ final class SafeImages {
         if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 80, bytes) || bytes.size() > ImageCipher.MAX_IMAGE_BYTES)
             throw new IOException("Image exceeds encrypted upload limit");
         return bytes.toByteArray();
+    }
+
+    static byte[] profilePhoto(byte[] source) throws IOException {
+        Bitmap original = display(source);
+        Bitmap square = null;
+        Bitmap thumbnail = null;
+        try {
+            int side = Math.min(original.getWidth(), original.getHeight());
+            square = Bitmap.createBitmap(original, (original.getWidth() - side) / 2, (original.getHeight() - side) / 2, side, side);
+            thumbnail = Bitmap.createScaledBitmap(square, 256, 256, true);
+            for (int quality = 85; quality >= 25; quality -= 15) {
+                ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                if (!thumbnail.compress(Bitmap.CompressFormat.JPEG, quality, bytes)) throw new IOException("Profile photo encoding failed");
+                if (bytes.size() <= ProfileEnvelope.MAX_PHOTO_BYTES) return bytes.toByteArray();
+            }
+            throw new IOException("Profile photo exceeds size limit");
+        } finally {
+            if (thumbnail != null && thumbnail != square && thumbnail != original) thumbnail.recycle();
+            if (square != null && square != original) square.recycle();
+            original.recycle();
+        }
+    }
+
+    static Bitmap displayProfilePhoto(byte[] bytes) throws IOException {
+        if (bytes == null || bytes.length == 0 || bytes.length > ProfileEnvelope.MAX_PHOTO_BYTES) throw new IOException("Invalid profile photo size");
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+        if (!"image/jpeg".equals(bounds.outMimeType) || bounds.outWidth <= 0 || bounds.outWidth > 256 || bounds.outHeight != bounds.outWidth)
+            throw new IOException("Invalid profile photo dimensions");
+        return display(bytes);
     }
 
     static Bitmap display(byte[] bytes) throws IOException {

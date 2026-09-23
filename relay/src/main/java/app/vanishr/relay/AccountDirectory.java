@@ -145,7 +145,7 @@ public class AccountDirectory {
         database.queryForObject("SELECT id FROM devices WHERE id = ? FOR UPDATE", UUID.class, actor.deviceId());
         Contact contact = contact(actor.userId());
         int count = keyCount(actor.deviceId());
-        if (count + upload.keys().size() > 64) throw new ApiException(HttpStatus.CONFLICT, "prekey_capacity");
+        if (count + upload.keys().size() > 256) throw new ApiException(HttpStatus.CONFLICT, "prekey_capacity");
         for (PreKey key : upload.keys()) {
             if (!contact.identityKey().equals(Base64.getEncoder().encodeToString(key.identityKey()))
                     || key.preKeyId() != key.signedPreKeyId() || key.preKeyId() != key.kyberPreKeyId())

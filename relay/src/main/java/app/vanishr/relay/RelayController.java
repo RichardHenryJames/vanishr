@@ -11,8 +11,12 @@ import static app.vanishr.relay.RelayTypes.*;
 
 @RestController
 public class RelayController {
-    public record PushToken(@NotNull @Size(min = 20, max = 4096) String token) {
+    public record PushToken(@NotNull @Size(min = 20, max = 4096) String token, boolean routeHints) {
+        public PushToken(String token) { this(token, false); }
         @Override public String toString() { return "PushToken[redacted]"; }
+    }
+    public record NotificationReference(@NotNull @Pattern(regexp = "[A-Za-z0-9_-]{43}") String reference) {
+        @Override public String toString() { return "NotificationReference[redacted]"; }
     }
     private final AuthService auth;
     private final AccountDirectory accounts;
@@ -38,6 +42,11 @@ public class RelayController {
         return auth.login(request);
     }
 
+    @PostMapping("/auth/refresh") public AuthService.Token refresh(@Valid @RequestBody AuthService.Refresh request) {
+        rates.require("renew:" + RedisRelay.digest(request.refreshToken().getBytes(java.nio.charset.StandardCharsets.US_ASCII)), 6, 60);
+        return auth.refresh(request);
+    }
+
     @GetMapping("/auth/me") public Actor me(@AuthenticationPrincipal Actor actor) { return actor; }
 
     @PostMapping("/auth/logout") @ResponseStatus(HttpStatus.NO_CONTENT)
@@ -55,7 +64,13 @@ public class RelayController {
     }
 
     @PostMapping("/devices/push") @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void push(@AuthenticationPrincipal Actor actor, @Valid @RequestBody PushToken request) { notifications.register(actor.deviceId(), request.token()); }
+    public void push(@AuthenticationPrincipal Actor actor, @Valid @RequestBody PushToken request) { notifications.register(actor.deviceId(), request.token(), request.routeHints()); }
+
+    @PostMapping("/notifications/resolve") public GenericNotifier.Destination notification(@AuthenticationPrincipal Actor actor,
+                                                                                          @Valid @RequestBody NotificationReference request) {
+        rates.require("notification:" + actor.deviceId(), 20, 60);
+        return notifications.resolve(actor, request.reference());
+    }
 
     @DeleteMapping("/devices/push") @ResponseStatus(HttpStatus.NO_CONTENT)
     public void disablePush(@AuthenticationPrincipal Actor actor) { notifications.unregister(actor.deviceId()); }
@@ -108,7 +123,8 @@ public class RelayController {
         rates.require("send:" + actor.deviceId(), 60, 60);
         recipient(request.recipientId(), request.recipientDeviceId());
         Status status = relay.send(actor, request);
-        if (status.state() == State.QUEUED) notifications.wake(request.recipientDeviceId());
+        if (status.state() == State.QUEUED) notifications.wake(new GenericNotifier.Destination(request.recipientId(), request.recipientDeviceId(),
+            actor.userId(), request.id(), status.expiresAt()));
         return status;
     }
 

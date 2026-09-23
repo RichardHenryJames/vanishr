@@ -12,8 +12,19 @@ import java.util.*;
 import static app.vanishr.android.RelayApi.JSON;
 
 final class ChatEngine implements AutoCloseable {
-    record Account(String origin, String handle, UUID userId, UUID deviceId, String accessToken, long expiresAt, boolean enrolled) { }
-    record Token(UUID userId, UUID deviceId, String accessToken, long expiresAt) { }
+    record Account(String origin, String handle, UUID userId, UUID deviceId, String accessToken, long expiresAt, boolean enrolled,
+                   String refreshToken, long refreshExpiresAt) {
+        Account(String origin, String handle, UUID userId, UUID deviceId, String accessToken, long expiresAt, boolean enrolled) {
+            this(origin, handle, userId, deviceId, accessToken, expiresAt, enrolled, null, 0);
+        }
+        @Override public String toString() { return "Account[redacted]"; }
+    }
+    record Token(UUID userId, UUID deviceId, String accessToken, long expiresAt, String refreshToken, long refreshExpiresAt) {
+        Token(UUID userId, UUID deviceId, String accessToken, long expiresAt) { this(userId, deviceId, accessToken, expiresAt, null, 0); }
+        @Override public String toString() { return "Token[redacted]"; }
+    }
+    record Refresh(String refreshToken, String nextRefreshToken) { @Override public String toString() { return "Refresh[redacted]"; } }
+    record Renewal(String token, String next, long expiresAt) { @Override public String toString() { return "Renewal[redacted]"; } }
     record Login(String handle, String password, UUID deviceId) { }
     record GoogleRequest(String challengeId, String idToken) {
         @Override public String toString() { return "GoogleRequest[redacted]"; }
@@ -36,20 +47,32 @@ final class ChatEngine implements AutoCloseable {
                     ChatEnvelope.Expiry expiry, long createdAt, long expiresAt, int type, byte[] ciphertext, UUID mediaId) { }
     record Outbox(Send message, byte[] media) { }
     record Status(UUID id, String state, long expiresAt) { }
-    record Entry(UUID id, UUID peerId, long expiresAt, ChatEnvelope.Expiry expiry, boolean outgoing, boolean image, String state, UUID keyOwner) {
+    record Entry(UUID id, UUID peerId, long expiresAt, ChatEnvelope.Expiry expiry, boolean outgoing, boolean image, String state, UUID keyOwner,
+                 UUID groupEpoch, long groupRevision, UUID senderId) {
+        Entry(UUID id, UUID peerId, long expiresAt, ChatEnvelope.Expiry expiry, boolean outgoing, boolean image, String state, UUID keyOwner) {
+            this(id,peerId,expiresAt,expiry,outgoing,image,state,keyOwner,null,0,null);
+        }
         Entry(UUID id, UUID peerId, long expiresAt, ChatEnvelope.Expiry expiry, boolean outgoing, boolean image, String state) {
             this(id, peerId, expiresAt, expiry, outgoing, image, state, null);
         }
-        Entry withState(String state) { return new Entry(id, peerId, expiresAt, expiry, outgoing, image, state, keyOwner); }
+        Entry withState(String state) { return new Entry(id, peerId, expiresAt, expiry, outgoing, image, state, keyOwner,groupEpoch,groupRevision,senderId); }
     }
     record Content(ChatEnvelope envelope, byte[] image) { }
     record Ack(UUID id, long expiresAt, String action) { }
+    record NotificationDestination(UUID userId, UUID deviceId, UUID conversationId, UUID messageId, long expiresAt) { }
 
     private final AndroidVault vault;
+    private final GroupChat groups;
+    private final ProfilePhotos photos;
+    private final ContactPresence presence;
     private Account account;
     private RelayApi api;
     private SignalClient signal;
     private WebSocket socket;
+    private volatile boolean realtimeReady;
+    private volatile long connectionGeneration;
+    private long nextConnect;
+    private Runnable wake;
     private long nextKeyCheck;
     private long nextProfileCheck;
     private int profileCursor;
@@ -58,9 +81,14 @@ final class ChatEngine implements AutoCloseable {
 
     ChatEngine(AndroidVault vault) throws Exception {
         this.vault = vault;
+        groups = new GroupChat(this,vault);
+        photos = new ProfilePhotos(this,vault);
+        presence = new ContactPresence(this);
         account = read("account", Account.class);
         if (account != null) {
             api = new RelayApi(account.origin(), account.accessToken());
+            if (!authenticated() && account.accessToken() != null && !account.accessToken().isEmpty()) invalidateToken();
+            if (account.enrolled()) api.sessionRefresh(this::refreshSession);
             signal = new SignalClient(account.userId(), vault);
         }
         purge();
@@ -75,7 +103,15 @@ final class ChatEngine implements AutoCloseable {
     }
 
     Account account() { return account; }
-    boolean authenticated() { return account != null && account.enrolled() && account.expiresAt() > System.currentTimeMillis() + 5000; }
+    GroupChat groups() { return groups; }
+    ProfilePhotos photos() { return photos; }
+    ContactPresence presence() { return presence; }
+    boolean realtimeReady() { return realtimeReady; }
+    RelayApi groupApi() { return api; }
+    SignalClient groupSignal() { return signal; }
+    private boolean accessReady() { return account != null && account.enrolled() && account.accessToken() != null && !account.accessToken().isEmpty() && account.expiresAt() > System.currentTimeMillis() + 5000; }
+    private boolean remembered() { return account != null && account.enrolled() && account.refreshToken() != null && account.refreshToken().matches("[A-Za-z0-9_-]{43}") && account.refreshExpiresAt() > System.currentTimeMillis() + 5000; }
+    boolean authenticated() { return accessReady() || remembered(); }
     boolean usesGoogle() { return account != null && vault.get("google-account") != null; }
     UUID activeDeviceId() { return account != null && account.enrolled() ? account.deviceId() : null; }
 
@@ -114,7 +150,7 @@ final class ChatEngine implements AutoCloseable {
     void applyProfile(Profile profile) throws Exception {
         if (account == null) throw new SecurityException("No active account");
         validateProfile(profile, account.userId());
-        Account updated = new Account(account.origin(), profile.handle(), account.userId(), account.deviceId(), account.accessToken(), account.expiresAt(), account.enrolled());
+        Account updated = new Account(account.origin(), profile.handle(), account.userId(), account.deviceId(), account.accessToken(), account.expiresAt(), account.enrolled(), account.refreshToken(), account.refreshExpiresAt());
         vault.transaction(() -> {
             write("account", updated);
             if (profile.displayName() != null) write("profile-name", profile.displayName());
@@ -212,6 +248,10 @@ final class ChatEngine implements AutoCloseable {
         if (api != null) api.close();
         api = new RelayApi(origin, null);
         GoogleResponse response = api.call("POST", "/auth/google", new GoogleRequest(challenge.id(), idToken), GoogleResponse.class);
+        finishGoogleLogin(response, replaceExisting);
+    }
+
+    void finishGoogleLogin(GoogleResponse response, boolean replaceExisting) throws Exception {
         if (response == null || response.session() == null || response.handle() == null
                 || (account != null && !account.userId().equals(response.session().userId())))
             throw new SecurityException("A different Google account was selected");
@@ -239,9 +279,10 @@ final class ChatEngine implements AutoCloseable {
         if (account != null && !account.userId().equals(token.userId())) throw new SecurityException("Account identity changed");
         UUID deviceId = existingDevice == null ? UUID.randomUUID() : existingDevice;
         if (token.deviceId() != null && !token.deviceId().equals(deviceId)) throw new SecurityException("Authenticated device does not match");
-        Account signedIn = new Account(api.origin(), handle, token.userId(), deviceId, token.accessToken(), token.expiresAt(), token.deviceId() != null);
+        Account signedIn = new Account(api.origin(), handle, token.userId(), deviceId, token.accessToken(), token.expiresAt(), token.deviceId() != null, token.refreshToken(), token.refreshExpiresAt());
         vault.transaction(() -> {
             write("account", signedIn);
+            vault.remove("session-renewal");
             if (google) vault.put("google-account", new byte[]{1}); else vault.remove("google-account");
             return null;
         });
@@ -250,10 +291,14 @@ final class ChatEngine implements AutoCloseable {
         api.token(token.accessToken());
         if (token.deviceId() == null) {
             Token registered = api.call("POST", "/devices", new DeviceRegistration(deviceId, signal.publicIdentity(), replaceExisting), Token.class);
-            account = new Account(api.origin(), handle, registered.userId(), deviceId, registered.accessToken(), registered.expiresAt(), true);
+            if (registered == null || !token.userId().equals(registered.userId()) || !deviceId.equals(registered.deviceId())
+                    || registered.accessToken() == null || registered.accessToken().isEmpty() || registered.expiresAt() <= System.currentTimeMillis())
+                throw new SecurityException("Authenticated device does not match");
+            account = new Account(api.origin(), handle, registered.userId(), deviceId, registered.accessToken(), registered.expiresAt(), true, registered.refreshToken(), registered.refreshExpiresAt());
             api.token(registered.accessToken());
             vault.transaction(() -> { write("account", account); return null; });
         }
+        api.sessionRefresh(this::refreshSession);
         replenishKeys();
         online = true;
     }
@@ -310,6 +355,7 @@ final class ChatEngine implements AutoCloseable {
     void forget(Peer peer) throws Exception {
         for (Entry entry : entries(peer.userId())) erase(entry, "delete");
         vault.transaction(() -> {
+            photos.forget(peer);
             signal.forgetPeer(peer.userId());
             vault.remove("contact/" + peer.userId());
             vault.remove("contact-name/" + peer.userId());
@@ -322,11 +368,13 @@ final class ChatEngine implements AutoCloseable {
         byte[] pending = vault.get("public-upload");
         if (pending == null) {
             KeyCount count = api.call("GET", "/keys", null, KeyCount.class);
-            if (count.remaining() >= 8) return;
+            int target = groups.conversations().isEmpty() ? 16 : 224;
+            if (count.remaining() >= target) return;
+            int uploadCount = Math.min(32,target-count.remaining());
             pending = vault.transaction(() -> {
                 signal.prunePreKeys(Instant.now().minusSeconds(172800));
                 List<PublicBundle> keys = new ArrayList<>();
-                for (int index = 0; index < 16; index++) keys.add(signal.generatePreKey(Instant.now()));
+                for (int index = 0; index < uploadCount; index++) keys.add(signal.generatePreKey(Instant.now()));
                 byte[] upload = bytes(Collections.singletonMap("keys", keys));
                 vault.put("public-upload", upload);
                 return upload;
@@ -385,7 +433,7 @@ final class ChatEngine implements AutoCloseable {
         }
     }
 
-    private void storeContent(Entry entry, Content content) throws Exception {
+    void storeContent(Entry entry, Content content) throws Exception {
         byte[] plaintext = bytes(content);
         try { vault.put("body/" + entry.id(), vault.seal(contentKey(entry), plaintext)); }
         finally { Arrays.fill(plaintext, (byte) 0); }
@@ -422,7 +470,8 @@ final class ChatEngine implements AutoCloseable {
     private void markRead(Entry entry) throws Exception {
         vault.transaction(() -> {
             write("entry/" + entry.id(), entry.withState("READ"));
-            write("ack/" + entry.id(), new Ack(entry.id(), entry.expiresAt(), "read"));
+            if (entry.groupEpoch()!=null) groups.acknowledge(entry,"read");
+            else write("ack/" + entry.id(), new Ack(entry.id(), entry.expiresAt(), "read"));
             return null;
         });
     }
@@ -434,8 +483,11 @@ final class ChatEngine implements AutoCloseable {
             vault.remove("body/" + entry.id());
             vault.remove("entry/" + entry.id());
             vault.remove("outbox/" + entry.id());
-            if (acknowledgement != null && entry.expiresAt() > System.currentTimeMillis())
-                write("ack/" + entry.id(), new Ack(entry.id(), entry.expiresAt(), acknowledgement));
+            vault.remove("group-out/" + entry.id());
+            if (acknowledgement != null && entry.expiresAt() > System.currentTimeMillis()) {
+                if (entry.groupEpoch()!=null) groups.acknowledge(entry,acknowledgement);
+                else write("ack/" + entry.id(), new Ack(entry.id(), entry.expiresAt(), acknowledgement));
+            }
             return null;
         });
     }
@@ -445,6 +497,10 @@ final class ChatEngine implements AutoCloseable {
         AndroidVault.expireContentKeys(now);
         vault.transaction(() -> {
             for (String prefix : accountPrefixes()) {
+                groups.purge(prefix,now);
+                photos.purge(prefix,now);
+                Renewal pending = read(prefix + "session-renewal", Renewal.class);
+                if (pending != null && pending.expiresAt() <= now) vault.remove(prefix + "session-renewal");
                 for (String name : vault.names(prefix + "entry/")) {
                     Entry entry = read(name, Entry.class);
                     if (entry.expiresAt() <= now) {
@@ -510,7 +566,7 @@ final class ChatEngine implements AutoCloseable {
 
     private void receive(Incoming message) throws Exception {
         if (message.expiresAt() <= System.currentTimeMillis()) return;
-        if (!signal.isVerified(message.senderId())) { unverifiedIncoming = true; return; }
+        if (!signal.isVerified(message.senderId()) || peers().stream().noneMatch(peer -> peer.userId().equals(message.senderId()) && peer.deviceId().equals(message.senderDeviceId()))) { unverifiedIncoming = true; return; }
         if (vault.get("seen/" + message.id()) != null) return;
         if (vault.names("entry/").size() >= 100) return;
         byte[] imageCiphertext = message.mediaId() == null ? null : api.download(message.mediaId());
@@ -537,7 +593,10 @@ final class ChatEngine implements AutoCloseable {
 
     void sync() throws Exception {
         purge();
-        if (!authenticated()) return;
+        if (!authenticated()) {
+            if (account != null && account.accessToken() != null && !account.accessToken().isEmpty()) invalidateToken();
+            return;
+        }
         try {
             flushAcks();
             flushOutgoing();
@@ -547,7 +606,7 @@ final class ChatEngine implements AutoCloseable {
             flushAcks();
             List<Status> statuses = new ArrayList<>();
             List<Entry> outgoing = new ArrayList<>();
-            for (Entry entry : entries(null)) if (entry.outgoing()) outgoing.add(entry);
+            for (Entry entry : entries(null)) if (entry.outgoing() && entry.groupEpoch()==null) outgoing.add(entry);
             for (int offset = 0; offset < outgoing.size(); offset += 50) {
                 List<String> ids = new ArrayList<>();
                 for (Entry entry : outgoing.subList(offset, Math.min(outgoing.size(), offset + 50))) ids.add(entry.id().toString());
@@ -561,8 +620,12 @@ final class ChatEngine implements AutoCloseable {
                 }
                 return null;
             });
-            if (System.currentTimeMillis() >= nextKeyCheck) { replenishKeys(); nextKeyCheck = System.currentTimeMillis() + 3_600_000; }
+            boolean hadGroups=!groups.conversations().isEmpty();
+            groups.sync();
+            if (!hadGroups && !groups.conversations().isEmpty()) nextKeyCheck=0;
+            if (System.currentTimeMillis() >= nextKeyCheck) { replenishKeys(); nextKeyCheck = System.currentTimeMillis() + (groups.conversations().isEmpty() ? 3_600_000 : 30_000); }
             refreshProfiles();
+            photos.sync();
             online = true;
         } catch (RelayApi.ApiFailure failure) {
             online = false;
@@ -571,37 +634,145 @@ final class ChatEngine implements AutoCloseable {
         } catch (IOException failure) { online = false; throw failure; }
     }
 
-    void connect(Runnable wake) { if (socket == null && authenticated()) socket = api.events(wake); }
-    void pushToken(String token) throws Exception { api.call("POST", "/devices/push", Collections.singletonMap("token", token), Void.class); }
+    void connect(Runnable wake) { this.wake = wake; reconnect(); }
+    void reconnect() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (wake == null || !accessReady() || realtimeReady || now < nextConnect) return;
+        nextConnect = now + 10_000;
+        long generation = ++connectionGeneration;
+        if (socket != null) socket.cancel();
+        socket = api.events(wake, connected -> {
+            if (generation != connectionGeneration) return;
+            realtimeReady = connected;
+            if (!connected) presence.disconnected();
+        });
+    }
+        void pushToken(String token) throws Exception { api.call("POST", "/devices/push", Map.of("token", token, "routeHints", true), Void.class); }
     void disablePush() throws Exception { api.call("DELETE", "/devices/push", null, Void.class); }
 
-    private void invalidateToken() throws Exception {
+        UUID openNotification(String reference) throws Exception {
+        if (!authenticated() || !PushService.validReference(reference)) return null;
+        NotificationDestination destination;
+        try { destination = api.call("POST", "/notifications/resolve", Map.of("reference", reference), NotificationDestination.class); }
+        catch (RelayApi.ApiFailure failure) { if (failure.status == 404 || failure.status == 410) return null; throw failure; }
+        if (destination == null || !account.userId().equals(destination.userId()) || !account.deviceId().equals(destination.deviceId())
+            || destination.conversationId() == null || destination.messageId() == null || destination.expiresAt() <= System.currentTimeMillis()
+            || destination.expiresAt() > System.currentTimeMillis() + PushService.ROUTE_LIFETIME) return null;
+        sync();
+        return notificationConversation(destination);
+        }
+
+        UUID notificationConversation(NotificationDestination destination) throws Exception {
+        if (!authenticated() || destination == null || !account.userId().equals(destination.userId()) || !account.deviceId().equals(destination.deviceId())
+            || destination.expiresAt() <= System.currentTimeMillis() || destination.messageId() == null || destination.conversationId() == null) return null;
+        Entry entry = read("entry/" + destination.messageId(), Entry.class);
+        if (entry == null || entry.outgoing() || !entry.peerId().equals(destination.conversationId()) || entry.expiresAt() <= System.currentTimeMillis()
+            || !entry.state().equals("DELIVERED") || entry.keyOwner() != null && !account.userId().equals(entry.keyOwner())
+            || !vault.names("body/").contains("body/" + entry.id())) return null;
+        if (entry.groupEpoch() != null) {
+            GroupChat.Conversation group = groups.get(entry.peerId());
+            return groups.ready(group) ? entry.peerId() : null;
+        }
+        Peer peer = peers().stream().filter(value -> value.userId().equals(entry.peerId())).findFirst().orElse(null);
+        if (peer == null || !signal.isVerified(peer.userId())) return null;
+        Contact current;
+        try { current = api.call("GET", "/users/id/" + peer.userId(), null, Contact.class); }
+        catch (RelayApi.ApiFailure failure) { if (failure.status == 404) return null; throw failure; }
+        if (current == null || !peer.userId().equals(current.userId()) || !peer.deviceId().equals(current.deviceId())
+            || !peer.identityKey().equals(current.identityKey())) return null;
+        signal.verifyPeer(peer.userId(), Base64.getDecoder().decode(peer.identityKey()));
+        return peer.userId();
+        }
+
+    private Renewal prepareRenewal(Account owner) throws Exception {
+        Renewal pending = read("session-renewal", Renewal.class);
+        if (pending != null && pending.expiresAt() > System.currentTimeMillis() && owner.refreshToken().equals(pending.token())
+                && pending.next() != null && pending.next().matches("[A-Za-z0-9_-]{43}") && !pending.next().equals(pending.token())) return pending;
+        byte[] entropy = new byte[32]; new java.security.SecureRandom().nextBytes(entropy);
+        String next;
+        try { next = Base64.getUrlEncoder().withoutPadding().encodeToString(entropy); }
+        finally { Arrays.fill(entropy, (byte) 0); }
+        Renewal prepared = new Renewal(owner.refreshToken(), next, owner.refreshExpiresAt());
+        vault.transaction(() -> { write("session-renewal", prepared); return null; });
+        return prepared;
+    }
+
+    private void refreshSession(boolean rejected) throws Exception {
+        if (!rejected && accessReady()) return;
+        if (!remembered()) { invalidateToken(); throw new RelayApi.ApiFailure(401); }
+        Account previous = account;
+        Renewal pending = prepareRenewal(previous);
+        Token token;
+        try { token = api.call("POST", "/auth/refresh", new Refresh(pending.token(), pending.next()), Token.class); }
+        catch (RelayApi.ApiFailure failure) {
+            if (failure.status != 401) { if (failure.status == 403) invalidateToken(); throw failure; }
+            Account recovering = new Account(previous.origin(), previous.handle(), previous.userId(), previous.deviceId(), "", 0, true, pending.next(), previous.refreshExpiresAt());
+            vault.transaction(() -> { write("account", recovering); vault.remove("session-renewal"); return null; });
+            account = recovering; api.token(null);
+            pending = prepareRenewal(recovering);
+            try { token = api.call("POST", "/auth/refresh", new Refresh(pending.token(), pending.next()), Token.class); }
+            catch (RelayApi.ApiFailure recoveryFailure) {
+                if (recoveryFailure.status == 401 || recoveryFailure.status == 403) invalidateToken();
+                throw recoveryFailure;
+            }
+        }
+        long now = System.currentTimeMillis();
+        if (token == null || !previous.userId().equals(token.userId()) || !previous.deviceId().equals(token.deviceId())
+                || token.accessToken() == null || !token.accessToken().matches("[A-Za-z0-9_-]{43}")
+                || token.refreshToken() == null || !token.refreshToken().matches("[A-Za-z0-9_-]{43}")
+                || !token.refreshToken().equals(pending.next()) || token.accessToken().equals(token.refreshToken())
+                || token.expiresAt() <= now + 5000 || token.expiresAt() > now + 3_660_000
+                || token.refreshExpiresAt() <= token.expiresAt() || token.refreshExpiresAt() > now + 2_592_060_000L) {
+            invalidateToken();
+            throw new SecurityException("Renewed session does not match the saved account");
+        }
+        Account updated = new Account(previous.origin(), previous.handle(), previous.userId(), previous.deviceId(), token.accessToken(), token.expiresAt(), true, token.refreshToken(), token.refreshExpiresAt());
+        vault.transaction(() -> { write("account", updated); vault.remove("session-renewal"); return null; });
+        account = updated;
+        api.token(token.accessToken());
+        connectionGeneration++; realtimeReady = false; nextConnect = 0;
+        presence.disconnected();
+        if (socket != null) socket.cancel();
+        socket = null;
+        if (wake != null) connect(wake);
+    }
+
+    void invalidateToken() throws Exception {
+        if (account == null) return;
+        connectionGeneration++; realtimeReady = false;
+        presence.disconnected();
         account = new Account(account.origin(), account.handle(), account.userId(), account.deviceId(), "", 0, account.enrolled());
+        if (socket != null) socket.cancel();
+        socket = null;
+        online = false;
         api.token(null);
-        vault.transaction(() -> { write("account", account); return null; });
+        vault.transaction(() -> { write("account", account); vault.remove("session-renewal"); return null; });
     }
 
     void logout() throws Exception {
         try {
             try { if (authenticated()) flushAcks(); }
             catch (IOException failure) { online = false; }
-            finally { if (api != null && account != null && !account.accessToken().isEmpty()) api.call("POST", "/auth/logout", null, Void.class); }
+            finally { if (api != null && account != null && (remembered() || (account.accessToken() != null && !account.accessToken().isEmpty()))) api.call("POST", "/auth/logout", null, Void.class); }
         }
         catch (IOException failure) { online = false; }
         finally {
             try {
                 if (account != null) {
                     Account signedOut = new Account(account.origin(), account.handle(), account.userId(), account.deviceId(), "", 0, account.enrolled());
-                    vault.transaction(() -> { write("account", signedOut); vault.saveAccount(signedOut.userId()); return null; });
+                    vault.transaction(() -> { write("account", signedOut); vault.remove("session-renewal"); vault.saveAccount(signedOut.userId()); return null; });
                 }
             } finally { online = false; close(); }
         }
     }
 
     @Override public void close() {
+        connectionGeneration++; realtimeReady = false;
+        presence.foreground(false);
         if (socket != null) socket.cancel();
         if (api != null) api.close();
         socket = null;
+        wake = null;
         api = null;
         signal = null;
         account = null;

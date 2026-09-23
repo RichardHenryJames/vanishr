@@ -32,7 +32,7 @@ public class SecurityConfig {
                         .referrerPolicy(policy -> policy.policy(org.springframework.security.web.header.writers.ReferrerPolicyHeaderWriter.ReferrerPolicy.NO_REFERRER)))
                 .authorizeHttpRequests(requests -> requests
                         .requestMatchers(HttpMethod.GET, "/health").permitAll()
-                        .requestMatchers(HttpMethod.POST, "/auth/register", "/auth/login", "/auth/google", "/auth/google/challenge").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/auth/register", "/auth/login", "/auth/google", "/auth/google/challenge", "/auth/refresh").permitAll()
                         .requestMatchers(HttpMethod.POST, "/devices").hasAuthority("ENROLL")
                         .requestMatchers("/auth/me", "/auth/logout").authenticated()
                         .anyRequest().hasAuthority("DEVICE"))
@@ -59,13 +59,15 @@ public class SecurityConfig {
             if (!request.isSecure()) { error(response, 426, "tls_required"); return; }
             response.setHeader("Cache-Control", "no-store");
             response.setHeader("Pragma", "no-cache");
-            int limit = request.getRequestURI().startsWith("/media/") ? RelayPolicy.MAX_MEDIA_BYTES : 196_608;
+                int limit = request.getRequestURI().startsWith("/media/") ? RelayPolicy.MAX_MEDIA_BYTES
+                    : request.getRequestURI().matches("/groups/[0-9a-fA-F-]{36}/messages") ? 3_000_000 : 196_608;
             if (request.getContentLengthLong() > limit) { error(response, 413, "request_too_large"); return; }
             try {
                 String source = RedisRelay.digest(request.getRemoteAddr().getBytes(StandardCharsets.US_ASCII));
                 limiter.require("ip:" + source, 300, 60);
                 String path = request.getRequestURI();
                 if (path.equals("/auth/google/challenge")) limiter.require("google-challenge:" + source, 10, 60);
+                else if (path.equals("/auth/refresh")) limiter.require("renew:" + source, 30, 60);
                 else if (List.of("/auth/register", "/auth/login", "/auth/google").contains(path)) limiter.require("auth:" + source, 10, 60);
                 String header = request.getHeader("Authorization");
                 if (header != null) {

@@ -27,9 +27,17 @@ final class RelayApi implements AutoCloseable {
         ApiFailure(int status, String code) {
             super("Relay request failed");
             this.status = status;
-            this.code = Set.of("device_already_registered", "device_unavailable", "account_unavailable", "google_sign_in_unavailable", "prekeys_unavailable").contains(code) ? code : "";
+                this.code = Set.of("device_already_registered", "device_unavailable", "account_unavailable", "google_sign_in_unavailable", "prekeys_unavailable",
+                    "group_full","group_capacity","group_changed","group_not_ready","group_identity_changed","group_owner_required","owner_must_close_group").contains(code) ? code : "";
         }
         String userMessage() {
+            if (code.equals("group_full")) return "This group has reached its 200-member limit.";
+            if (code.equals("group_capacity")) return "An account can have up to 20 active groups and invitations.";
+            if (code.equals("group_changed")) return "Group membership changed. Refresh and try again.";
+            if (code.equals("group_not_ready")) return "Wait for another member and verified group keys.";
+            if (code.equals("group_identity_changed")) return "A group member's device identity changed. Verify them again before reinviting.";
+            if (code.equals("group_owner_required")) return "Only the group owner can change membership.";
+            if (code.equals("owner_must_close_group")) return "The owner must close the group before leaving.";
             if (status == 429) return "Too many requests. Wait a moment before trying again.";
             if (status == 401) return "Sign-in failed or your session expired. Sign in again.";
             if (status == 409 && code.equals("device_already_registered")) return "This account has a different registered device. Replace it only if you intend to move the account here.";
@@ -58,6 +66,8 @@ final class RelayApi implements AutoCloseable {
             .connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).callTimeout(30, TimeUnit.SECONDS).build();
     private final HttpUrl origin;
     private String token;
+    @FunctionalInterface interface SessionRefresh { void refresh(boolean rejected) throws Exception; }
+    private SessionRefresh sessionRefresh;
 
     RelayApi(String baseUrl, String token) {
         origin = HttpUrl.get(baseUrl);
@@ -69,6 +79,7 @@ final class RelayApi implements AutoCloseable {
 
     String origin() { return origin.toString(); }
     void token(String token) { this.token = token; }
+    void sessionRefresh(SessionRefresh refresh) { sessionRefresh = refresh; }
 
     private Request.Builder request(String path) {
         if (!path.startsWith("/") || path.startsWith("//")) throw new IllegalArgumentException("Invalid relay path");
@@ -77,7 +88,25 @@ final class RelayApi implements AutoCloseable {
         return request;
     }
 
-    private byte[] execute(Request request, int maximum) throws IOException {
+    private Request authorize(Request request) {
+        Request.Builder builder = request.newBuilder().removeHeader("Authorization");
+        if (token != null && !token.isEmpty()) builder.header("Authorization", "Bearer " + token);
+        return builder.build();
+    }
+
+    private byte[] execute(Request request, int maximum) throws Exception {
+        boolean renewal = request.url().encodedPath().equals("/auth/refresh");
+        if (renewal) request = request.newBuilder().removeHeader("Authorization").build();
+        else if (sessionRefresh != null) { sessionRefresh.refresh(false); request = authorize(request); }
+        try { return executeOnce(request, maximum); }
+        catch (ApiFailure failure) {
+            if (failure.status != 401 || renewal || sessionRefresh == null) throw failure;
+            sessionRefresh.refresh(true);
+            return executeOnce(authorize(request), maximum);
+        }
+    }
+
+    private byte[] executeOnce(Request request, int maximum) throws IOException {
         try (Response response = client.newCall(request).execute()) {
             if (!response.isSuccessful()) {
                 byte[] error = new byte[0];
@@ -92,7 +121,7 @@ final class RelayApi implements AutoCloseable {
         }
     }
 
-    <Result> Result call(String method, String path, Object body, Class<Result> type) throws IOException {
+    <Result> Result call(String method, String path, Object body, Class<Result> type) throws Exception {
         RequestBody content = body == null ? null : RequestBody.create(JSON.toJson(body).getBytes(StandardCharsets.UTF_8), MediaType.get("application/json"));
         if ((method.equals("POST") || method.equals("PUT")) && content == null) content = RequestBody.create(new byte[0], null);
         byte[] response = execute(request(path).method(method, content).build(), 8 * 1024 * 1024);
@@ -101,21 +130,43 @@ final class RelayApi implements AutoCloseable {
         catch (JsonParseException failure) { throw new IOException("Invalid relay response"); }
     }
 
-    void upload(UUID id, UUID recipientId, UUID recipientDeviceId, long expiresAt, byte[] ciphertext) throws IOException {
+    void upload(UUID id, UUID recipientId, UUID recipientDeviceId, long expiresAt, byte[] ciphertext) throws Exception {
         String path = "/media/" + id + "?recipientId=" + recipientId + "&recipientDeviceId=" + recipientDeviceId + "&expiresAt=" + expiresAt;
         execute(request(path).put(RequestBody.create(ciphertext, MediaType.get("application/octet-stream"))).build(), 4096);
     }
 
-    byte[] download(UUID id) throws IOException { return execute(request("/media/" + id).get().build(), app.vanishr.crypto.ImageCipher.MAX_IMAGE_BYTES + 16); }
+    byte[] download(UUID id) throws Exception { return execute(request("/media/" + id).get().build(), app.vanishr.crypto.ImageCipher.MAX_IMAGE_BYTES + 16); }
 
-    WebSocket events(Runnable wake) {
+    byte[] groupMedia(UUID group,UUID message) throws Exception { return execute(request("/groups/"+group+"/messages/"+message+"/media").get().build(),app.vanishr.crypto.ImageCipher.MAX_IMAGE_BYTES+16); }
+
+    ContactPresence.Status[] presence(ContactPresence.Update update) throws Exception {
+        if (sessionRefresh != null) sessionRefresh.refresh(false);
+        RequestBody body = RequestBody.create(JSON.toJson(update).getBytes(StandardCharsets.UTF_8), MediaType.get("application/json"));
+        Call call = client.newCall(request("/presence").post(body).build());
+        call.timeout().timeout(3, TimeUnit.SECONDS);
+        try (Response response = call.execute()) {
+            if (!response.isSuccessful()) throw new ApiFailure(response.code());
+            if (response.body() == null) throw new IOException("Missing presence response");
+            byte[] bytes = AndroidVault.boundedRead(response.body().byteStream(), 65_536);
+            try { return JSON.fromJson(new String(bytes, StandardCharsets.UTF_8), ContactPresence.Status[].class); }
+            catch (JsonParseException failure) { throw new IOException("Invalid presence response"); }
+            finally { Arrays.fill(bytes, (byte) 0); }
+        }
+    }
+
+    WebSocket events(Runnable wake, java.util.function.Consumer<Boolean> state) {
         return client.newWebSocket(request("/events").build(), new WebSocketListener() {
+            @Override public void onOpen(WebSocket socket, Response response) { state.accept(true); wake.run(); }
             @Override public void onMessage(WebSocket socket, String text) { if (text.equals("{\"event\":\"new_message\"}")) wake.run(); }
+            @Override public void onClosing(WebSocket socket, int code, String reason) { state.accept(false); socket.close(code, null); }
+            @Override public void onClosed(WebSocket socket, int code, String reason) { state.accept(false); }
+            @Override public void onFailure(WebSocket socket, Throwable failure, Response response) { state.accept(false); }
         });
     }
 
     @Override public void close() {
         token = null;
+        sessionRefresh = null;
         client.dispatcher().cancelAll();
         client.connectionPool().evictAll();
         client.dispatcher().executorService().shutdown();

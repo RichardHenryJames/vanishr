@@ -1,14 +1,45 @@
 # Vanishr
 
-Android-first, one-to-one disappearing chat. The signed client encrypts text and
+Android-first direct and private-group disappearing chat. The signed client encrypts text and
 images before upload; a Java 21 / Spring Boot relay handles only ciphertext and
 minimal delivery metadata. **Development foundation, not an audited production
 messenger. Do not use it for real sensitive conversations yet.**
 
 ## Hosted Development Build
 
-Download the signed Android 0.2.7 APK, matching application/libsignal source and
+Download the signed Android 0.3.9 APK, matching application/libsignal source and
 license notices at **https://vanishr-download.vercel.app**.
+
+Release 0.3.9/code 21 addresses recurring PIN/pattern prompts after biometric
+phone unlock on older Android. It retains encrypted Keystore storage and
+app-enforced secure/unlocked-phone checks; new Android 15+ keys also retain
+Keystore lock enforcement. Existing protected records may need one final
+credential unlock to migrate, and Android can still require a credential after
+reboot. All 89 Android QA tests, device-security checks, QA/release lint and the
+signed live workflow pass on Android 12. The signed APK, matching source and
+no-store code-21 update feed are published and verified on the existing site.
+Physical/OEM biometric behavior remains unverified. Install over the existing
+app without uninstalling or clearing storage. See
+[verification](docs/VERIFICATION.md#release-039).
+
+Release 0.3.8 fixes a timing issue that could discard a contact's photo
+reply when both people request photos at once. It also prevents the status timer
+from reading a closed account vault. All 83 Android QA tests, lint and the signed
+live workflow passed, including delayed contact-photo display and removal.
+The signed APK, matching source and code-20 update feed are published and verified
+on 2026-09-22. Update over the existing app without clearing storage, and open
+both updated phones online to refresh photos. See
+[verification](docs/VERIFICATION.md#release-038).
+
+Release 0.3.7 adds name-only chat rows/headers and short-lived peer
+Online/Typing status, retaining the read-only username in Contact profile.
+JVM verification, 80 Android QA tests, narrow-screen checks and signed live
+presence/FCM/messaging tests passed. The signed workflow also exposed a stale
+sync callback during sign-out; its guard passed four focused regressions and
+the complete signed rerun. The relay, signed APK, matching source and code-19
+update feed are published and verified on 2026-09-22. Install over the existing
+app without uninstalling or clearing storage. Both contacts need 0.3.7 for live
+status. See [verification](docs/VERIFICATION.md#release-037) for evidence.
 
 The APK has this tested cloud relay prefilled:
 `https://vanishr-dev-ec0d36067d.hhb5hebdbfagapbu.centralindia.sysgen.cloudapp.azure.com`.
@@ -19,8 +50,9 @@ no manual CA installation is needed for this hosted build.
 The hosted candidate includes the profile, username contact lookup and
 account-switching flows below, with Google/FCM client configuration. Provider
 configuration is deployed on the dev/test relay. Google sign-in is restricted to
-approved test accounts; live FCM delivery and broader provider/account-switch
-acceptance remain unverified.
+approved test accounts. Actual FCM delivery and tapping into the correct chat
+passed on the dedicated release emulator for 0.3.5. Physical-phone/Doze behavior
+and broader Google-provider acceptance still require device testing.
 
 Version 0.2.6 removes the separate app lock while retaining phone-lock protection.
 Install this signed update over an older release once, without uninstalling or
@@ -34,13 +66,124 @@ network delivery still takes time. My profile keeps both editors open with
 inline saving/error states. The public APK, matching source and update feed
 were verified anonymously on 2026-09-18.
 
+Version 0.2.8 fixes session-expiry recovery without
+requiring Use another account or local sign-out. It refreshes Google credential
+state and safely reenrolls the same device keys after fresh authentication.
+The public APK, matching source and update feed were verified anonymously on
+2026-09-19. Controlled Google recovery tests and live password-session recovery
+passed; an actual Google-provider retry on the user's phone remains unverified.
+
+Version 0.3.0 adds invite-only groups with up to 200 members
+including the owner. It supports encrypted text/photos, disappearing content,
+accept/decline, member lists, owner removal, leave/close and per-member receipts.
+Members independently verify the owner and explicitly trust that owner to verify
+invitees. New membership needs owner approval before sending resumes; setup for
+large groups can take several foreground sync cycles. The group-capable relay
+is deployed in the existing resource group. The public APK, matching source and
+version-code-12 update feed were verified anonymously on 2026-09-19. All group
+participants need 0.3.0 or later; install over the existing signed app without
+uninstalling or clearing data.
+
+Version 0.3.1 brings the Compact Classic UI: one compact home toolbar,
+search and unread filtering, smaller conversation rows and a matching chat
+composer. Contact profile, My profile, attachments and group actions open as
+secure bottom sheets. Existing actions and trust checks are retained; an unsent
+chat draft survives same-conversation profile edits in memory and still clears
+on backgrounding. The signed live workflow, five 320dp/130%-text checks, and
+public APK/source/update-feed verification passed on 2026-09-20. Install over
+the existing app without uninstalling or clearing data.
+
+Version 0.3.2 includes the empty-state alignment fix. No conversations
+yet, All caught up and No matching conversations now center each line of text.
+The audit also covers empty direct/group chats and startup/storage messages,
+including 320dp screens with 130% text. Signed release/lint, device-security and
+live messaging checks passed. The public APK, matching source and version-code-14
+update feed were verified anonymously on 2026-09-20. Install over the existing
+app without uninstalling or clearing data.
+
+Version 0.3.3 adds private profile photos. My profile lets you choose,
+preview, save or remove a photo. Photos are shared through Signal only between
+mutually added, independently verified contacts, never in username lookup.
+Received copies expire within 24 hours unless refreshed. This release also
+corrects the fresh-install Keystore error wording and Google sign-in screen flash.
+The Android 12-14 PIN-unlock workaround remains necessary on affected phones.
+Signed and live release checks passed. The public APK, matching source and
+version-code-15 update feed were verified anonymously on 2026-09-20.
+
+Version 0.3.4 adds automatic remembered sign-in for both Google
+and password accounts, and a fix for crossed profile-photo requests between
+mutually verified contacts. One sign-in after upgrading may be needed to obtain
+the new encrypted renewal credential. Normal use renews it automatically; explicit
+sign-out, device replacement, a relay Redis reset or 30 days without renewal still
+requires authentication. Already-stalled mutual photo exchanges retry promptly
+without making photos visible in search. Signed live verification and relay
+deployment passed. The public APK, matching source and version-code-16 feed
+were verified anonymously on 2026-09-21. Install over the existing signed app
+without uninstalling or clearing data. Both contacts should update and open the
+app online to complete photo exchange. See [verification](docs/VERIFICATION.md).
+
+Version 0.3.5 adds notification-to-chat navigation. A generic
+notification can carry a short-lived random reference; after phone unlock and
+authenticated sync, tapping it opens the matching verified direct or group chat.
+Expired, superseded, read or invalid references safely return to the chat list.
+View-once content still requires Open. Push registration no longer gets dropped
+behind unrelated busy UI work, and My profile shows its registration status.
+The signed live FCM delivery/tap workflow passed. The public APK, matching source
+and code-17 feed were verified anonymously on 2026-09-21. Install over the
+existing signed app without uninstalling or clearing data, then open the app
+and enable notifications in My profile with Android permission allowed.
+
+Version 0.3.6 makes notifications on by default when no preference
+has been saved. After sign-in, Android 13+ asks for notification permission once;
+choosing Allow enables automatic registration without changing the profile toggle.
+A saved Off preference is preserved, including a legacy Off value written during
+sign-out by an older release; enable it once in My profile if needed. Sign-out now
+suspends alerts without changing that preference, and late registration callbacks
+cannot reactivate them. The signed default-on permission/FCM/tap workflow passed.
+The public APK, matching source and code-18 feed were verified anonymously on
+2026-09-21. Install over the existing app without uninstalling or clearing data.
+
 This is development/test hosting under the Visual Studio Azure benefit, not
 a production-service launch or an independently reviewed security release.
+
+## Public Website
+
+The public information site is **https://vanishr-download.vercel.app**, with
+Android download, security and website-privacy pages. It uses crawlable static
+HTML, canonical URLs, social previews, structured data, robots.txt and
+https://vanishr-download.vercel.app/sitemap.xml. The optional llms.txt summary
+points to factual pages; it is not a special Google or AI ranking mechanism.
+
+Search Console ownership is verified. Google accepted the sitemap and discovered
+all four pages. A separate homepage indexing request hit Google's daily quota on
+2026-09-21; retry after Google resets that quota. The homepage was still
+"Discovered - currently not indexed" at verification. Submission does not guarantee
+indexing, rankings, traffic or inclusion in AI answers.
+
+Website-only Google Analytics uses the **Vanishr Website** property (`555211785`),
+web stream `15815337269`, measurement ID `G-T42R6HPR2E`. The
+[Analytics dashboard](https://analytics.google.com/analytics/web/#/a364733818p555211785/reports/intelligenthome)
+requires the owner's Google sign-in. No Google tag loads before consent. Visitors
+can decline or revoke analytics, and GPC/Do Not Track keeps it off. Google signals,
+user-provided data and enhanced measurement are off; ads personalisation is
+disallowed in all 307 regions. The Android app remains analytics-free. Initial
+reports can include the deployment's consented QA visit/download event.
+
+For a website-only rebuild, [scripts/prepare-website.ps1](scripts/prepare-website.ps1)
+requires the locally audited, published app release and writes a separate
+`.tools/vercel-website-<version>` stage without changing its APK, source or feed.
+The shared [renderer](scripts/render-website.ps1) also runs from future app release
+packaging. Public Google IDs belong in [download/site-settings.json](download/site-settings.json),
+never credentials. Upload only the audited generated stage, not the templates or
+repository root. Hosting remains static-only on the existing Vercel Hobby project;
+no Azure resources or paid add-ons were changed for this website.
 
 ## Included
 
 - Signup/login, one active device per account, explicit device replacement.
+- Invite-only groups, up to 200 members including owner and outstanding invitations.
 - Profile avatar, owner-editable shared display name and unique username.
+- Optional encrypted profile photos shared only with mutual verified contacts.
 - Contact profile with an editable local display name and read-only username.
 - Non-destructive sign-out and isolated account switching without Android's Clear data step.
 - Username contact lookup followed by independent safety-number verification.
@@ -53,7 +196,7 @@ a production-service launch or an independently reviewed security release.
 - Automatic update prompts and a manual update check; Android-approved signed APK installation.
 - Real Redis/PostgreSQL integration tests and Android security instrumentation.
 
-No groups, calls, reactions, stories, channels, search, browser client or permanent
+No calls, reactions, stories, public channels, history search, browser client or permanent
 message/media history. Images are bounded to 2 MiB and stored transiently in Redis,
 not persistent object storage. Java 21 is required by the pinned libsignal release.
 

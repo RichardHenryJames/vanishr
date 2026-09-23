@@ -1,6 +1,7 @@
 # Architecture
 
-Vanishr is an Android-first one-device-per-account, one-to-one messenger. The
+Vanishr is an Android-first one-device-per-account messenger with direct chats
+and invite-only groups of up to 200 members. The
 implementation is a security-focused development foundation, not a reviewed
 production messaging service. Read [THREAT-MODEL.md](THREAT-MODEL.md) first.
 
@@ -8,7 +9,7 @@ production messaging service. Read [THREAT-MODEL.md](THREAT-MODEL.md) first.
 flowchart LR
     A[Signed Android client A] -->|HTTPS: Signal ciphertext| R[Java 21 Spring relay]
     R -->|Atomic TTL: ciphertext only| E[Nonpersistent TLS Redis]
-    R -->|Accounts and public keys only| P[TLS PostgreSQL]
+   R -->|Accounts, public keys, group membership| P[TLS PostgreSQL]
     R -->|Generic wake-up only| F[FCM]
     R -->|HTTPS / WSS| B[Signed Android client B]
    B -->|Phone-unlocked access and decryption| K[Android Keystore + encrypted vault]
@@ -35,6 +36,16 @@ Backgrounding clears the UI and closes the in-memory engine; returning reopens
 the encrypted state without a separate app PIN or device-credential prompt.
 Legacy authentication-bound vault/content keys migrate atomically to new
 phone-unlocked keys without consuming view-once content or extending expiry.
+
+Google and password accounts retain an encrypted, rotating renewal credential so
+ordinary reopening does not require provider/password input after the one-hour
+access token expires. The request layer renews before expiry or retries once after
+a 401. The relay atomically rotates hash-only access/renewal records; renewal is
+bounded to 30 days and tied to the current device generation. The client commits
+a random replacement handle before rotation to recover a lost response. Network
+failure retains encrypted account state; rejected renewal clears credentials only.
+Explicit sign-out removes both credentials and parks content as before. Redis
+reset, device replacement or 30 days without renewal requires sign-in again.
 
 A separate bounded HTTPS client checks the static download site's `updates.json`
 at most daily automatically, or on demand from My profile. It sends no account
@@ -63,6 +74,22 @@ checksum, version manifest, corresponding source and notices.
    content and ratchet state in one atomic transaction, then acknowledges delivery.
 8. Timed payloads/blobs are deleted from Redis on delivery. View-once payloads
    are deleted on read. All payloads and receipts expire at the hard deadline.
+
+## Group flow
+
+GroupDirectory serializes membership mutations and validates capacity, roles and
+device bindings. GroupMessages stores one shared ciphertext/blob with independent
+recipient receipts in memory-only Redis. The relay never imports client crypto.
+GroupChat retains encrypted group state inside the existing account vault and
+uses official libsignal SignalGroup sender keys scoped to group/epoch/sender.
+
+The owner pins invitee identities; invitees pin the owner and explicitly accept
+the trust model. Owner-authenticated roster digests and titles, then sender-key
+distributions, travel over pairwise Signal sessions. Membership changes rotate
+epochs and pause sending until the owner's approval is available. New members
+receive no old epoch keys. Batched controls/prekey claims bound request work;
+one generic wake can represent many queued changes. Only the selected current
+account can access its groups; sign-out parks them with its existing keys/outbox.
 
 ## Profile and contact names
 
@@ -106,11 +133,20 @@ backs up WSS wake-ups. FCM is optional and generic; credentials must be supplied
 An authenticated existing session can queue encrypted outgoing content offline.
 Starting a new session requires online public-prekey retrieval.
 
-No background decryption occurs while the vault is closed. Devices offline for
-24 hours lose pending content and may need to republish prekeys. Redis restart
+No background decryption occurs while the vault is closed. Notification
+navigation does not change that boundary: an opted-in FCM payload carries only
+a generic event and opaque expiring reference. After unlock, the app resolves it
+through the authenticated relay, syncs and validates the specific local message
+and conversation trust before opening the chat. Invalid/stale references return
+to the list, and view-once content still needs explicit Open. The relay keeps
+one bounded mapping per device, not a public chat identifier in the push.
+
+Devices offline for 24 hours lose pending content and may need to republish prekeys. Redis restart
 loses pending delivery and tokens by design. PostgreSQL persists only minimal
-accounts/devices/public keys. There is no message recovery, history search,
-server-side media decoding, groups, reactions, calls or cloud chat backup.
+accounts/devices/public keys and group membership metadata. There is no message
+recovery, history search, server-side media decoding, reactions, calls or cloud
+chat backup. A 200-member limit is not a load guarantee; full multi-device load
+and independent group-protocol integration review remain release requirements.
 
 ## Operational boundaries
 

@@ -4,11 +4,23 @@ Status: implementation in progress; not an audited or production-certified messe
 
 ## Trust boundaries
 
-Vanishr is an Android-first, one-device-per-account, one-to-one messenger. A separately
+Vanishr is an Android-first, one-device-per-account messenger with direct chats and
+invite-only private groups of up to 200 members including the owner. A separately
 distributed, signed native client owns all private identity, session, and file keys.
 The relay has no content-decryption API, private key, or client crypto dependency.
 Do not serve executable client updates from the relay. No browser client is included:
 a compromised origin could replace browser JavaScript and steal plaintext.
+
+The separate public information/download website is not a chat client and has no
+account login, content viewer, relay credentials or client private keys. Its
+explicitly approved website-only Google Analytics loads only after visitor
+consent, never in the Android app. It measures public page visits and allowlisted
+download clicks, strips URL queries/fragments, disables advertising and honors
+GPC/Do Not Track. Revocation stops collection and clears its analytics cookies.
+Hosting still exposes network/request metadata; opted-in analytics adds Google's
+website-measurement processing. This is not anonymity or a production security
+claim. Public Google measurement/ownership IDs are not secrets. Only the audited
+static distribution may be uploaded, preserving the signed app and update feed.
 
 The endpoints, Android OS, libsignal native library, device random-number generator,
 app signing/distribution system, and the user's identity-verification channel must
@@ -32,6 +44,39 @@ Google compromise or account takeover can replace a device but cannot recover ol
 private keys; contacts must independently verify the replacement identity. Google
 learns that the user signs into this app, which is an additional metadata tradeoff.
 
+Device access tokens last one hour. Enrolled Google and password accounts also
+receive a separate 256-bit renewal credential, stored only in the phone-unlocked
+encrypted vault and as a digest-keyed record on the relay. Successful renewal
+atomically replaces both tokens with a fresh one-hour access token and a renewal
+deadline bounded to 30 days. The old access/renewal pair is retired, and every
+renewal verifies the current account/device generation. Enrollment tokens cannot
+renew. Token TTLs do not affect message/photo deadlines.
+
+The phone commits a random replacement renewal handle before requesting rotation.
+After a lost response, it may try that prepared handle once to recover the rotated
+session; it never saves a password or Google ID token for this purpose. Pending
+renewal state has the existing session deadline and is cleared on success,
+rejection, explicit sign-out or expiry. Offline/network failure preserves the
+encrypted remembered account; a rejected renewal fails closed without erasing
+content. Backgrounding still clears UI/plaintext while ordinary reopening goes
+directly to the retained account. Sign-out revokes the access/renewal pair and
+device replacement invalidates both through generation checks. A stolen renewal
+credential can authorize access until expiry/revocation; it does not decrypt
+Signal content. Redis remains nonpersistent: a relay Redis reset or 30 days
+without successful renewal requires sign-in again. Existing sessions may need
+one sign-in after upgrading to obtain a renewal credential.
+
+Expired or rejected remembered sessions clear saved credentials and their
+websocket, not account keys, contacts or retained content. Google reauthentication
+clears provider credential state and requests a fresh, account-only nonce without
+binding the old device ID. After Google verification, the returned account UUID
+must match the retained account; the client then enrolls the same device UUID and
+public key using a short-lived enrollment token. Matching registration is
+idempotent; a different registered device still needs explicit replacement.
+The returned device session must match that account/device. Failed or interrupted
+credential resets remain retryable without signing out. Enrollment lifetimes,
+one-use nonce checks and message deadlines are not extended by recovery.
+
 The unique username and optional, explicitly saved display name are account
 metadata visible to the relay and authenticated lookup clients. Only the
 authenticated owning account can edit them; no target account ID is accepted in
@@ -51,6 +96,125 @@ editor with a non-editable username. My profile, reached from the Chats avatar, 
 the separate owner-only account editor. There is no username update call in the
 contact editor, and the server still derives update ownership from the session.
 
+Profiles, attachments and other in-app dialogs use secure native bottom sheets.
+Their windows retain screenshot and overlay protection; backgrounding dismisses
+them and clears visible content. Same-conversation redraws preserve an unsent
+composer draft only in memory. The draft is not persisted and is cleared when
+the app backgrounds; switching conversations does not carry it to another peer.
+
+## Online and typing metadata
+
+Direct-chat headers display the saved contact name and only fresh Online or
+Typing status. Online means the official peer app is foregrounded, authenticated
+and connected, not that our own relay request succeeded. There is no last-seen
+history or offline label. Usernames remain read-only in the contact profile.
+
+Foreground clients send presence metadata over authenticated TLS. The relay sees
+the temporary audience (up to 128 pinned direct contacts), typing recipient and
+timing, but never draft text, photos or keys. Presence is not end-to-end encrypted.
+Responses require both clients to list each other's exact account/device/key
+identities, current sessions and live authenticated websocket connections.
+One-sided contacts, username lookup and group membership alone grant no access.
+
+Each heartbeat replaces one nonpersistent Redis record with an atomic 12-second
+TTL; typing lasts at most five seconds after the last keystroke. Disconnect and
+revocation prevent subsequent status responses. Android retains only expiring
+in-memory status, subtracts request time from its deadline, and clears it on local
+disconnect, backgrounding, failed requests or changed identities. An already
+received indicator can remain visible until its short deadline after network
+loss or a crash; this is not instantaneous availability. There is no permanent
+last-seen/audience database or background presence service. Older apps/relays
+leave the header name-only. A malicious peer can misreport its activity; status
+is never identity-verification or message-delivery proof.
+
+## Private profile photos
+
+An optional owner-chosen photo is a persistent profile setting in that account's
+encrypted local vault, not a server profile field or a photo imported from Google.
+The client re-encodes it as a square JPEG, at most 256 pixels and 32 KiB, without
+source EXIF metadata. Choosing, replacing and removing it require an authenticated
+account. A pending picker result is bound to that account; decoded previews and
+avatars are cleared from memory when the app backgrounds.
+
+Both parties must save and independently verify each other as direct contacts.
+A saved contact sends a photo-free request over its pinned official Signal session.
+The owner answers only requests from its own current verified contacts. Responses
+authenticate sender/recipient account and device IDs, request ID, photo revision
+and deadline. Unknown senders, unsolicited updates and changed device identities
+cannot populate the trusted client's photo cache. Group membership alone grants
+no photo permission. Username lookup and verification/search results never show
+photos, including cached photos, and the relay exposes no public photo URL.
+
+The separate ciphertext inbox and local requests, grants, outboxes, replay markers
+and received-photo caches have bounded deadlines no longer than 24 hours. A client
+requests refreshes after 12 hours while online. Encryption-ratchet changes and
+encrypted outbox persistence commit together; retries keep ciphertext and deadline.
+Crossing initial requests do not invalidate an authorized reply already in flight.
+An unanswered request to a current mutual verified contact can be replaced after
+at least one minute; this is a new bounded request, not an extension of an existing
+packet or received photo's deadline. Confirmed empty-photo replies do not trigger
+this retry, and unknown/changed identities still fail closed.
+Removing a contact clears its photo state and sends an encrypted revocation when
+possible. Removing the owner's photo sends a newer empty update to current grants.
+An offline recipient can retain its previously authorized copy until its existing
+deadline; a malicious recipient can keep a copy indefinitely. Removal is not
+remote erasure or DRM. Older apps ignore the separate profile inbox and show
+initials. The relay sees delivery relationships and ciphertext lengths, not photos.
+
+## Group trust and membership
+
+Direct-chat verification remains unchanged. Groups use an explicit verified-owner
+model: each member independently verifies the owner's identity, and the owner
+independently verifies every invitee. Joining requires explicit consent to trust
+that owner to approve the other members. This is not pairwise independent
+verification between every member, and it is not a claim of Signal private-group
+protocol compatibility. A dishonest owner can approve unwanted participants.
+
+The owner sends the canonical membership digest and encrypted group title over
+official Signal sessions. Only owner-approved account/device/public-key triples
+can receive sender-key distributions. Official libsignal GroupSessionBuilder and
+GroupCipher own sender-key generation, signatures, encryption and replay checks.
+Each membership revision has a new random encryption epoch. Senders re-fetch
+membership before encryption; old-revision requests fail on the relay. Members
+wait for owner approval after changes, so the owner must come online to complete
+a join/removal rekey. A device/key change requires removal, independent verification
+and reinvitation; it is never silently trusted.
+
+The relay persists group IDs, owner, revision/epoch and account/device/public-key
+membership only. Group titles, control contents, sender keys and message/image
+content are client-encrypted. Membership and traffic patterns are visible to
+the relay. Invitations expire after 24 hours. Groups are limited to 200 active
+members plus pending invitations, and each account to 20 active groups/invitations.
+Only the owner invites/removes/closes; other members can accept, decline or leave.
+There is no public discovery, join link, admin promotion or owner transfer.
+
+One ciphertext and one encrypted image are shared across recipient authorization
+records, rather than storing 199 image copies. Each member has separate delivery,
+read and view-once access. Timed shared payloads are deleted after every recipient
+has persisted them; view-once payloads after every recipient has read/deleted
+them, or the original deadline, whichever comes first. A member who read/deleted
+their copy cannot fetch the shared image again. Removed members lose relay access
+immediately; already delivered copies follow their original expiry. This does not
+prevent a malicious former member from retaining copies or shared old keys.
+
+Control and message writes use bounded TTLs atomically, and retries do not extend
+them or resurrect acknowledged payloads. Group control deadlines are authenticated
+inside the Signal payload as well as checked by the relay. Retired epoch state
+is pruned after the bounded delivery window; current sender state remains in the
+encrypted account partition. Group outboxes and content use the same protected
+storage and account isolation as direct messages. Group membership changes can
+cancel queued old-epoch sends; the UI reports these rather than resending under
+new identities without confirmation.
+
+Group capacity is a product bound, not a throughput promise. The dev/test host,
+Redis no-eviction limit, 256 live receipts per group, 512 pending control packets
+per recipient/group and existing API rate limits can apply backpressure. Initial
+200-member session setup may take multiple foreground sync cycles and prekey
+replenishment. Simultaneous 200-phone/OEM and sustained production-load testing
+remain required; no VM size or paid services are increased for this feature.
+
+## Client storage
+
 Send taps immediately show an in-memory Sending bubble, not a delivery receipt.
 At most eight not-yet-stored sends are retained; each has an ID and absolute
 deadline assigned at the tap. Retry keeps both unchanged. Peer verification,
@@ -64,18 +228,45 @@ cache, new logging or weaker identity check is introduced.
 
 Vanishr has no separate app lock or repeated credential prompt. While Android
 reports the phone unlocked, foreground startup opens the encrypted vault
-automatically. New Keystore wrapping/content keys require an unlocked device,
-not a five-minute authentication window; creating them requires a configured
-phone screen lock. Backgrounding clears visible content and closes the in-memory
-session. Anyone holding an already-unlocked phone can open Vanishr: this is an
-explicit usability/security tradeoff, not a second authentication boundary.
+automatically after any system-accepted unlock method, including fingerprint or
+face. A configured screen lock is still required and every vault access checks
+both device security and current lock state. Backgrounding clears visible content
+and closes the in-memory session. Anyone holding an already-unlocked phone can
+open Vanishr: this is not a second authentication boundary.
 
-Legacy wrapping and content records migrate to new keys using authenticated
+For 0.3.9, the user explicitly approved a compatibility tradeoff on Android 14 and
+below: new nonexportable Keystore AES keys do not use unlocked-device-required or
+timed authentication restrictions. The trusted app enforces the unlocked-phone
+boundary there; Keystore no longer independently enforces that boundary if the
+app process is compromised. Android app isolation and filesystem encryption
+remain relevant, but are not equivalent to Keystore authorization. New keys on
+Android 15 and above retain unlocked-device-required, with no timed in-app
+authentication. Key authorizations are fixed at creation, including after an OS
+upgrade; the app's lock checks apply to every supported Android version.
+
+Protected-record versions 1 and 2 migrate to version 3 keys using authenticated
 decryption and encrypted atomic writes. Active and signed-out accounts retain
-their identity, content state and original deadlines. Legacy keys are deleted
-only after the replacement ciphertext commits. An old authentication-bound key
-may require one normal phone PIN/pattern/password unlock before migration;
-missing or invalidated keys fail closed and are not reset automatically.
+their identity, content state and original deadlines. Old keys are deleted only
+after the replacement ciphertext commits. A currently blocked legacy key can
+still require one phone PIN/pattern/password unlock to migrate; the app cannot
+bypass an existing key's authorization or recover an invalidated key. Failures
+preserve the affected encrypted data and keys, never reset an account.
+
+Android 12-14 has documented Keystore bugs where some biometric unlocks do not
+re-authorize unlocked-device-required keys. The version-specific policy avoids
+that requirement on older Android rather than silently downgrading a key after
+an error. Fresh installations perform an in-memory encrypted round trip before
+opening storage for sign-in. A migration-specific error explains the one-time
+legacy unlock; other authentication errors do not claim migration is required.
+There is no plaintext-storage fallback or automatic data reset. Android can still
+require a device credential after reboot or biometric lockout; Vanishr cannot
+override the system lock screen. Physical/OEM biometric acceptance needs testing.
+
+Google sign-in displays a progress state while the provider result is pending
+and while exchanging it for the account session. Returning from the provider
+does not briefly offer the login form before that exchange finishes. Failure
+and cancellation restore actionable sign-in; background privacy cleanup and
+the existing one-use challenge and identity checks still apply.
 
 Sign-out revokes its session, drops the locally
 saved bearer token, and atomically moves its records into a separate encrypted
@@ -109,11 +300,53 @@ APK. A compromised host can suppress updates or serve misleading metadata;
 the signing key and Android package manager remain the update trust boundary.
 No downloaded scripts, DEX or other executable code replace the running client.
 
+## Notification navigation
+
+From 0.3.6, an absent notification preference defaults to enabled. Existing saved
+Off values are not overwritten, including ambiguous legacy values that older
+versions wrote during sign-out. Android notification permission remains required;
+the app requests it once after an authenticated account is available, not at the
+login screen. Denial is not repeatedly prompted on resume. An explicit enable
+action can request permission again subject to Android's own restrictions.
+
+Preference and active registration are separate. Before registration succeeds,
+the receiver rejects wake alerts. Sign-out immediately clears active registration,
+invalidates pending callbacks, disables Firebase auto-init and unregisters/deletes
+the provider token without changing the preference. Explicit opt-out still stops
+registration and delivery. Firebase auto-init is enabled only for an authenticated,
+enabled account with notification permission. No account identifier or credential
+is added to unencrypted preferences; the active flag is a delivery gate, not an
+authentication credential. Network/storage failure never grants chat access.
+
+FCM still receives no sender name, account/chat ID, message text, image, key or
+access credential. Clients that opt into routing during push registration may
+receive `event:new_message` plus a random 256-bit opaque reference. Older clients
+retain the event-only payload. The provider observes the device token, timing and
+opaque reference, not its conversation mapping. Notifications remain generic,
+private on the lock screen, collapsed to one alert and bounded to 60 seconds.
+
+The relay stores only the reference digest and routing metadata, one destination
+per device, with an atomic TTL no longer than five minutes or the message's
+original deadline. A later destination supersedes the previous one. Resolving
+requires the current DEVICE session and the matching account/device; possession
+of a reference alone grants no access. Opt-out and sign-out remove the mapping.
+Routing references are hints, not encrypted-message authenticity proofs.
+
+The immutable Android tap intent contains only the opaque reference and a bounded
+local deadline. The app waits for phone-unlocked storage, resolves the hint over
+authenticated HTTPS, syncs, and requires a matching unexpired, incoming, unread
+local message plus the existing verified direct-contact or approved-group trust.
+Expired, superseded, read, missing, changed-identity or wrong-account destinations
+fall back to the chat list. No account is switched or trusted because of a push.
+A notification opens the conversation, never view-once content or a photo viewer.
+Network/provider failure does not weaken identity checks or extend content TTLs.
+
 ## Architecture chosen before implementation
 
 - Java Spring Boot HTTPS relay; PostgreSQL holds accounts, editable username/display
-  metadata, password verifiers, device identifiers and public prekeys only. No
-  conversation or payload tables, private nicknames, or content-decryption keys.
+  metadata, password verifiers, device identifiers, public prekeys and group
+  membership metadata only. No payload tables, private nicknames, group names,
+  or content-decryption keys.
 - Official Signal libsignal on the client, not a hand-written key-agreement or ratchet.
 - Random per-image authenticated-encryption keys are transported inside Signal messages.
 - Memory-only Redis, with snapshots, AOF, replication/backups, and swap prohibited,
@@ -126,9 +359,11 @@ No downloaded scripts, DEX or other executable code replace the running client.
 - Successful read deletes content immediately. Successful delivery means authenticated
   decryption and protected local persistence, not merely an HTTP download. Delivery/read
   status must not be treated as a cryptographic proof against a compromised server.
-- Push and realtime events contain only a generic wake-up signal, never a sender name,
-  message, image, media key, or access token. Offline ciphertext disappears at its deadline.
-- No groups, calls, stories, reactions, searchable history, account recovery of keys,
+- Realtime events contain only a generic wake-up signal. Opted-in push clients can
+  additionally receive the bounded opaque routing reference described above,
+  never a sender name, message, image, media key, or access token. Offline
+  ciphertext disappears at its deadline.
+- No calls, stories, reactions, searchable history, account recovery of keys,
   cloud content backups, analytics SDK, or remotely supplied executable UI.
 
 ## Threats and limitations
@@ -140,11 +375,11 @@ No downloaded scripts, DEX or other executable code replace the running client.
 | Backend compromise | Previously verified identities, client encryption and signed distribution keep content keys off-server | Server can deny/reorder delivery, lie about receipts, retain ciphertext, alter public keys before verification, and collect metadata |
 | Network attacker | HTTPS/WSS, certificate validation, no cleartext fallback, E2EE | Traffic analysis and denial of service remain possible |
 | Stolen locked phone | Android Keystore-wrapped private state, phone-unlocked access checks, encrypted local records, disabled backups | No separate app lock on an already-unlocked phone; OS exploits, weak screen lock, rooted device and forensic recovery are not defeated |
-| Stolen bearer token | Short expiry, hashed server-side token, device authorization, logout/replacement revocation | Thief can fetch/delete ciphertext, interfere with delivery and impersonate relay metadata until expiry; not decrypt or create valid peer content |
+| Stolen session credential | One-hour access, single-use rotating 30-day renewal, hash-only server storage, current-device checks, logout/replacement revocation | A stolen renewal handle can extend unauthorized relay access while valid; neither token decrypts ciphertext or creates valid peer content |
 | Malicious recipient | Local expiry and screenshot flags reduce accidental retention | Recipient can modify client, copy plaintext, screenshot on unsupported devices or photograph a screen; disappearing content is not DRM |
 | Replay/tampering | Signal ratchet replay detection and authentication, authenticated envelope IDs and deadlines, idempotent relay IDs | A server may still replay opaque delivery metadata; client rejects expired/duplicate envelopes |
 | Identity substitution / MITM | Mandatory independent verification; pinned public identities; explicit reset on replacement | No key transparency service; verifying over this same relay is not verification |
-| Push compromise | Generic notification, no content or credentials | Provider sees device token and timing; notification can be suppressed or forged |
+| Push compromise | Generic notification and optional opaque hint; authenticated recipient resolution and verified local message required | Provider sees device token, timing and opaque reference; notifications can be suppressed, delayed or forged; hints alone grant no access |
 | Accidental logging | No bodies, tokens, keys, user content, SQL parameters, access logs or crypto logging | Operators/APM/proxies can override configuration; deployment review is required |
 | Expired data | Atomic expiry on every stored object; server TTL and client deadline checks; read deletion | Redis logical deletion does not prove physical RAM erasure; malicious operators, swap, dumps, snapshots and backups defeat retention promises |
 | Device backups | Android backup/transfer disabled, no-backup directory, nonexportable vault key | OEM behavior and rooted-device tools need device testing; no iOS implementation yet |

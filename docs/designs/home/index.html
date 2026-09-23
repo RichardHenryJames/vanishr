@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Vanishr / Home, Chat &amp; Profile Options</title>
+  <link rel="stylesheet" href="home.css">
+  <script src="assets/lucide.min.js" defer></script>
+  <script src="home.js" defer></script>
+</head>
+<body class="review" data-page="compare">
+  <header class="review-header">
+    <a class="review-brand" href="index.html">vanishr<span>Design studio</span></a>
+    <span class="review-note">HTML proposals / Android app unchanged</span>
+  </header>
+  <main class="review-main">
+    <div class="review-intro">
+      <div><p class="eyebrow">HOME, CHAT &amp; PROFILES / THREE DIRECTIONS</p><h1>More room. The same real options.</h1><p>Three proposed home layouts, with menus checked against Android 0.3.0.</p></div>
+      <div class="review-context"><span class="context-number">204 dp</span><span>Current header + search stack<br>before the list, excluding system insets</span></div>
+    </div>
+    <section class="review-controls" aria-label="Compare screens">
+      <div class="screen-selector" aria-label="Screen shown in all three previews">
+        <button type="button" data-preview-screen="home" aria-pressed="true"><i data-lucide="messages-square"></i>Conversations</button>
+        <button type="button" data-preview-screen="chat" aria-pressed="false"><i data-lucide="message-circle"></i>Chat</button>
+        <button type="button" data-preview-screen="contact" aria-pressed="false"><i data-lucide="user-round"></i>Contact profile</button>
+        <button type="button" data-preview-screen="profile" aria-pressed="false"><i data-lucide="circle-user-round"></i>My profile</button>
+      </div>
+      <button type="button" class="reset-previews" id="reset-all-previews" title="Reset all fictional data and clear your selection"><i data-lucide="rotate-ccw"></i>Reset samples</button>
+    </section>
+    <p class="review-boundary"><strong>Not live app screens.</strong> Menu labels and edit permissions match the Android code. Home filters, navigation placement, group icons and bottom sheets are design proposals. All names, messages, connection/read states and identity strings are fictional. No relay, encryption, real saving, sharing, notifications or update checks run here. Browser photo picking is not Android's camera flow.</p>
+    <p class="review-action-status" id="review-action-status" role="status"></p>
+    <div class="study-grid">
+      <section class="study" data-option="a" aria-labelledby="option-a">
+        <div class="study-heading"><span class="option-letter">A</span><div><h2 id="option-a">Compact Classic</h2><p>Familiar, with the duplicate heading removed.</p></div><span class="recommended">My pick</span></div>
+        <div class="study-metric"><span>Brand + search</span><strong>116 px above the list</strong></div>
+        <div class="phone-frame"><iframe title="Option A: Compact Classic" src="a-compact.html?embed=1"></iframe></div>
+        <div class="study-actions"><button class="choose-button" data-choose="a" aria-pressed="false"><i data-lucide="check"></i>Choose A</button><a href="a-compact.html" target="_blank" rel="noopener">Open full size<i data-lucide="arrow-up-right"></i></a></div>
+      </section>
+      <section class="study" data-option="b" aria-labelledby="option-b">
+        <div class="study-heading"><span class="option-letter blue">B</span><div><h2 id="option-b">Search First</h2><p>Search and filters take the lead.</p></div></div>
+        <div class="study-metric"><span>Search + tabs</span><strong>112 px above the list</strong></div>
+        <div class="phone-frame"><iframe title="Option B: Search First" src="b-search-first.html?embed=1"></iframe></div>
+        <div class="study-actions"><button class="choose-button" data-choose="b" aria-pressed="false"><i data-lucide="check"></i>Choose B</button><a href="b-search-first.html" target="_blank" rel="noopener">Open full size<i data-lucide="arrow-up-right"></i></a></div>
+      </section>
+      <section class="study" data-option="c" aria-labelledby="option-c">
+        <div class="study-heading"><span class="option-letter coral">C</span><div><h2 id="option-c">Bottom Actions</h2><p>The quietest top, with thumb-level navigation.</p></div></div>
+        <div class="study-metric"><span>Single toolbar</span><strong>60 px above the list</strong></div>
+        <div class="phone-frame"><iframe title="Option C: Bottom Actions" src="c-bottom-actions.html?embed=1"></iframe></div>
+        <div class="study-actions"><button class="choose-button" data-choose="c" aria-pressed="false"><i data-lucide="check"></i>Choose C</button><a href="c-bottom-actions.html" target="_blank" rel="noopener">Open full size<i data-lucide="arrow-up-right"></i></a></div>
+      </section>
+    </div>
+    <div class="review-decision" aria-live="polite"><i data-lucide="mouse-pointer-2"></i><span id="decision-text">Try search, open a chat, or tap the new-chat action. Your Android app has not changed.</span><button id="clear-choice" hidden>Clear choice</button></div>
+    <details class="current-reference"><summary>What matches Android, and what is proposed<i data-lucide="chevron-down"></i></summary><div class="reference-body"><img src="assets/current-home.png" alt="Current Vanishr home: separate vanishr and Chats headings, followed by a large search field and contact rows" loading="lazy"><div><h2>Option parity, not a screenshot replica</h2><p>The duplicate Chats heading disappears in A, B and C. Search and new-conversation placement, filters, group icons and bottom-sheet presentation are proposed. The same chat and profile flows are used in all three, so the home layout is the main choice.</p><p><strong>Chat menu:</strong> Profile, Contact identity, Disappearing messages, Remove contact. The composer includes Attach with Choose image and Take photo. Expiry choices are View once, 1 hour, 6 hours and 24 hours.</p><p><strong>Contact profile:</strong> shared name, read-only username and one local Display name field. Save changes your nickname only. Cancel and Use profile name are included.</p><p><strong>My profile:</strong> inline name/username saves, Share username, Verify identity, New message notifications, Check for updates, Licenses &amp; source and Sign out with confirmation. Native/system actions stop at a clearly disclosed simulation.</p><p><strong>Groups:</strong> Group info and expiry menu; owner-only invitation/removal/close, member leave, and verified-owner consent. New invitations stay pending and accepted members wait for the owner.</p><p>No list timestamps or delivery ticks are invented for the conversation list. Message ticks are fictional state samples. Long-press or right-click a message to inspect Delete; do the same on a contact row to inspect removal.</p><p>HTML pixel heights are illustrative; Android uses dp. Measurements exclude the simulated system bars. Reload or Reset samples restores all fictional data; nothing is persisted.</p></div></div></details>
+    <footer class="review-footer"><span>Vanishr / Home exploration</span><span>Nothing is uploaded. No account or relay connection.</span></footer>
+  </main>
+</body>
+</html>

@@ -21,8 +21,11 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
     static final String CONTENT = "vanishr.content.";
     static final String SAVED_ACCOUNT = "saved-account/";
     static String phoneAlias(String alias) { return alias + ".phone"; }
+    static String currentAlias(String alias) { return alias + ".phone.v3"; }
+    static final byte RECORD_VERSION = 3;
     static final class PhoneLockedException extends SecurityException { }
     static final class PhoneLockRequiredException extends SecurityException { }
+    static final class MigrationUnlockRequiredException extends SecurityException { }
     private static final int MAX_VAULT = 32 * 1024 * 1024;
     private final Context context;
     private final AtomicFile file;
@@ -47,37 +50,49 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
         KeyStore store = keyStore();
         if (store.containsAlias(alias)) return (SecretKey) store.getKey(alias, null);
         if (!create) throw new SecurityException("Secure key is unavailable");
-        KeyguardManager keyguard = context.getSystemService(KeyguardManager.class);
-        if (keyguard == null || !keyguard.isDeviceSecure()) throw new PhoneLockRequiredException();
         boolean strongBox = context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE);
         try { return generate(alias, strongBox); }
         catch (StrongBoxUnavailableException failure) { return generate(alias, false); }
     }
 
-    private SecretKey generate(String alias, boolean strongBox) throws Exception {
-        KeyGenParameterSpec.Builder specification = new KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+    static KeyGenParameterSpec keyPolicy(String alias, boolean strongBox, int androidVersion) {
+        return new KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
                 .setKeySize(256).setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setRandomizedEncryptionRequired(true).setUserAuthenticationRequired(false).setUnlockedDeviceRequired(true)
-                .setIsStrongBoxBacked(strongBox);
+                .setRandomizedEncryptionRequired(true).setUserAuthenticationRequired(false).setUnlockedDeviceRequired(androidVersion >= 35)
+                .setIsStrongBoxBacked(strongBox).build();
+    }
+
+    private SecretKey generate(String alias, boolean strongBox) throws Exception {
         KeyGenerator generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
-        generator.init(specification.build());
+        generator.init(keyPolicy(alias, strongBox, Build.VERSION.SDK_INT));
         return generator.generateKey();
     }
 
     public byte[] seal(String alias, byte[] plaintext) throws Exception {
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-        cipher.init(Cipher.ENCRYPT_MODE, key(phoneAlias(alias), true));
+        cipher.init(Cipher.ENCRYPT_MODE, key(currentAlias(alias), true));
         cipher.updateAAD(alias.getBytes(StandardCharsets.UTF_8));
         byte[] encrypted = cipher.doFinal(plaintext);
-        return ByteBuffer.allocate(13 + encrypted.length).put((byte) 2).put(cipher.getIV()).put(encrypted).array();
+        return ByteBuffer.allocate(13 + encrypted.length).put(RECORD_VERSION).put(cipher.getIV()).put(encrypted).array();
     }
 
     public byte[] unseal(String alias, byte[] encrypted) throws Exception {
-        if (encrypted == null || encrypted.length < 30 || (encrypted[0] != 1 && encrypted[0] != 2)) throw new SecurityException("Invalid protected record");
-        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-        cipher.init(Cipher.DECRYPT_MODE, key(encrypted[0] == 1 ? alias : phoneAlias(alias), false), new GCMParameterSpec(128, Arrays.copyOfRange(encrypted, 1, 13)));
-        cipher.updateAAD(alias.getBytes(StandardCharsets.UTF_8));
-        return cipher.doFinal(encrypted, 13, encrypted.length - 13);
+        if (encrypted == null || encrypted.length < 30) throw new SecurityException("Invalid protected record");
+        String keyAlias = switch (encrypted[0]) {
+            case 1 -> alias;
+            case 2 -> phoneAlias(alias);
+            case RECORD_VERSION -> currentAlias(alias);
+            default -> throw new SecurityException("Invalid protected record");
+        };
+        try {
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.DECRYPT_MODE, key(keyAlias, false), new GCMParameterSpec(128, Arrays.copyOfRange(encrypted, 1, 13)));
+            cipher.updateAAD(alias.getBytes(StandardCharsets.UTF_8));
+            return cipher.doFinal(encrypted, 13, encrypted.length - 13);
+        } catch (UserNotAuthenticatedException failure) {
+            if (encrypted[0] != RECORD_VERSION) throw new MigrationUnlockRequiredException();
+            throw failure;
+        }
     }
 
     public synchronized void unlock() throws Exception {
@@ -103,14 +118,19 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
             } catch (Exception failure) { close(); throw failure; }
             finally { Arrays.fill(plaintext, (byte) 0); }
             open = true;
-            if (encrypted[0] == 1) {
+            if (encrypted[0] != RECORD_VERSION) {
                 try {
                     persist();
                     keyStore().deleteEntry(MASTER);
+                    keyStore().deleteEntry(phoneAlias(MASTER));
                 } catch (Exception failure) { close(); throw failure; }
             }
         } else {
-            key(phoneAlias(MASTER), true);
+            byte[] probe = new byte[]{0};
+            byte[] recovered = unseal(MASTER, seal(MASTER, probe));
+            try {
+                if (!Arrays.equals(probe, recovered)) throw new SecurityException("Secure storage verification failed");
+            } finally { Arrays.fill(recovered, (byte) 0); }
             open = true;
         }
     }
@@ -128,7 +148,9 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
 
     private void requirePhoneUnlocked() {
         KeyguardManager keyguard = context.getSystemService(KeyguardManager.class);
-        if (keyguard == null || keyguard.isDeviceLocked()) throw new PhoneLockedException();
+        if (keyguard == null) throw new PhoneLockedException();
+        if (!keyguard.isDeviceSecure()) throw new PhoneLockRequiredException();
+        if (keyguard.isDeviceLocked()) throw new PhoneLockedException();
     }
 
     private void requireOpen() {
@@ -214,11 +236,14 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
         String alias = contentAlias(expiresAt, id, accountId);
         store.deleteEntry(alias);
         store.deleteEntry(phoneAlias(alias));
+        store.deleteEntry(currentAlias(alias));
     }
 
     static void deleteLegacyContentKey(String alias) throws Exception {
-        if (!alias.startsWith(CONTENT) || alias.endsWith(".phone")) throw new SecurityException("Invalid legacy content alias");
-        keyStore().deleteEntry(alias);
+        if (!alias.startsWith(CONTENT) || alias.endsWith(".phone") || alias.endsWith(".phone.v3")) throw new SecurityException("Invalid legacy content alias");
+        KeyStore store = keyStore();
+        store.deleteEntry(alias);
+        store.deleteEntry(phoneAlias(alias));
     }
 
     synchronized void migrateProtectedRecords(Map<String, String> aliases) throws Exception {
@@ -226,9 +251,11 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
         transaction(() -> {
             for (var record : aliases.entrySet()) {
                 byte[] encrypted = get(record.getKey());
-                if (encrypted == null || encrypted.length == 0 || encrypted[0] != 1) continue;
+                if (encrypted == null) continue;
+                if (encrypted.length < 30 || encrypted[0] < 1 || encrypted[0] > RECORD_VERSION) throw new SecurityException("Invalid protected record");
+                if (encrypted[0] == RECORD_VERSION) continue;
                 String alias = record.getValue();
-                if (!alias.startsWith(CONTENT) || alias.endsWith(".phone")) throw new SecurityException("Invalid legacy content alias");
+                if (!alias.startsWith(CONTENT) || alias.endsWith(".phone") || alias.endsWith(".phone.v3")) throw new SecurityException("Invalid legacy content alias");
                 byte[] plaintext = unseal(alias, encrypted);
                 try { put(record.getKey(), seal(alias, plaintext)); }
                 finally { Arrays.fill(plaintext, (byte) 0); }
@@ -290,7 +317,7 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
         try {
             KeyStore store = keyStore();
             List<String> aliases = Collections.list(store.aliases());
-            for (String alias : aliases) if (alias.equals(MASTER) || alias.equals(phoneAlias(MASTER)) || alias.startsWith(CONTENT)) store.deleteEntry(alias);
+            for (String alias : aliases) if (alias.equals(MASTER) || alias.equals(phoneAlias(MASTER)) || alias.equals(currentAlias(MASTER)) || alias.startsWith(CONTENT)) store.deleteEntry(alias);
             file.delete();
             String path = file.getBaseFile().getPath();
             if (file.getBaseFile().exists() || new File(path + ".bak").exists() || new File(path + ".new").exists())

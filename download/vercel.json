@@ -3,6 +3,11 @@
   "version": 2,
   "framework": null,
   "buildCommand": null,
+  "trailingSlash": true,
+  "redirects": [
+    {"source": "/index.html", "destination": "/", "permanent": true},
+    {"source": "/:section(android|security|privacy)/index.html", "destination": "/:section/", "permanent": true}
+  ],
   "headers": [
     {
       "source": "/(.*)",
@@ -10,14 +15,14 @@
         {"key": "Content-Security-Policy", "value": "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"},
         {"key": "X-Content-Type-Options", "value": "nosniff"},
         {"key": "Referrer-Policy", "value": "no-referrer"},
-        {"key": "X-Robots-Tag", "value": "noindex, nofollow"}
+        {"key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=(), payment=()"}
       ]
     },
     {
-      "source": "/vanishr-0.2.7.apk",
+      "source": "/vanishr-0.3.8.apk",
       "headers": [
         {"key": "Content-Type", "value": "application/vnd.android.package-archive"},
-        {"key": "Content-Disposition", "value": "attachment; filename=vanishr-0.2.7.apk"},
+        {"key": "Content-Disposition", "value": "attachment; filename=vanishr-0.3.8.apk"},
         {"key": "Cache-Control", "value": "public, max-age=3600, must-revalidate"}
       ]
     },
@@ -29,8 +34,17 @@
       "source": "/updates.json",
       "headers": [
         {"key": "Content-Type", "value": "application/json; charset=utf-8"},
-        {"key": "Cache-Control", "value": "no-store"}
+        {"key": "Cache-Control", "value": "no-store"},
+        {"key": "X-Robots-Tag", "value": "noindex"}
       ]
+    },
+    {
+      "source": "/(.*).(apk|zip|gz)",
+      "headers": [{"key": "X-Robots-Tag", "value": "noindex"}]
+    },
+    {
+      "source": "/sitemap.xml",
+      "headers": [{"key": "Content-Type", "value": "application/xml; charset=utf-8"}]
     }
   ]
 }
