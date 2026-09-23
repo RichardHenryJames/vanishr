@@ -6,11 +6,15 @@ import java.util.*;
 final class ContactPresence {
     static final long LIFETIME = 12_000;
     static final long TYPING_LIFETIME = 5_000;
-    record Update(List<ChatEngine.Contact> contacts, UUID typingTo, long typingForMillis) {
+    static final long LAST_SEEN_LIFETIME = 86_400_000;
+    record Update(List<ChatEngine.Contact> contacts, UUID typingTo, long typingForMillis, boolean lastSeen) {
+        Update(List<ChatEngine.Contact> contacts, UUID typingTo, long typingForMillis) { this(contacts, typingTo, typingForMillis, true); }
         @Override public String toString() { return "PresenceUpdate[redacted]"; }
     }
-    record Status(ChatEngine.Contact peer, long onlineForMillis, long typingForMillis) { }
-    record Seen(ChatEngine.Contact peer, long onlineUntil, long typingUntil) { }
+    record Status(ChatEngine.Contact peer, long onlineForMillis, long typingForMillis, Long lastSeenAgoMillis) {
+        Status(ChatEngine.Contact peer, long onlineForMillis, long typingForMillis) { this(peer, onlineForMillis, typingForMillis, null); }
+    }
+    record Seen(ChatEngine.Contact peer, long typingUntil, Long lastSeenAt, long expiresAt) { }
     private final ChatEngine engine;
     private volatile Map<UUID, Seen> states = Map.of();
     private volatile boolean foreground;
@@ -77,16 +81,22 @@ final class ContactPresence {
 
     void accept(Status[] response, List<ChatEngine.Contact> audience, long started, long now) {
         states = Map.of();
-        if (response == null || response.length > 128 || now < started) throw new SecurityException("Invalid presence response");
+        if (response == null || response.length > 128 || started < 0 || now < started) throw new SecurityException("Invalid presence response");
         Map<UUID, Seen> received = new HashMap<>();
+        Set<UUID> returned = new HashSet<>();
         for (Status status : response) {
             if (status == null || status.peer() == null || !audience.contains(status.peer())
-                    || status.onlineForMillis() <= 0 || status.onlineForMillis() > LIFETIME
+                || status.onlineForMillis() < 0 || status.onlineForMillis() > LIFETIME
                     || status.typingForMillis() < 0 || status.typingForMillis() > TYPING_LIFETIME
-                    || status.typingForMillis() > status.onlineForMillis() || received.containsKey(status.peer().userId()))
+                || status.typingForMillis() > status.onlineForMillis() || !returned.add(status.peer().userId())
+                || (status.onlineForMillis() > 0 ? status.lastSeenAgoMillis() != null
+                : status.lastSeenAgoMillis() == null || status.lastSeenAgoMillis() < 0 || status.lastSeenAgoMillis() >= LAST_SEEN_LIFETIME))
                 throw new SecurityException("Invalid peer presence");
-            long deadline = started + status.onlineForMillis();
-            if (deadline > now) received.put(status.peer().userId(), new Seen(status.peer(), deadline, started + status.typingForMillis()));
+            Long lastSeenAt = status.lastSeenAgoMillis() == null ? null : started - status.lastSeenAgoMillis();
+            long deadline = lastSeenAt == null ? started + status.onlineForMillis()
+                : Math.min(started + LIFETIME, lastSeenAt + LAST_SEEN_LIFETIME);
+            if (deadline > now) received.put(status.peer().userId(), new Seen(status.peer(),
+                started + status.typingForMillis(), lastSeenAt, deadline));
         }
         states = Map.copyOf(received);
     }
@@ -94,9 +104,14 @@ final class ContactPresence {
     String label(ChatEngine.Peer peer, long now) {
         if (peer == null || !foreground || !engine.realtimeReady() || !engine.authenticated()) return "";
         Seen state = states.get(peer.userId());
-        if (state == null || state.onlineUntil() <= now || !state.peer().equals(identity(peer))) return "";
+        if (state == null || state.expiresAt() <= now || !state.peer().equals(identity(peer))) return "";
         ChatEngine.Peer saved = engine.peers().stream().filter(value -> value.userId().equals(peer.userId())).findFirst().orElse(null);
         if (saved == null || !identity(saved).equals(state.peer()) || !engine.groupSignal().isVerified(peer.userId())) return "";
-        return state.typingUntil() > now ? "Typing" : "Online";
+        if (state.lastSeenAt() == null) return state.typingUntil() > now ? "Typing" : "Online";
+        long age = now - state.lastSeenAt();
+        if (age < 60_000) return "Last seen just now";
+        if (age < 3_600_000) return "Last seen " + age / 60_000 + " min ago";
+        long hours = age / 3_600_000;
+        return "Last seen " + hours + (hours == 1 ? " hour ago" : " hours ago");
     }
 }

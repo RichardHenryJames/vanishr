@@ -36,7 +36,7 @@ independent of login attempts. No access bearer is required or sent on renewal.
 | `POST /auth/google/challenge` | Public, IP rate limit; provider configuration required | `{deviceId?}` -> `{id,nonce,clientId,expiresAt}` | One-use challenge, 5 min |
 | `POST /auth/google` | Public, IP rate limit; Google token verification | `{challengeId,idToken}` -> `{session,handle}` | Consumes challenge on the first attempt; normal enrollment/device token TTL |
 | `GET /auth/me` | ENROLL or DEVICE | `{userId,deviceId}` | None added |
-| `POST /auth/logout` | ENROLL or DEVICE | Empty -> 204 | Atomically deletes current access/renewal pair and removes device push token; preserves registered device and queued ciphertext |
+| `POST /auth/logout` | ENROLL or DEVICE | Empty -> 204 | Atomically deletes current access/renewal pair, then removes device presence/last-seen and push records; preserves registered device and queued ciphertext |
 | `POST /devices` | ENROLL, account owner | `{deviceId,identityKey,replaceExisting}` -> device token, 201 | Same device/key with `replaceExisting:false` resumes without changing generation/prekeys; a different device/key needs explicit replacement; consumes enrollment token |
 | `POST /devices/push` | DEVICE owner | `{token,routeHints?}` -> 204 | Provider token and routing capability in Redis, atomic 24h TTL; omitted/false capability retains legacy event-only pushes |
 | `DELETE /devices/push` | DEVICE owner | Empty -> 204 | Removes push token and current routing reference immediately |
@@ -61,7 +61,7 @@ independent of login attempts. No access bearer is required or sent on renewal.
 | `GET /media/{id}` | DEVICE bound recipient, attached live message only | Encrypted octet stream | No public URL; inaccessible after message deletion or expiry |
 | `DELETE /media/{id}` | DEVICE uploading sender, unattached only | Empty -> 204 | Deletes detached upload; attached media must be deleted via message |
 | `GET /events` (WSS upgrade) | DEVICE, bearer header at handshake | Server sends `{event:"new_message"}` only | One socket per device; token/generation rechecked; no payload or sender in event |
-| `POST /presence` | DEVICE, live WSS, 45/min/device | `{contacts:[{userId,deviceId,identityKey}],typingTo?,typingForMillis}` -> `[{peer,onlineForMillis,typingForMillis}]` | Mutual pinned identities; up to 128 unique non-self contacts; atomic 12s TTL; typing <=5s; no draft text/history |
+| `POST /presence` | DEVICE, live WSS, 45/min/device | `{contacts:[{userId,deviceId,identityKey}],typingTo?,typingForMillis,lastSeen?}` -> `[{peer,onlineForMillis,typingForMillis,lastSeenAgoMillis?}]` | Mutual pinned identities; up to 128 unique non-self contacts; atomic 12s online TTL, typing <=5s; capable clients retain one latest activity/audience record for <=24h |
 
 All message/media bodies crossing this boundary are ciphertext; public-key and
 auth endpoints intentionally handle public/authentication material. The relay
@@ -69,13 +69,33 @@ cannot cryptographically prove an arbitrary malicious client submitted real
 ciphertext. It has no plaintext message field or decrypt functionality, and
 tests demonstrate the official client's encryption-before-upload path.
 
-## Online and typing
+## Online, typing and last seen
 
 Only mutually listed direct contacts with matching pinned device/key identities
 and live authenticated websocket connections receive status. Reconnecting cannot
 revive an old heartbeat. Redis retains a session digest and connection reference,
-not a bearer token. Response durations are milliseconds remaining, not last-seen
-timestamps. Clients subtract request time and keep status only in memory.
+not a bearer token. Online/typing durations are milliseconds remaining. Clients
+subtract request time and keep status only in memory.
+
+With `lastSeen:true`, a heartbeat also atomically replaces one latest-activity
+record with a 24-hour TTL, pinned audience and current device generation. If an
+authorized peer is offline, the response has zero online/typing durations and
+`lastSeenAgoMillis` in `[0,86400000)`, measured by the server. Online responses have
+no last-seen value. This relative age is not a client-supplied Unix timestamp.
+Reading never refreshes a peer's record; expired, future-dated, changed-generation
+and non-mutual records are omitted. An offline peer need not have a live access
+token, but the reader still needs its own active device session and websocket.
+Successful sign-out deletes the device's latest activity. The atomic heartbeat
+checks that its session still exists before creating either record.
+
+Omitted/false `lastSeen` preserves the legacy response contract (online peers
+only) and removes the caller's last-seen record. Empty audiences also remove it;
+nonempty audience changes replace prior sharing permissions on the next heartbeat.
+Android 0.4.1 publishes/requests the capability, prefers Typing then Online then
+Last seen, and displays relative minutes/hours. Response snapshots last at most
+12 seconds and never past the original 24-hour deadline, using elapsed realtime
+and conservatively accounting for the request duration. A local connection loss
+or expired online snapshot does not imply the peer went offline.
 
 `typingTo` must belong to `contacts` with `typingForMillis` from 1 through 5000;
 null/absent typing requires zero. Empty audiences stop sharing on the next

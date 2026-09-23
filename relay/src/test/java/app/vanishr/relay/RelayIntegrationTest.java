@@ -191,6 +191,81 @@ class RelayIntegrationTest {
         assertFalse(Boolean.TRUE.equals(redis.hasKey("presence:" + owner.deviceId())));
         }
 
+    @Test void lastSeenIsBoundedAndVisibleOnlyToMutualCapableContacts() throws Exception {
+        Device first = device("seen_reader"), second = device("seen_writer"), stranger = device("seen_stranger");
+        foreground(first); foreground(stranger);
+        var connection = foreground(second);
+        Presence.Update firstUpdate = new Presence.Update(List.of(presencePeer(second)), null, 0, true);
+        request(body(post("/presence"), firstUpdate), first).andExpect(status().isOk()).andExpect(content().json("[]"));
+        request(body(post("/presence"), new Presence.Update(List.of(presencePeer(first)), first.userId(), 5000, true)), second)
+                .andExpect(status().isOk());
+        request(body(post("/presence"), firstUpdate), first).andExpect(status().isOk()).andExpect(jsonPath("$[0].lastSeenAgoMillis").doesNotExist());
+        String key = "last-seen:" + second.deviceId();
+        String stored = redis.opsForValue().get(key);
+        long ttl = redis.getExpire(key, java.util.concurrent.TimeUnit.MILLISECONDS);
+        assertTrue(ttl > 0 && ttl <= Presence.LAST_SEEN_LIFETIME);
+        assertFalse(stored.contains("typing")); assertFalse(stored.contains(second.token()));
+        realtime.afterConnectionClosed(connection, org.springframework.web.socket.CloseStatus.NORMAL);
+        String response = request(body(post("/presence"), firstUpdate), first).andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        Presence.Status[] statuses = json.readValue(response, Presence.Status[].class);
+        assertEquals(1, statuses.length); assertEquals(presencePeer(second), statuses[0].peer());
+        assertEquals(0, statuses[0].onlineForMillis()); assertEquals(0, statuses[0].typingForMillis());
+        assertNotNull(statuses[0].lastSeenAgoMillis()); assertTrue(statuses[0].lastSeenAgoMillis() >= 0);
+        assertEquals(stored, redis.opsForValue().get(key));
+        assertTrue(redis.getExpire(key, java.util.concurrent.TimeUnit.MILLISECONDS) <= ttl);
+        request(body(post("/presence"), new Presence.Update(List.of(presencePeer(second)), null, 0)), first)
+                .andExpect(status().isOk()).andExpect(content().json("[]"));
+        request(body(post("/presence"), firstUpdate), stranger).andExpect(status().isOk()).andExpect(content().json("[]"));
+        request(get("/users/seen_writer"), stranger).andExpect(status().isOk()).andExpect(jsonPath("$.lastSeenAgoMillis").doesNotExist());
+        connection = foreground(second);
+        request(body(post("/presence"), new Presence.Update(List.of(presencePeer(stranger)), null, 0, true)), second).andExpect(status().isOk());
+        realtime.afterConnectionClosed(connection, org.springframework.web.socket.CloseStatus.NORMAL);
+        request(body(post("/presence"), firstUpdate), first).andExpect(status().isOk()).andExpect(content().json("[]"));
+    }
+
+    @Test void lastSeenClearsOnAudienceRemovalOptOutAndLogout() throws Exception {
+        Device first = device("seen_owner"), second = device("seen_contact");
+        foreground(first); foreground(second);
+        Presence.Update share = new Presence.Update(List.of(presencePeer(second)), null, 0, true);
+        String key = "last-seen:" + first.deviceId();
+        request(body(post("/presence"), share), first).andExpect(status().isOk());
+        assertTrue(Boolean.TRUE.equals(redis.hasKey(key)));
+        request(body(post("/presence"), new Presence.Update(List.of(), null, 0, true)), first).andExpect(status().isOk());
+        assertFalse(Boolean.TRUE.equals(redis.hasKey(key)));
+        request(body(post("/presence"), share), first).andExpect(status().isOk());
+        request(body(post("/presence"), new Presence.Update(share.contacts(), null, 0)), first).andExpect(status().isOk());
+        assertFalse(Boolean.TRUE.equals(redis.hasKey(key)));
+        request(body(post("/presence"), share), first).andExpect(status().isOk());
+        request(post("/auth/logout"), first).andExpect(status().isNoContent());
+        assertFalse(Boolean.TRUE.equals(redis.hasKey(key)));
+        request(body(post("/presence"), new Presence.Update(List.of(presencePeer(first)), null, 0, true)), second)
+                .andExpect(status().isOk()).andExpect(content().json("[]"));
+    }
+
+    @Test void lastSeenRejectsExpiredFutureAndChangedDeviceRecords() throws Exception {
+        Device first = device("seen_check"), second = device("seen_stored");
+        foreground(first);
+        var connection = foreground(second);
+        Presence.Update reader = new Presence.Update(List.of(presencePeer(second)), null, 0, true);
+        request(body(post("/presence"), reader), first).andExpect(status().isOk());
+        request(body(post("/presence"), new Presence.Update(List.of(presencePeer(first)), null, 0, true)), second).andExpect(status().isOk());
+        realtime.afterConnectionClosed(connection, org.springframework.web.socket.CloseStatus.NORMAL);
+        String key = "last-seen:" + second.deviceId();
+        String stored = redis.opsForValue().get(key);
+        Presence.LastSeen original = json.readValue(stored, Presence.LastSeen.class);
+        for (long observed : List.of(System.currentTimeMillis() - Presence.LAST_SEEN_LIFETIME - 1, System.currentTimeMillis() + 60_000)) {
+            redis.opsForValue().set(key, json.writeValueAsString(new Presence.LastSeen(original.owner(), original.contacts(),
+                    original.deviceVersion(), observed, observed + Presence.LAST_SEEN_LIFETIME)), Duration.ofSeconds(5));
+            request(body(post("/presence"), reader), first).andExpect(status().isOk()).andExpect(content().json("[]"));
+        }
+        redis.opsForValue().set(key, stored, Duration.ofSeconds(30));
+        Presence.Peer wrongIdentity = new Presence.Peer(second.userId(), second.deviceId(), "A".repeat(44));
+        request(body(post("/presence"), new Presence.Update(List.of(wrongIdentity), null, 0, true)), first)
+                .andExpect(status().isOk()).andExpect(content().json("[]"));
+        database.update("UPDATE devices SET auth_version=? WHERE id=?", UUID.randomUUID(), second.deviceId());
+        request(body(post("/presence"), reader), first).andExpect(status().isOk()).andExpect(content().json("[]"));
+    }
+
         @Test void profilePacketsAreRecipientOnlyExpireAndNeverAppearInSearchOrChat() throws Exception {
         Device owner=device("photo_owner"); Device recipient=device("photo_recipient"); Device stranger=device("photo_stranger");
         verifyAndEstablish(owner,recipient);

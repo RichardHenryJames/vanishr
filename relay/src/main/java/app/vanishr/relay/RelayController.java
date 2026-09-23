@@ -23,13 +23,15 @@ public class RelayController {
     private final RedisRelay relay;
     private final RateLimiter rates;
     private final GenericNotifier notifications;
+    private final Presence presence;
 
-    public RelayController(AuthService auth, AccountDirectory accounts, RedisRelay relay, RateLimiter rates, GenericNotifier notifications) {
+    public RelayController(AuthService auth, AccountDirectory accounts, RedisRelay relay, RateLimiter rates, GenericNotifier notifications, Presence presence) {
         this.auth = auth;
         this.accounts = accounts;
         this.relay = relay;
         this.rates = rates;
         this.notifications = notifications;
+        this.presence = presence;
     }
 
     @GetMapping("/health") public Map<String, String> health() { return Map.of("status", "up"); }
@@ -51,8 +53,11 @@ public class RelayController {
 
     @PostMapping("/auth/logout") @ResponseStatus(HttpStatus.NO_CONTENT)
     public void logout(@AuthenticationPrincipal Actor actor, @RequestHeader("Authorization") String authorization) {
-        if (actor.deviceId() != null) notifications.unregister(actor.deviceId());
         auth.revoke(authorization.substring(7));
+        if (actor.deviceId() != null) {
+            presence.clear(actor.deviceId());
+            notifications.unregister(actor.deviceId());
+        }
     }
 
     @PostMapping("/devices") @ResponseStatus(HttpStatus.CREATED)

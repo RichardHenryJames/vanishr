@@ -2453,7 +2453,8 @@ public class ScreenFlowTest {
         ContactPresence.Update update = presence.update(now);
         assertEquals(peerId, update.typingTo()); assertTrue(update.typingForMillis() > 0 && update.typingForMillis() <= 5000);
         assertEquals(1, update.contacts().size()); assertEquals(peerId, update.contacts().get(0).userId());
-        assertEquals(Set.of("contacts", "typingTo", "typingForMillis"), RelayApi.JSON.toJsonTree(update).getAsJsonObject().keySet());
+        assertTrue(update.lastSeen());
+        assertEquals(Set.of("contacts", "typingTo", "typingForMillis", "lastSeen"), RelayApi.JSON.toJsonTree(update).getAsJsonObject().keySet());
         assertNull(presence.update(now + 5001).typingTo());
         presence.edited(peerId, false); assertNull(presence.update(now).typingTo());
         presence.edited(peerId, true); presence.conversation(UUID.randomUUID()); assertNull(presence.update(now).typingTo());
@@ -2480,6 +2481,52 @@ public class ScreenFlowTest {
         mode.set(1); presence.refresh(); assertEquals("", presence.label(peer, android.os.SystemClock.elapsedRealtime()));
         mode.set(2); presence.refresh(); assertEquals("", presence.label(peer, android.os.SystemClock.elapsedRealtime()));
         assertTrue(vault.names("presence").isEmpty());
+    }
+
+    @Test public void offlineLastSeenIsBoundedFreshAndNeverInferredFromExpiredOnline() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Contact contact = new ChatEngine.Contact(peerId, peerDevice, peer.identityKey());
+        ContactPresence presence = engine.presence(); presence.foreground(true); setField(engine, "realtimeReady", true);
+        for (long age : List.of(0L, 60_000L, 3_600_000L, 82_800_000L)) {
+            presence.accept(new ContactPresence.Status[]{new ContactPresence.Status(contact, 0, 0, age)}, List.of(contact), 1000, 1200);
+            String expected = age == 0 ? "Last seen just now" : age == 60_000 ? "Last seen 1 min ago"
+                    : age == 3_600_000 ? "Last seen 1 hour ago" : "Last seen 23 hours ago";
+            assertEquals(expected, presence.label(peer, 1200));
+            assertEquals("", presence.label(peer, 13_000));
+        }
+        presence.accept(new ContactPresence.Status[]{new ContactPresence.Status(contact, 0, 0, 59_900L)}, List.of(contact), 1000, 1200);
+        assertEquals("Last seen 1 min ago", presence.label(peer, 1200));
+        presence.accept(new ContactPresence.Status[]{new ContactPresence.Status(contact, 0, 0, ContactPresence.LAST_SEEN_LIFETIME - 100)}, List.of(contact), 1000, 1200);
+        assertEquals("", presence.label(peer, 1200));
+        presence.accept(new ContactPresence.Status[]{new ContactPresence.Status(contact, 12_000, 5000)}, List.of(contact), 1000, 1200);
+        assertEquals("Typing", presence.label(peer, 1200)); assertEquals("Online", presence.label(peer, 6000));
+        assertEquals("", presence.label(peer, 13_000));
+        assertTrue(vault.names("presence").isEmpty()); assertTrue(vault.names("last-seen").isEmpty());
+    }
+
+    @Test public void offlineLastSeenRejectsInvalidUnverifiedAndStaleLocalStates() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Contact contact = new ChatEngine.Contact(peerId, peerDevice, peer.identityKey());
+        ContactPresence presence = engine.presence(); presence.foreground(true); setField(engine, "realtimeReady", true);
+        for (ContactPresence.Status invalid : List.of(new ContactPresence.Status(contact, 0, 0),
+                new ContactPresence.Status(contact, 0, 1, 0L), new ContactPresence.Status(contact, 0, 0, -1L),
+                new ContactPresence.Status(contact, 0, 0, ContactPresence.LAST_SEEN_LIFETIME),
+                new ContactPresence.Status(contact, 12_000, 0, 0L))) {
+            assertThrows(SecurityException.class, () -> presence.accept(new ContactPresence.Status[]{invalid}, List.of(contact), 1000, 1200));
+            assertEquals("", presence.label(peer, 1200));
+        }
+        ContactPresence.Status offline = new ContactPresence.Status(contact, 0, 0, 60_000L);
+        assertThrows(SecurityException.class, () -> presence.accept(new ContactPresence.Status[]{offline}, List.of(), 1000, 1200));
+        assertThrows(SecurityException.class, () -> presence.accept(new ContactPresence.Status[]{offline, offline}, List.of(contact), 1000, 1200));
+        presence.accept(new ContactPresence.Status[]{offline}, List.of(contact), 1000, 1200);
+        assertEquals("", presence.label(new ChatEngine.Peer(peerId, UUID.randomUUID(), peer.identityKey(), "Other"), 1200));
+        setField(engine, "realtimeReady", false); assertEquals("", presence.label(peer, 1200)); setField(engine, "realtimeReady", true);
+        presence.foreground(false); presence.foreground(true); assertEquals("", presence.label(peer, 1200));
+        presence.accept(new ContactPresence.Status[]{offline}, List.of(contact), 1000, 1200);
+        presence.disconnected(); assertEquals("", presence.label(peer, 1200));
+        presence.accept(new ContactPresence.Status[]{offline}, List.of(contact), 1000, 1200);
+        vault.transaction(() -> { engine.groupSignal().forgetPeer(peerId); return null; });
+        assertEquals("", presence.label(peer, 1200));
     }
 
     @Test public void queuedSyncCannotRefreshBusyOrObsoleteAccountScreens() throws Exception {
@@ -2539,6 +2586,9 @@ public class ScreenFlowTest {
                 invoke(activity, "refreshContactStatus"); assertEquals("Online", status.getText().toString()); assertEquals(View.VISIBLE, status.getVisibility());
                 engine.presence().accept(new ContactPresence.Status[]{new ContactPresence.Status(contact, 12_000, 5000)}, List.of(contact), now, now);
                 invoke(activity, "refreshContactStatus"); assertEquals("Typing", status.getText().toString());
+                engine.presence().accept(new ContactPresence.Status[]{new ContactPresence.Status(contact, 0, 0, 82_800_000L)}, List.of(contact), now, now);
+                invoke(activity, "refreshContactStatus"); assertEquals("Last seen 23 hours ago", status.getText().toString());
+                assertEquals(View.VISIBLE, status.getVisibility());
                 EditText input = (EditText) readField(activity, "composer"); input.requestFocus(); input.setText("Synthetic draft stays local");
                 assertEquals(peerId, engine.presence().update(android.os.SystemClock.elapsedRealtime()).typingTo());
                 long typingDeadline = (long) readField(engine.presence(), "typingUntil");
@@ -2547,9 +2597,15 @@ public class ScreenFlowTest {
                 input = (EditText) readField(activity, "composer");
                 status = (TextView) readField(activity, "contactStatus");
                 input.setText(""); assertNull(engine.presence().update(android.os.SystemClock.elapsedRealtime()).typingTo());
+            });
+            snapshot(scenario, "61-contact-last-seen");
+            scenario.onActivity(activity -> {
+                TextView status = (TextView) readField(activity, "contactStatus");
+                assertEquals("Last seen 23 hours ago", status.getText().toString());
+                assertTrue("Last seen must fit the chat header", status.getPaint().measureText(status.getText().toString())
+                        <= status.getWidth() - status.getPaddingLeft() - status.getPaddingRight());
                 engine.presence().disconnected(); invoke(activity, "refreshContactStatus"); assertEquals(View.GONE, status.getVisibility());
             });
-            snapshot(scenario, "60-name-only-chat");
         }
     }
 

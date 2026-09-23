@@ -356,7 +356,7 @@ public class ReleaseWorkflowTest {
         });
     }
 
-    private void presenceWorkflow(Peer peer, ChatEngine.Contact own) throws Exception {
+    private void presenceWorkflow(ActivityScenario<MainActivity> scenario, Peer peer, ChatEngine.Contact own) throws Exception {
         var connected = new java.util.concurrent.atomic.AtomicBoolean();
         try (RelayApi connection = new RelayApi(peer.api().origin(), peer.session().accessToken())) {
             connection.events(() -> { }, connected::set);
@@ -383,10 +383,24 @@ public class ReleaseWorkflowTest {
             fill("Message", "");
             assertEquals(0, peer.api().call("GET", "/messages/pending", null, ChatEngine.Incoming[].class).length);
         }
-        assertTrue("Disconnected peer status must disappear", device.wait(Until.gone(By.text("Online")), 15_000));
+        assertTrue("Disconnected peer must show last seen", device.wait(Until.hasObject(By.textStartsWith("Last seen ")), 15_000));
+        assertFalse(device.hasObject(By.text("Online")));
         assertFalse(device.hasObject(By.text("Typing")));
         assertFalse(device.hasObject(By.text("Connected")));
-        capture("28-release-peer-offline-name-only");
+        capture("28-release-peer-last-seen");
+        connected.set(false);
+        try (RelayApi connection = new RelayApi(peer.api().origin(), peer.session().accessToken())) {
+            connection.events(() -> { }, connected::set);
+            eventually(() -> connected.get() ? Boolean.TRUE : null);
+            scenario.moveToState(Lifecycle.State.CREATED);
+            eventually(() -> {
+                ContactPresence.Status[] statuses = peer.api().presence(new ContactPresence.Update(List.of(own), null, 0));
+                return Arrays.stream(statuses).anyMatch(value -> value.peer().equals(own) && value.onlineForMillis() == 0
+                        && value.typingForMillis() == 0 && value.lastSeenAgoMillis() != null && value.lastSeenAgoMillis() >= 0
+                        && value.lastSeenAgoMillis() < ContactPresence.LAST_SEEN_LIFETIME) ? Boolean.TRUE : null;
+            });
+        } finally { scenario.moveToState(Lifecycle.State.RESUMED); }
+        awaitText(peer.handle());
     }
 
     private void profilePhotoWorkflow(Peer peer, ChatEngine.Contact own) throws Exception {
@@ -577,7 +591,7 @@ public class ReleaseWorkflowTest {
             capture("04-release-text-receipt");
             profilePhotoWorkflow(peer, own);
             if ("true".equals(arguments.getString("releasePush"))) notificationWorkflow(scenario, peer, outgoing);
-            presenceWorkflow(peer, own);
+            presenceWorkflow(scenario, peer, own);
             Bitmap bitmap = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888);
             bitmap.eraseColor(Color.rgb(37, 112, 91));
             ByteArrayOutputStream encoded = new ByteArrayOutputStream();

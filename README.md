@@ -10,6 +10,14 @@ messenger. Do not use it for real sensitive conversations yet.**
 Download the signed Android 0.3.9 APK, matching application/libsignal source and
 license notices at **https://vanishr-download.vercel.app**.
 
+The 0.4.1/code 22 candidate adds Last seen in the direct-chat header when a
+mutually saved, verified contact is offline. Typing and Online take precedence;
+only the latest activity within 24 hours is retained. Both contacts must update.
+The full JVM gate, 91 Android QA methods, unit tests, lint, narrow-screen checks
+and signed live workflow pass, including reciprocal last seen and actual FCM.
+The compatible relay is deployed; static publication is pending and the public
+APK/feed remains 0.3.9. See [verification](docs/VERIFICATION.md#release-041).
+
 Release 0.3.9/code 21 addresses recurring PIN/pattern prompts after biometric
 phone unlock on older Android. It retains encrypted Keystore storage and
 app-enforced secure/unlocked-phone checks; new Android 15+ keys also retain

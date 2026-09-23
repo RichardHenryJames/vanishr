@@ -1,5 +1,5 @@
 #requires -Version 7.4
-param([switch]$PrepareNoticesOnly, [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.3.9')
+param([switch]$PrepareNoticesOnly, [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.4.1')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $tools = Join-Path $root '.tools'

@@ -102,30 +102,45 @@ them and clears visible content. Same-conversation redraws preserve an unsent
 composer draft only in memory. The draft is not persisted and is cleared when
 the app backgrounds; switching conversations does not carry it to another peer.
 
-## Online and typing metadata
+## Online, typing and last-seen metadata
 
-Direct-chat headers display the saved contact name and only fresh Online or
-Typing status. Online means the official peer app is foregrounded, authenticated
-and connected, not that our own relay request succeeded. There is no last-seen
-history or offline label. Usernames remain read-only in the contact profile.
+Direct-chat headers display the saved contact name, then Typing, Online or an
+authorized offline Last seen value, in that order. Online means the official peer
+app is foregrounded, authenticated and connected, not that our own relay request
+succeeded. Last seen means the relay's most recent foreground heartbeat, not an
+exact disconnect time or message-read time. Unknown or older-than-24-hour activity
+has no label. Usernames remain read-only in the contact profile; groups are unchanged.
 
 Foreground clients send presence metadata over authenticated TLS. The relay sees
 the temporary audience (up to 128 pinned direct contacts), typing recipient and
-timing, but never draft text, photos or keys. Presence is not end-to-end encrypted.
-Responses require both clients to list each other's exact account/device/key
-identities, current sessions and live authenticated websocket connections.
+timing, but never draft text, photos or private keys. Presence is not end-to-end
+encrypted. Sharing requires both clients to list each other's exact account,
+device and public-key identities. The reader needs a current device session and
+live authenticated websocket; Online/Typing also requires those for the peer.
 One-sided contacts, username lookup and group membership alone grant no access.
 
-Each heartbeat replaces one nonpersistent Redis record with an atomic 12-second
-TTL; typing lasts at most five seconds after the last keystroke. Disconnect and
-revocation prevent subsequent status responses. Android retains only expiring
-in-memory status, subtracts request time from its deadline, and clears it on local
-disconnect, backgrounding, failed requests or changed identities. An already
-received indicator can remain visible until its short deadline after network
-loss or a crash; this is not instantaneous availability. There is no permanent
-last-seen/audience database or background presence service. Older apps/relays
-leave the header name-only. A malicious peer can misreport its activity; status
-is never identity-verification or message-delivery proof.
+Each heartbeat atomically replaces a nonpersistent Redis online record with a
+12-second TTL; typing lasts at most five seconds after the last keystroke. Clients
+with the lastSeen capability also replace one latest-activity record, containing
+the peer's pinned audience, device generation and server-observed time, with an
+atomic 24-hour TTL. This is one timestamp, not an activity log. Reading it never
+extends its lifetime. Access-token rotation/expiry does not erase this bounded
+offline value; registered device-generation changes block it. Sign-out removes
+it, and the heartbeat's atomic session check prevents a revoked request from
+recreating it. Changing/removing contacts replaces the audience on the next
+successful heartbeat; an empty audience or a legacy heartbeat removes the record.
+Changes made without a connection cannot revoke an already shared value immediately.
+
+Android keeps only in-memory response snapshots, each valid for at most 12 seconds
+and never beyond the activity's original 24-hour deadline. It accounts for request
+time with a monotonic clock and clears status on local disconnect, backgrounding,
+failed requests or changed identities. Expiring Online is not converted into a
+guessed Last seen. A received indicator may briefly outlast a lost connection or
+removal until its short deadline. There is no persistent phone cache, permanent
+audience database or background presence service. Older clients retain their
+Online/Typing contract and do not publish last seen; both people must update for
+the new feature. A malicious peer can misreport activity or retain previously
+received metadata; status is not identity-verification or message-delivery proof.
 
 ## Private profile photos
 

@@ -3,6 +3,67 @@
 Evidence refreshed on Windows, 2026-09-22. This is a development foundation,
 not a production security assessment or independent audit.
 
+## Release 0.4.1
+
+- Candidate, not yet published. Version 0.4.1/code 22 adds offline contact Last
+  seen beneath the direct-chat name, below Typing and Online in precedence.
+- The relay stores only the latest foreground heartbeat and pinned audience
+  with an atomic 24-hour TTL. Reads do not extend retention. Mutual identities,
+  current reader authentication and peer device generation are required;
+  sign-out/empty or replaced audiences revoke sharing. Legacy clients retain
+  their Online/Typing contract. No draft text or phone status cache is added.
+- Six focused Redis/PostgreSQL integration tests passed, covering last-seen
+  privacy, bounded expiry, sign-out/audience removal, changed devices and the
+  existing presence behavior. The local Docker backend initially could not
+  start tests; it was recovered only after confirming its VM was stopped.
+- Client and instrumentation compilation passed with the QA test variant.
+  Android unit tests, QA lint and all 91 ScreenFlow QA methods passed. The six
+  focused presence/header checks passed in 33.960 seconds. Two header/profile
+  checks at 320dp and 130% font passed in 18.743 seconds, including the longest
+  last-seen label without truncation or overlap.
+- Initial full-QA attempts encountered a confirmed System UI ANR intercepting
+  input and a relocked test keyguard after System UI restarted. Those fixture
+  issues were resolved without changing app security. One unchanged sheet-color
+  assertion then failed transiently, passed its focused rerun in 10.336 seconds,
+  and passed the complete 91-method rerun. Original attempt reports are retained.
+- Full JVM verification passed 53 executed tests with one opt-in LiveRelayTest
+  skip; the separate signed live workflow below did run. The relay artifact
+  contains no client-only crypto dependency. Only the existing vanishr-dev-rg
+  relay was deployed; trusted TLS/health passed, temporary transfer storage was
+  removed and accounts/provider configuration/VM size were preserved.
+- Signed release build/lint passed with the original signer. The complete live
+  workflow passed in 282.967 seconds, including real Online/Typing then Last seen,
+  reciprocal offline visibility after backgrounding, encrypted messaging, contact
+  photos, groups, retained sessions, actual FCM and notification taps. Five signed
+  protected-device checks passed in 4.107 seconds and the complementary no-screen-
+  lock rejection in 0.019 seconds. The generated test credential was cleared.
+- The verified APK is 44,233,489 bytes, SHA-256
+  `9003eac840a76d07e3e6cca9fbf17e64d0f0da2312c81a88747215b232220c47`.
+  The immutable 27-file static bundle passed its source/secret/native-test audit:
+  58,571,898 bytes, 175 matching workspace source files and 393 source entries.
+  Its source ZIP is 9,745,853 bytes, SHA-256
+  `06a47e919d448b899fa41311e0d5b9330e6c49d87335bce9346cf8ff478abca7`.
+  The 16 optional unavailable upstream source artifacts are unchanged from 0.3.9.
+- Static publication is blocked on a fresh interactive Vercel sign-in. No file
+  upload or deployment creation was attempted; the public APK/feed remains
+  0.3.9/code 21. The audited `.tools/vercel-download-0.4.1` must not be overwritten
+  or recreated. Resume with its exact allowlist, then verify anonymous hashes,
+  original signer, no-store code-22 feed and all website routes/security headers.
+  This post-audit status update is intentionally newer than the source archive.
+- The isolated Android 12 emulator was stopped after generated credential,
+  synthetic app-data and screen-setting cleanup. No shared device was used.
+- Evidence: `.tools/last-seen-0.4.1-relay-focused.txt`,
+  `.tools/last-seen-0.4.1-jvm-verify.txt`, `.tools/last-seen-0.4.1-qa-focused.txt`,
+  `.tools/profile-0.4.1-qa-verification.json`, `.tools/last-seen-0.4.1-narrow-qa.txt`,
+  `.tools/last-seen-0.4.1-relay-publication.txt`, `.tools/release-0.4.1-package.txt`
+  and `.tools/release-verification-0.4.1/verified-artifact.json`
+  (`livePushVerified:true`). The last QA change only lengthened the header fixture
+  to 23 hours for the subsequent narrow-screen test; production code is unchanged.
+  Packaging evidence: `.tools/distribution-audit-0.4.1.json` and
+  `.tools/website-build-0.4.1.json`.
+- Existing 0.3.9 biometric-compatible storage and migration behavior is retained;
+  physical-phone/OEM and Android 15+ runtime caveats still apply.
+
 ## Release 0.3.9
 
 - Version 0.3.9/code 21 changes new Keystore keys on Android 14 and below to
