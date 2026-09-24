@@ -667,7 +667,6 @@ public class ReleaseWorkflowTest {
             profilePhotoWorkflow(peer, own);
             if ("true".equals(arguments.getString("releasePush"))) notificationWorkflow(scenario, peer, outgoing);
             presenceWorkflow(scenario, peer, own);
-            if ("true".equals(arguments.getString("releaseRemotePhotos"))) remotePhotosWorkflow(scenario, peer, own);
             clearChatWorkflow(peer, own);
             Bitmap bitmap = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888);
             bitmap.eraseColor(Color.rgb(37, 112, 91));
