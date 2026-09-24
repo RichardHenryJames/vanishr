@@ -160,59 +160,89 @@ received metadata; status is not identity-verification or message-delivery proof
 
 Only an enrolled account whose current database role is `ADMIN` may request this
 feature; both clients require an independently verified saved direct contact.
-The owner receives one Allow/Don't allow prompt naming the contact and explaining
-background and locked-phone access to photos Android permits this app to read,
-including originals. Approval and service startup still require an unlocked phone.
-Android's photo/notification permission prompts still apply. Partial photo access
-is respected; no permanent sharing-enabled flag, silent approval, new-photo upload
-job or automatic grant on app restart is added.
+
+The owner explicitly controls whether Remote Photos requests require an in-app
+approval prompt. By default, a request presents an Allow/Don't allow prompt
+naming the contact and explaining background and locked-phone access to photos
+Android permits this app to read, including originals. The owner may instead
+enable a local, owner-controlled Auto-allow setting. When enabled, subsequent
+eligible verified requests can proceed without displaying the in-app approval
+dialog. This setting is stored locally on the owner's device and is never
+controlled by the remote requester or server.
+
+Auto-allow does not bypass Android permissions. Android photo and notification
+permission prompts still apply, and sharing cannot begin unless the required
+Android permissions and local service requirements are satisfied. Auto-allow is
+not an Android permission grant and does not silently grant gallery access.
+
+Approval, including an auto-allowed session, and service startup still require
+an unlocked phone. Partial photo access is respected. No remote account,
+server role, or requester can independently enable Auto-allow, change Android
+permissions, or bypass the owner's device security boundary.
 
 An accepted session runs in a non-exported Android data-sync foreground service
-with a persistent private notification and an immutable End access action. The
-user explicitly approved this notification-based background design. Closing the
-owner's chat activity or locking that phone does not end an already accepted
-owner session. A redacted lock-screen notification names the active feature and
-retains End access without disclosing the contact. Viewer screen-off/lock still
-ends access, as does an owner lock before acceptance. End access, sign-out, contact
-removal, removal of the device screen lock, loss of required permission, rejected authentication,
-photo-connection loss, role/device change, Android service timeout or the session
-deadline ends it. A force-stopped or killed service does not automatically restart.
-Android/OEM background limits cannot be bypassed or guaranteed.
+with a persistent private notification and an immutable End access action.
+The notification is intentionally generic and does not disclose the contact
+name or photo details. Its title is `Vanishr is active`, and the
+notification retains an End access action. The notification remains visible
+while the foreground photo-sharing service is active.
+
+Closing the owner's chat activity or locking that phone does not end an
+already accepted owner session. A redacted lock-screen notification identifies
+the active feature without disclosing the contact. Viewer screen-off/lock still
+ends access, as does an owner lock before acceptance. End access, sign-out,
+contact removal, removal of the device screen lock, loss of required permission,
+rejected authentication, photo-connection loss, role/device change, Android
+service timeout or the session deadline ends it. A force-stopped or killed
+service does not automatically restart. Android/OEM background limits cannot
+be bypassed or guaranteed.
 
 The server checks the current admin role, participant identities/generations,
-explicit owner approval and separate authenticated `/photo-events` connections
-on session access and every exchange. These connections do not mark the owner
-Online in chat. Requests expire logically after two minutes; all session records,
-indexes and revocation/replay markers have atomic TTLs bounded to fifteen minutes.
-Ciphertext packets expire within sixty seconds and never beyond the session.
-Neither reading nor retrying extends these deadlines. The relay holds at most one
-pending packet per direction and bounded retry digests, not a gallery archive.
+owner-controlled authorization state and separate authenticated
+`/photo-events` connections on session access and every exchange. These
+connections do not mark the owner Online in chat. Requests expire logically
+after two minutes; all session records, indexes and revocation/replay markers
+have atomic TTLs bounded to fifteen minutes. Ciphertext packets expire within
+sixty seconds and never beyond the session.
+
+Neither reading nor retrying extends these deadlines. The relay holds at most
+one pending packet per direction and bounded retry digests, not a gallery
+archive.
 
 Each photo session uses official libsignal with independently pinned existing
-identities and fresh prekeys in separate in-memory stores. Chat ratchets are not
-copied or advanced; the normal encrypted chat vault still closes on background.
+identities and fresh prekeys in separate in-memory stores. Chat ratchets are
+not copied or advanced; the normal encrypted chat vault still closes on
+background.
+
 This feature intentionally retains a temporary client identity copy and photo
-session keys in memory while an approved owner service is active, including while
-the owner phone is locked. This explicitly requested exception applies only to
-the isolated, accepted photo session; it does not reopen the chat vault or relax
-Android Keystore, device-unlock, or photo-permission requirements. Android/OEM
-power management may pause or terminate transfer while locked; reboot/force-stop
-does not restore sharing. The published 0.4.2 build predates this local lock-policy change.
-No private key leaves its own device. Temporary stores are cleared on termination.
-Encrypted application envelopes bind session, request, packet, sender/recipient
-devices and original deadlines, preventing responses from another conversation
-or session from being accepted.
+session keys in memory while an approved or auto-allowed owner service is
+active, including while the owner phone is locked. This explicitly requested
+exception applies only to the isolated photo session; it does not reopen the
+chat vault or relax Android Keystore, device-unlock, or photo-permission
+requirements. Android/OEM power management may pause or terminate transfer
+while locked; reboot/force-stop does not restore sharing.
+
+No private key leaves its own device. Temporary stores are cleared on
+termination. Encrypted application envelopes bind session, request, packet,
+sender/recipient devices and original deadlines, preventing responses from
+another conversation or session from being accepted.
 
 MediaStore is read in twelve-item pages with no fixed gallery-count cap. The
 phone creates thumbnails only for requested pages. A tap streams just that
-original photo in bounded chunks through the opaque relay. The viewer retains a
-bounded thumbnail cache and one original in memory, never a plaintext disk cache.
-The current viewer limits an original to 64 MiB and decodes a display bitmap no
-larger than 4096 pixels per edge; unsupported/oversized images show an error.
-Stalled transfers end after sixty seconds without progress. The phone's source
-files remain untouched. Like any authorized sharing, an admin can retain received
-photos using another camera or modified client; revocation cannot erase copies
-already received. Approval is therefore meaningful disclosure, not remote DRM.
+original photo in bounded chunks through the opaque relay. The viewer retains
+a bounded thumbnail cache and one original in memory, never a plaintext disk
+cache.
+
+The current viewer limits an original to 64 MiB and decodes a display bitmap
+no larger than 4096 pixels per edge; unsupported/oversized images show an
+error. Stalled transfers end after sixty seconds without progress. The phone's
+source files remain untouched.
+
+Like any authorized sharing, an admin can retain received photos using another
+camera or modified client; revocation cannot erase copies already received.
+Auto-allow therefore does not provide DRM or prevent an authorized requester
+from retaining a copy. The owner's local Auto-allow setting is a convenience
+for explicitly trusted contacts, not a server-side authorization bypass.
 
 ## Private profile photos
 
