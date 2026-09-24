@@ -113,6 +113,7 @@ final class RemotePhotoSession implements AutoCloseable {
     UUID userId() { return prepared.own.userId(); }
     UUID peerId() { return prepared.peer.userId(); }
     boolean owner() { return prepared.owner; }
+    boolean approvedOwner() { return prepared.owner && ready && !ended && !stopping; }
     String peerName() { return prepared.peerName; }
     boolean ended() { return ended; }
     String status() { return status; }

@@ -44,6 +44,7 @@ public class ScreenFlowTest {
         context = ApplicationProvider.getApplicationContext();
         Assume.assumeTrue("Screen fixtures must never touch the installed release app", context.getPackageName().equals("app.vanishr.android.qa"));
         assertTrue(Build.MODEL.contains("sdk_gphone") || Build.FINGERPRINT.contains("generic"));
+        unlockPhotoFixture(InstrumentationRegistry.getArguments().getString("devicePin"));
         resetQaFixture();
         assertTrue(context.getSharedPreferences("updates", Context.MODE_PRIVATE).edit().clear()
             .putLong("last-check", System.currentTimeMillis()).commit());
@@ -2435,6 +2436,20 @@ public class ScreenFlowTest {
         finally { handler.removeCallbacks(check); }
     }
 
+    private void unlockPhotoFixture(String pin) throws Exception {
+        if (pin == null) return;
+        assertTrue("Use only the generated emulator credential", pin.matches("[0-9]{6}"));
+        var keyguard = context.getSystemService(android.app.KeyguardManager.class);
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        device.wakeUp();
+        if (!keyguard.isDeviceLocked()) return;
+        device.pressMenu();
+        assertTrue("The emulator PIN field must be visible before entering the test credential", device.wait(
+                androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.res("com.android.systemui", "pinEntry")), 15_000));
+        for (char digit : pin.toCharArray()) device.pressKeyCode(android.view.KeyEvent.KEYCODE_0 + digit - '0');
+        device.pressEnter(); awaitPhotoCondition(() -> !keyguard.isDeviceLocked());
+    }
+
     private void photoFixturePermission() {
         assertEquals("app.vanishr.android.qa", context.getPackageName());
         InstrumentationRegistry.getInstrumentation().getUiAutomation().grantRuntimePermission(context.getPackageName(),
@@ -2622,6 +2637,10 @@ public class ScreenFlowTest {
 
     @Test public void remotePhotosOwnerServiceWorksAfterClosingChatAndNotificationEndsAccess() throws Exception {
         signedInFixture(); photoFixturePermission();
+        String pin = InstrumentationRegistry.getArguments().getString("devicePin");
+        if (pin != null) assertTrue("Use only the generated emulator credential", pin.matches("[0-9]{6}"));
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        var keyguard = context.getSystemService(android.app.KeyguardManager.class);
         android.net.Uri image = insertPhotoFixture(photo);
         try (PhotoServer server = new PhotoServer(true); ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             ChatEngine.Account account = engine.account();
@@ -2632,8 +2651,21 @@ public class ScreenFlowTest {
             scenario.onActivity(activity -> { inject(activity); PhotoSharingService.start(activity, prepared); });
             assertEquals("HELLO", server.take().action());
             RemotePhotoSession active = PhotoSharingService.current(prepared.id.toString()); assertNotNull(active);
+            assertTrue(active.approvedOwner());
             scenario.moveToState(Lifecycle.State.CREATED);
             assertThrows(SecurityException.class, () -> vault.get("identity"));
+            Field serviceField = PhotoSharingService.class.getDeclaredField("active"); serviceField.setAccessible(true);
+            PhotoSharingService service = (PhotoSharingService) serviceField.get(null); assertNotNull(service);
+            InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> ((android.content.BroadcastReceiver) readField(service, "screenOff"))
+                    .onReceive(service, new android.content.Intent(android.content.Intent.ACTION_SCREEN_OFF)));
+            if (pin != null) {
+                device.sleep(); awaitPhotoCondition(keyguard::isDeviceLocked);
+                assertFalse(PhotoSharingService.phoneUnlocked(context));
+                assertTrue(PhotoSharingService.phonePermitsSession(context, active));
+                AndroidVault lockedVault = new AndroidVault(context);
+                try { assertThrows(AndroidVault.PhoneLockedException.class, lockedVault::unlock); }
+                finally { lockedVault.close(); }
+            }
             UUID query = UUID.randomUUID(); long imageId = android.content.ContentUris.parseId(image);
             server.queue(query, "GET", imageId, 0, 0, 0, false, null);
             ByteArrayOutputStream original = new ByteArrayOutputStream();
@@ -2642,17 +2674,27 @@ public class ScreenFlowTest {
                 assertEquals(original.size(), frame.offset()); original.write(frame.data()); if (!frame.more()) break;
             }
             assertArrayEquals("Background sharing must transfer the original bytes without reopening chat storage", photo, original.toByteArray());
+            assertFalse(active.ended());
+            if (pin != null) assertTrue("Original transfer must finish without unlocking the owner phone", keyguard.isDeviceLocked());
             var notifications = context.getSystemService(android.app.NotificationManager.class).getActiveNotifications();
             android.app.Notification notification = Arrays.stream(notifications).filter(value -> value.getId() == PhotoSharingService.NOTIFICATION).findFirst().orElseThrow().getNotification();
             assertEquals("Photo sharing active", notification.extras.getString(android.app.Notification.EXTRA_TITLE));
             assertTrue((notification.flags & android.app.Notification.FLAG_ONGOING_EVENT) != 0);
             assertTrue(notification.actions[0].actionIntent.isImmutable()); assertEquals("End access", notification.actions[0].title.toString());
             assertEquals(notification.actions[0].actionIntent, notification.deleteIntent);
-            notification.actions[0].actionIntent.send();
+            assertNotNull(notification.publicVersion);
+            assertEquals("Photo sharing active", notification.publicVersion.extras.getString(android.app.Notification.EXTRA_TITLE));
+            assertNull("Lock-screen notification must not disclose the contact", notification.publicVersion.extras.getString(android.app.Notification.EXTRA_TEXT));
+            assertEquals(notification.actions[0].actionIntent, notification.publicVersion.actions[0].actionIntent);
+            notification.publicVersion.actions[0].actionIntent.send();
             awaitPhotoCondition(() -> active.ended() && !PhotoSharingService.busy());
+            assertFalse(active.approvedOwner());
             assertEquals(true, readField(prepared.vault, "closed"));
             assertThrows(SecurityException.class, () -> prepared.vault.get("identity"));
-        } finally { context.getContentResolver().delete(image, null, null); }
+        } finally {
+            unlockPhotoFixture(pin);
+            context.getContentResolver().delete(image, null, null);
+        }
     }
 
     @Test public void remotePhotosViewerShowsThumbnailsThenLoadsOnlyTheTappedPhoto() throws Exception {
@@ -2703,6 +2745,7 @@ public class ScreenFlowTest {
                 assertEquals(false, readField(activity, "photoAdmin"));
                 assertFalse(PhotoSharingService.busy());
                 assertEquals("Allow", dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+                assertTrue(((TextView) dialog(activity).findViewById(android.R.id.message)).getText().toString().contains("even while this phone is locked"));
                 dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
             });
             awaitPhotoCondition(() -> server.declined.get() == 1);
@@ -2714,11 +2757,14 @@ public class ScreenFlowTest {
         photoFixturePermission();
         for (String reason : List.of("signout", "screen-off", "timeout")) {
             vault.unlock(); signedInFixture();
-            try (PhotoServer server = new PhotoServer(true); ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            try (PhotoServer server = new PhotoServer(!reason.equals("screen-off")); ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
                 RemotePhotoSession.Prepared prepared = server.prepare();
                 scenario.onActivity(activity -> { inject(activity); PhotoSharingService.start(activity, prepared); });
-                assertEquals("HELLO", server.take().action());
+                if (server.localOwner) assertEquals("HELLO", server.take().action());
+                else awaitPhotoCondition(() -> PhotoSharingService.current(prepared.id.toString()) != null
+                        && !PhotoSharingService.current(prepared.id.toString()).photos().isEmpty());
                 RemotePhotoSession current = PhotoSharingService.current(prepared.id.toString());
+                if (!server.localOwner) assertFalse("Viewer approval does not authorize continuing on a locked viewer", current.approvedOwner());
                 if (reason.equals("signout")) engine.logout();
                 else {
                     Field serviceField = PhotoSharingService.class.getDeclaredField("active"); serviceField.setAccessible(true);

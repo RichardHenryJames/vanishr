@@ -115,7 +115,11 @@ budget prevents photo chunks from consuming normal chat request counters.
 Normal chat may disconnect while the owner-approved foreground service maintains
 its photo channel. Role, device generation, authentication and both photo
 connections are rechecked, not cached as a permanent approval flag. Owner Android
-photo/notification permissions, phone-lock checks and End access remain mandatory.
+photo/notification permissions, a configured secure screen lock and End access
+remain mandatory. In the local post-0.4.2 client, approval/startup require an
+unlocked phone, but an already accepted owner session can continue while that
+phone is locked. Viewer lock or owner lock before acceptance still ends access.
+Normal chat vault access remains unlock-only; server authorization is unchanged.
 Client metadata/thumbnails/original chunks use separate official Signal sessions,
 not plaintext JSON photo paths or a custom encryption algorithm.
 

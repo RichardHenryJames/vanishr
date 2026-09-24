@@ -23,7 +23,9 @@ public final class PhotoSharingService extends Service {
     private final AtomicBoolean stopping = new AtomicBoolean();
     private RemotePhotoSession session;
     private final BroadcastReceiver screenOff = new BroadcastReceiver() {
-        @Override public void onReceive(Context context, Intent intent) { end("Photo access ended when the phone locked"); }
+        @Override public void onReceive(Context context, Intent intent) {
+            if (session == null || !session.approvedOwner()) end("Photo access ended when the phone locked");
+        }
     };
 
     static boolean notificationsAllowed(Context context) {
@@ -36,6 +38,10 @@ public final class PhotoSharingService extends Service {
     static boolean phoneUnlocked(Context context) {
         KeyguardManager keyguard = context.getSystemService(KeyguardManager.class);
         return keyguard != null && keyguard.isDeviceSecure() && !keyguard.isDeviceLocked();
+    }
+    static boolean phonePermitsSession(Context context, RemotePhotoSession session) {
+        KeyguardManager keyguard = context.getSystemService(KeyguardManager.class);
+        return keyguard != null && keyguard.isDeviceSecure() && (!keyguard.isDeviceLocked() || session.approvedOwner());
     }
     static synchronized boolean busy() { return pending != null || active != null; }
     static RemotePhotoSession current(String id) { RemotePhotoSession value = latest; return value != null && value.id().toString().equals(id) ? value : null; }
@@ -68,12 +74,18 @@ public final class PhotoSharingService extends Service {
         Intent open = session.owner() ? new Intent(context, MainActivity.class)
             : new Intent(context, RemotePhotosActivity.class).putExtra("session", session.id().toString());
         open.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent content = PendingIntent.getActivity(context, NOTIFICATION, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        String title = "Vanishr is active";
+        Notification publicVersion = new Notification.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_image)
+            .setContentTitle(title).setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setOngoing(true).setOnlyAlertOnce(true).setCategory(Notification.CATEGORY_SERVICE)
+            .setContentIntent(content).setDeleteIntent(end).addAction(R.drawable.ic_x, "End access", end).build();
         Notification.Builder builder = new Notification.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_image)
-                .setContentTitle(session.owner() ? "Photo sharing active" : "Remote photos")
+            .setContentTitle(title).setPublicVersion(publicVersion)
                 .setContentText("With " + session.peerName()).setVisibility(Notification.VISIBILITY_PRIVATE)
                 .setOngoing(true).setOnlyAlertOnce(true).setCategory(Notification.CATEGORY_SERVICE)
                 .setDeleteIntent(end)
-                .setContentIntent(PendingIntent.getActivity(context, NOTIFICATION, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT))
+            .setContentIntent(content)
                 .addAction(R.drawable.ic_x, "End access", end).setTimeoutAfter(RemotePhotoSession.LIFETIME);
         if (Build.VERSION.SDK_INT >= 31) builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE);
         return builder.build();
@@ -110,11 +122,11 @@ public final class PhotoSharingService extends Service {
             worker.scheduleWithFixedDelay(() -> {
                 if (stopping.get()) return;
                 try {
-                    if (!phoneUnlocked(this) || !notificationsAllowed(this) || session.owner() && !PhotoLibrary.permitted(this)) { end("Photo access ended"); return; }
+                    if (!phonePermitsSession(this, session) || !notificationsAllowed(this) || session.owner() && !PhotoLibrary.permitted(this)) { end("Photo access ended"); return; }
                     if (SystemClock.elapsedRealtime() > connectedBy && session.status().equals("Connecting...")) { end("The other phone is unavailable"); return; }
                     session.tick();
                 } catch (RelayApi.ApiFailure failure) { end(failure.status == 410 ? "Photo access ended" : failure.userMessage()); }
-                catch (Exception failure) { end("Photo access ended. The phone may be offline or locked."); }
+                catch (Exception failure) { end("Photo access ended. The connection or photo permission may be unavailable."); }
             }, 0, 200, TimeUnit.MILLISECONDS);
         } catch (RuntimeException failure) { end("Photo sharing could not start. Check Android permissions."); }
         return START_NOT_STICKY;
