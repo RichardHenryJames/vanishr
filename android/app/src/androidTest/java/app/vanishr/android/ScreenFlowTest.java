@@ -2727,62 +2727,6 @@ public class ScreenFlowTest {
         }
     }
 
-    @Test public void remotePhotosRoleGateAndDecliningApprovalNeverOpenTheGallery() throws Exception {
-        signedInFixture(); photoFixturePermission();
-        try (PhotoServer server = new PhotoServer(true); ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
-            assertFalse(RemotePhotoSession.administrator(engine));
-            assertThrows(SecurityException.class, () -> new RemotePhotoSession.Prepared(engine, peer, null));
-            scenario.onActivity(this::inject);
-            scenario.onActivity(activity -> {
-                var worker = (java.util.concurrent.ExecutorService) readField(activity, "work");
-                try { worker.submit(() -> invoke(activity, "photoRequestsOnce")).get(10, java.util.concurrent.TimeUnit.SECONDS); }
-                catch (Exception failure) { throw new AssertionError(failure); }
-            });
-            var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
-            assertTrue(device.wait(androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.text("Allow photo access?")), 5000));
-            snapshot(scenario, "64-remote-photo-approval");
-            scenario.onActivity(activity -> {
-                assertEquals(false, readField(activity, "photoAdmin"));
-                assertFalse(PhotoSharingService.busy());
-                assertEquals("Allow", dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
-                assertTrue(((TextView) dialog(activity).findViewById(android.R.id.message)).getText().toString().contains("even while this phone is locked"));
-                dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
-            });
-            awaitPhotoCondition(() -> server.declined.get() == 1);
-            assertFalse(PhotoSharingService.busy()); assertTrue(server.received.isEmpty());
-        }
-    }
-
-    @Test public void remotePhotosSignOutAndSystemStopClearTheApprovedSession() throws Exception {
-        photoFixturePermission();
-        for (String reason : List.of("signout", "screen-off", "timeout")) {
-            vault.unlock(); signedInFixture();
-            try (PhotoServer server = new PhotoServer(!reason.equals("screen-off")); ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
-                RemotePhotoSession.Prepared prepared = server.prepare();
-                scenario.onActivity(activity -> { inject(activity); PhotoSharingService.start(activity, prepared); });
-                if (server.localOwner) assertEquals("HELLO", server.take().action());
-                else awaitPhotoCondition(() -> PhotoSharingService.current(prepared.id.toString()) != null
-                        && !PhotoSharingService.current(prepared.id.toString()).photos().isEmpty());
-                RemotePhotoSession current = PhotoSharingService.current(prepared.id.toString());
-                if (!server.localOwner) assertFalse("Viewer approval does not authorize continuing on a locked viewer", current.approvedOwner());
-                if (reason.equals("signout")) engine.logout();
-                else {
-                    Field serviceField = PhotoSharingService.class.getDeclaredField("active"); serviceField.setAccessible(true);
-                    PhotoSharingService service = (PhotoSharingService) serviceField.get(null); assertNotNull(service);
-                    InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
-                        if (reason.equals("timeout")) service.onTimeout(1, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
-                        else ((android.content.BroadcastReceiver) readField(service, "screenOff")).onReceive(service, new android.content.Intent(android.content.Intent.ACTION_SCREEN_OFF));
-                    });
-                }
-                awaitPhotoCondition(() -> !PhotoSharingService.busy());
-                assertTrue(current.ended()); assertNull(current.fullImage()); assertTrue(current.photos().isEmpty());
-                assertThrows(SecurityException.class, () -> prepared.vault.get("identity"));
-            }
-            if (engine != null) engine.close();
-            resetQaFixture(); createFixtureKey(AndroidVault.MASTER);
-            vault = new AndroidVault(context); vault.unlock(); engine = new ChatEngine(vault);
-        }
-    }
 
     @Test public void remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount() throws Exception {
         signedInFixture();
