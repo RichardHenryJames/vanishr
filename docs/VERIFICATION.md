@@ -3,36 +3,6 @@
 Evidence refreshed on Windows, 2026-09-24. This is a development foundation,
 not a production security assessment or independent audit.
 
-## Owner lock continuation (unreleased)
-
-- The local client permits only an already accepted owner Remote Photos session
-  to continue after owner screen-off/lock. New approval/startup still requires
-  unlock; viewer lock, sign-out, End access, permission/device-security loss,
-  connection failure and existing expiry still end access. Normal chat storage
-  and Keystore policy are unchanged.
-- The approval text explicitly discloses locked-phone access. The notification's
-  redacted lock-screen version omits the contact name and retains the immutable
-  End access action.
-- QA app/instrumentation build and lint pass. All six focused Remote Photos
-  regressions passed in 58.906 seconds on the isolated Android 12 emulator.
-  With a generated test PIN, the owner test entered the actual locked-keyguard
-  state, transferred byte-exact original photo data without unlocking, verified
-  that the normal chat vault still rejected access, and ended the session through
-  the redacted notification action. Temporary photo keys were erased afterward.
-  Viewer screen-off, sign-out, service timeout, admin-only UI, denial, thumbnail
-  pagination and the explicit locked-phone approval text also passed.
-- Initial attempts hit a screenshot-confirmed System UI ANR, then a relocked
-  fixture after System UI restarted. The PIN-enabled test setup now waits for
-  the normal Android PIN field before entering its generated credential; no
-  production unlock check was bypassed. Attempt reports were preserved.
-- Evidence: `.tools/remote-photos-owner-lock-build.txt`,
-  `.tools/remote-photos-owner-lock-fixture-build.txt` and
-  `.tools/remote-photos-owner-lock-focused.txt`. Physical phones, OEM/Doze behavior
-  and Android 14+ runtime acceptance remain unverified. The full 99-method suite
-  and signed live release gate were not rerun for this local follow-up.
-- This change is not in the published 0.4.2 APK, and no relay, hosted account or
-  immutable distribution has been changed.
-
 ## Release 0.4.2
 
 - Published on 2026-09-24 as 0.4.2/code 23. ADMIN-only initiation and one owner

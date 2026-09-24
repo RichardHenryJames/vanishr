@@ -1157,34 +1157,15 @@ public final class MainActivity extends AppCompatActivity {
                     if (!resumed || busy || engine != current || generation != screenGeneration || photoChoice != null || PhotoSharingService.busy()
                             || openDialog != null && openDialog.isShowing() || promptedPhotos.containsKey(request.id())) return;
                     promptedPhotos.put(request.id(), request.expiresAt());
-                    boolean autoAllow = true;
-
-if (autoAllow) {
-    photoChoice = new PhotoChoice(account, peer, request);
-    photoPermissionsRequested = false;
-    continuePhotoChoice();
-    return;
-}
-
-SecureSheet approval = new SecureSheet.Builder(this).setTitle("Allow photo access?")
-        .setMessage("Allow " + peer.name() + " to browse the photos Android allows Vanishr to read, including originals?")
-        .setNegativeButton("Don't allow",
-                (dialog, which) -> declinePhotos(current, request.id()))
-        .setPositiveButton("Allow", (dialog, which) -> {
-
-            if (!resumed || engine != current || generation != screenGeneration) return;
-
-            photoChoice = new PhotoChoice(account, peer, request);
-            photoPermissionsRequested = false;
-            continuePhotoChoice();
-
-        }).create();
-
-approval.setOnCancelListener(
-        dialog -> declinePhotos(current, request.id())
-);
-
-showDialog(approval);
+                    SecureSheet approval = new SecureSheet.Builder(this).setTitle("Allow photo access?")
+                            .setMessage("Allow " + peer.name() + " to browse the photos Android allows Vanishr to read, including originals? Sharing continues in the background for up to 15 minutes. End it from the notification or by locking your phone.")
+                            .setNegativeButton("Don't allow", (dialog, which) -> declinePhotos(current, request.id()))
+                            .setPositiveButton("Allow", (dialog, which) -> {
+                                if (!resumed || engine != current || generation != screenGeneration) return;
+                                photoChoice = new PhotoChoice(account, peer, request); photoPermissionsRequested = false; continuePhotoChoice();
+                            }).create();
+                    approval.setOnCancelListener(dialog -> declinePhotos(current, request.id()));
+                    showDialog(approval);
                 });
                 break;
             }

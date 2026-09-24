@@ -161,8 +161,7 @@ received metadata; status is not identity-verification or message-delivery proof
 Only an enrolled account whose current database role is `ADMIN` may request this
 feature; both clients require an independently verified saved direct contact.
 The owner receives one Allow/Don't allow prompt naming the contact and explaining
-background and locked-phone access to photos Android permits this app to read,
-including originals. Approval and service startup still require an unlocked phone.
+background access to photos Android permits this app to read, including originals.
 Android's photo/notification permission prompts still apply. Partial photo access
 is respected; no permanent sharing-enabled flag, silent approval, new-photo upload
 job or automatic grant on app restart is added.
@@ -170,11 +169,8 @@ job or automatic grant on app restart is added.
 An accepted session runs in a non-exported Android data-sync foreground service
 with a persistent private notification and an immutable End access action. The
 user explicitly approved this notification-based background design. Closing the
-owner's chat activity or locking that phone does not end an already accepted
-owner session. A redacted lock-screen notification names the active feature and
-retains End access without disclosing the contact. Viewer screen-off/lock still
-ends access, as does an owner lock before acceptance. End access, sign-out, contact
-removal, removal of the device screen lock, loss of required permission, rejected authentication,
+owner's chat activity does not end access. End access, sign-out, contact removal,
+phone screen-off/lock, loss of required permission, rejected authentication,
 photo-connection loss, role/device change, Android service timeout or the session
 deadline ends it. A force-stopped or killed service does not automatically restart.
 Android/OEM background limits cannot be bypassed or guaranteed.
@@ -192,12 +188,7 @@ Each photo session uses official libsignal with independently pinned existing
 identities and fresh prekeys in separate in-memory stores. Chat ratchets are not
 copied or advanced; the normal encrypted chat vault still closes on background.
 This feature intentionally retains a temporary client identity copy and photo
-session keys in memory while an approved owner service is active, including while
-the owner phone is locked. This explicitly requested exception applies only to
-the isolated, accepted photo session; it does not reopen the chat vault or relax
-Android Keystore, device-unlock, or photo-permission requirements. Android/OEM
-power management may pause or terminate transfer while locked; reboot/force-stop
-does not restore sharing. The published 0.4.2 build predates this local lock-policy change.
+session keys in memory while an approved service is active on an unlocked phone.
 No private key leaves its own device. Temporary stores are cleared on termination.
 Encrypted application envelopes bind session, request, packet, sender/recipient
 devices and original deadlines, preventing responses from another conversation

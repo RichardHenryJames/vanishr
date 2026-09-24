@@ -129,13 +129,8 @@ relay never receives a gallery archive or plaintext photo metadata. Grid cells
 are recycled, the thumbnail cache is bounded, and only one original is assembled
 at a time (current memory-safety maximum 64 MiB, display edge at most 4096 pixels).
 No received-photo disk files are written. The foreground notification's End access
-action, viewer lock, sign-out, role/identity changes and hard session/packet expiry
-end access; Android does not restart a stopped session automatically. The local
-post-0.4.2 client permits an already approved owner service to continue after the
-owner locks the phone, with explicit approval wording and a redacted lock-screen
-notification. New approval/startup still requires unlock. The normal chat vault
-remains closed, and losing a secure screen lock or required Android permissions
-ends the session. The immutable published 0.4.2 APK is not changed by this work.
+action, phone lock, sign-out, role/identity changes and hard session/packet expiry
+end access; Android does not restart a stopped session automatically.
 
 ## Profile and contact names
 
