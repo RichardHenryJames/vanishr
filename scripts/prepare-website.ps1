@@ -1,5 +1,5 @@
 #requires -Version 7.4
-param([ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.4.3', [switch]$Refresh)
+param([ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.4.4', [switch]$Refresh)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $tools = Join-Path $root '.tools'

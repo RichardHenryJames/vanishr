@@ -82,7 +82,6 @@ public final class PhotoSharingService extends Service {
             .setContentIntent(content).setDeleteIntent(end).addAction(R.drawable.ic_x, "End access", end).build();
         Notification.Builder builder = new Notification.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_image)
             .setContentTitle(title).setPublicVersion(publicVersion)
-                .setContentText("With " + session.peerName()).setVisibility(Notification.VISIBILITY_PRIVATE)
                 .setOngoing(true).setOnlyAlertOnce(true).setCategory(Notification.CATEGORY_SERVICE)
                 .setDeleteIntent(end)
             .setContentIntent(content)
