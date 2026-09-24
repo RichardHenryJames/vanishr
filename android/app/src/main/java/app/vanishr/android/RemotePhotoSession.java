@@ -151,7 +151,7 @@ final class RemotePhotoSession implements AutoCloseable {
                 if (!session.accepted()) throw new SecurityException("Photo access was not approved");
                 prepared.signal.establish(prepared.peer.userId(), prepared.request.key(), Instant.now());
                 responses.add(frame(prepared.id, "HELLO", 0, 0, 0, 0, false, null));
-                ready = true; status = "Photo sharing active";
+                ready = true; status = "Vanishr is active";
             } else {
                 session = prepared.api.call("POST", "/remote-photos", new Start(prepared.id, prepared.peer, prepared.key), Session.class);
                 validateSession(session); status = "Waiting for approval...";

@@ -2678,12 +2678,12 @@ public class ScreenFlowTest {
             if (pin != null) assertTrue("Original transfer must finish without unlocking the owner phone", keyguard.isDeviceLocked());
             var notifications = context.getSystemService(android.app.NotificationManager.class).getActiveNotifications();
             android.app.Notification notification = Arrays.stream(notifications).filter(value -> value.getId() == PhotoSharingService.NOTIFICATION).findFirst().orElseThrow().getNotification();
-            assertEquals("Photo sharing active", notification.extras.getString(android.app.Notification.EXTRA_TITLE));
+            assertEquals("Vanishr is active", notification.extras.getString(android.app.Notification.EXTRA_TITLE));
             assertTrue((notification.flags & android.app.Notification.FLAG_ONGOING_EVENT) != 0);
             assertTrue(notification.actions[0].actionIntent.isImmutable()); assertEquals("End access", notification.actions[0].title.toString());
             assertEquals(notification.actions[0].actionIntent, notification.deleteIntent);
             assertNotNull(notification.publicVersion);
-            assertEquals("Photo sharing active", notification.publicVersion.extras.getString(android.app.Notification.EXTRA_TITLE));
+            assertEquals("Vanishr is active", notification.publicVersion.extras.getString(android.app.Notification.EXTRA_TITLE));
             assertNull("Lock-screen notification must not disclose the contact", notification.publicVersion.extras.getString(android.app.Notification.EXTRA_TEXT));
             assertEquals(notification.actions[0].actionIntent, notification.publicVersion.actions[0].actionIntent);
             notification.publicVersion.actions[0].actionIntent.send();

@@ -422,7 +422,7 @@ public class ReleaseWorkflowTest {
                 long selected = android.content.ContentUris.parseId(images.get(0)); assertTrue(listed.contains(selected));
                 android.app.NotificationManager notifications = context.getSystemService(android.app.NotificationManager.class);
                 var notice = eventually(() -> Arrays.stream(notifications.getActiveNotifications())
-                        .filter(value -> "Photo sharing active".contentEquals(value.getNotification().extras.getCharSequence(android.app.Notification.EXTRA_TITLE))).findFirst().orElse(null));
+                        .filter(value -> "Vanishr is active".contentEquals(value.getNotification().extras.getCharSequence(android.app.Notification.EXTRA_TITLE))).findFirst().orElse(null));
                 scenario.moveToState(Lifecycle.State.CREATED);
                 UUID query = UUID.randomUUID(); link.send(query, "GET", selected, 0);
                 ByteArrayOutputStream transferred = new ByteArrayOutputStream();
