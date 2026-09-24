@@ -21,6 +21,8 @@ public class AccountDirectory {
     public record UsernameChange(@NotNull @Pattern(regexp = "[a-z0-9_]{3,32}") String handle) { }
     public record Profile(UUID userId, String handle, String displayName) { }
     public record ProfileChange(@NotBlank @Size(max = 40) String displayName) { }
+    public enum UserType { USER, ADMIN }
+    public record AccountType(UUID userId, UserType userType) { }
     public record DeviceRequest(@NotNull UUID deviceId, @NotNull @Size(min = 33, max = 33) byte[] identityKey, boolean replaceExisting) { }
     public record PreKey(@Min(1) @Max(16380) int registrationId, @Positive int preKeyId,
                          @NotNull @Size(min = 33, max = 33) byte[] preKey, @Positive int signedPreKeyId,
@@ -73,6 +75,12 @@ public class AccountDirectory {
     public Profile profile(UUID userId) {
         return database.query("SELECT id, handle, display_name FROM accounts WHERE id = ?",
                 (row, index) -> new Profile(row.getObject("id", UUID.class), row.getString("handle"), row.getString("display_name")), userId)
+                .stream().findFirst().orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "not_found"));
+    }
+
+    public AccountType accountType(UUID userId) {
+        return database.query("SELECT id, user_type FROM accounts WHERE id = ?",
+                (row, index) -> new AccountType(row.getObject("id", UUID.class), UserType.valueOf(row.getString("user_type"))), userId)
                 .stream().findFirst().orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "not_found"));
     }
 

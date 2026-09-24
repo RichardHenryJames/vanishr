@@ -52,6 +52,30 @@ class SignalRuntimeTest {
     }
 
     @Test
+    void isolatedSignalSessionsKeepPinnedIdentityWithoutCopyingOrAdvancingChatRatchets() throws Exception {
+        UUID firstId = UUID.randomUUID(), secondId = UUID.randomUUID();
+        TestVault firstVault = new TestVault(), secondVault = new TestVault();
+        SignalClient first = new SignalClient(firstId, firstVault), second = new SignalClient(secondId, secondVault);
+        first.verifyPeer(secondId, second.publicIdentity()); second.verifyPeer(firstId, first.publicIdentity());
+        first.establish(secondId, second.generatePreKey(Instant.now()), Instant.now());
+        SignalClient.Packet unread = first.encrypt(secondId, new byte[]{1, 2}, Instant.now());
+        TestVault firstTemporary = new TestVault(), secondTemporary = new TestVault();
+        SignalClient viewer = first.isolatedSession(firstTemporary), owner = second.isolatedSession(secondTemporary);
+        assertArrayEquals(first.publicIdentity(), viewer.publicIdentity());
+        assertFalse(viewer.isVerified(secondId)); assertFalse(viewer.hasSession(secondId));
+        assertThrows(IllegalArgumentException.class, () -> first.isolatedSession(firstVault));
+        assertThrows(IllegalArgumentException.class, () -> first.isolatedSession(firstTemporary));
+        viewer.verifyPeer(secondId, second.publicIdentity()); owner.verifyPeer(firstId, first.publicIdentity());
+        owner.establish(firstId, viewer.generatePreKey(Instant.now()), Instant.now());
+        SignalClient.Packet thumbnail = owner.encrypt(firstId, new byte[]{3, 4}, Instant.now());
+        assertArrayEquals(new byte[]{3, 4}, viewer.decrypt(secondId, thumbnail));
+        assertThrows(Exception.class, () -> first.decrypt(secondId, thumbnail));
+        assertThrows(Exception.class, () -> viewer.decrypt(secondId, thumbnail));
+        assertArrayEquals(new byte[]{1, 2}, second.decrypt(firstId, unread));
+        assertArrayEquals(new byte[]{5}, first.decrypt(secondId, second.encrypt(firstId, new byte[]{5}, Instant.now())));
+    }
+
+    @Test
     void officialGroupSenderKeysRejectUnknownSendersReplayTamperingAndOldMembershipEpochs() throws Exception {
         UUID group = UUID.randomUUID(); UUID epoch = UUID.randomUUID();
         UUID aliceId = UUID.randomUUID(); UUID bobId = UUID.randomUUID();

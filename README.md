@@ -7,16 +7,31 @@ messenger. Do not use it for real sensitive conversations yet.**
 
 ## Hosted Development Build
 
-Download the signed Android 0.3.9 APK, matching application/libsignal source and
+Download the signed Android 0.4.2 APK, matching application/libsignal source and
 license notices at **https://vanishr-download.vercel.app**.
 
-The 0.4.1/code 22 candidate adds Last seen in the direct-chat header when a
+Release 0.4.2/code 23 adds admin-initiated Remote Photos after one owner approval.
+It browses Android-permitted photos in pages, transfers only requested originals,
+and continues while the owner's chat is closed using a persistent End access
+notification. Phone lock, revocation and the 15-minute session deadline end access.
+Clear chat follows Remove contact in the direct-chat menu and removes only local
+messages/unsent items, preserving the contact and verified identity. The candidate
+passed 63 JVM tests, all 99 Android QA methods, unit tests, QA/release lint and the
+signed live workflow with actual FCM, background photos and post-clear messaging.
+The relay, signed APK, matching source and no-store code-23 feed are published
+and verified on 2026-09-24. Install over the existing app without uninstalling
+or clearing storage. Both phones need 0.4.2 for Remote Photos.
+See [verification](docs/VERIFICATION.md#release-042).
+
+Release 0.4.1/code 22 adds Last seen in the direct-chat header when a
 mutually saved, verified contact is offline. Typing and Online take precedence;
 only the latest activity within 24 hours is retained. Both contacts must update.
 The full JVM gate, 91 Android QA methods, unit tests, lint, narrow-screen checks
 and signed live workflow pass, including reciprocal last seen and actual FCM.
-The compatible relay is deployed; static publication is pending and the public
-APK/feed remains 0.3.9. See [verification](docs/VERIFICATION.md#release-041).
+The relay, signed APK, matching source and no-store code-22 update feed are
+published and verified on 2026-09-23. Install over the existing app without
+uninstalling or clearing storage, and open both updated phones online.
+See [verification](docs/VERIFICATION.md#release-041).
 
 Release 0.3.9/code 21 addresses recurring PIN/pattern prompts after biometric
 phone unlock on older Android. It retains encrypted Keystore storage and

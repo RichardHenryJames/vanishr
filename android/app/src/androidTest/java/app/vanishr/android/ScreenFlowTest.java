@@ -44,6 +44,7 @@ public class ScreenFlowTest {
         context = ApplicationProvider.getApplicationContext();
         Assume.assumeTrue("Screen fixtures must never touch the installed release app", context.getPackageName().equals("app.vanishr.android.qa"));
         assertTrue(Build.MODEL.contains("sdk_gphone") || Build.FINGERPRINT.contains("generic"));
+        unlockPhotoFixture(InstrumentationRegistry.getArguments().getString("devicePin"));
         resetQaFixture();
         assertTrue(context.getSharedPreferences("updates", Context.MODE_PRIVATE).edit().clear()
             .putLong("last-check", System.currentTimeMillis()).commit());
@@ -545,7 +546,9 @@ public class ScreenFlowTest {
                 pending[0] = ((List<?>) readField(activity, "pendingSends")).get(0);
                 input.setText("Do not replace this new draft");
             });
-            assertTrue(device.wait(androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.text("Not sent")), 10_000));
+            boolean failedVisible = device.wait(androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.text("Not sent")), 10_000);
+            if (!failedVisible) snapshot(scenario, "65-send-retry-state");
+            assertTrue("Failure state must be visible; pending.failed=" + readField(pending[0], "failed"), failedVisible);
             Object id = readField(pending[0], "id"); Object createdAt = readField(pending[0], "createdAt");
             scenario.onActivity(activity -> {
                 assertEquals("Do not replace this new draft", ((EditText) readField(activity, "composer")).getText().toString());
@@ -2420,6 +2423,460 @@ public class ScreenFlowTest {
         assertEquals("Friend Updated", friend.name());
         assertEquals("friend_renamed", friend.username());
         assertEquals("", engine.privateName(friend));
+    }
+
+    private void awaitPhotoCondition(java.util.function.BooleanSupplier condition) throws Exception {
+        var ready = new java.util.concurrent.CountDownLatch(1);
+        android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
+        Runnable check = new Runnable() {
+            @Override public void run() { if (condition.getAsBoolean()) ready.countDown(); else handler.postDelayed(this, 50); }
+        };
+        handler.post(check);
+        try { assertTrue("Photo operation did not complete", ready.await(20, java.util.concurrent.TimeUnit.SECONDS)); }
+        finally { handler.removeCallbacks(check); }
+    }
+
+    private void unlockPhotoFixture(String pin) throws Exception {
+        if (pin == null) return;
+        assertTrue("Use only the generated emulator credential", pin.matches("[0-9]{6}"));
+        var keyguard = context.getSystemService(android.app.KeyguardManager.class);
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        device.wakeUp();
+        if (!keyguard.isDeviceLocked()) return;
+        device.pressMenu();
+        assertTrue("The emulator PIN field must be visible before entering the test credential", device.wait(
+                androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.res("com.android.systemui", "pinEntry")), 15_000));
+        for (char digit : pin.toCharArray()) device.pressKeyCode(android.view.KeyEvent.KEYCODE_0 + digit - '0');
+        device.pressEnter(); awaitPhotoCondition(() -> !keyguard.isDeviceLocked());
+    }
+
+    private void photoFixturePermission() {
+        assertEquals("app.vanishr.android.qa", context.getPackageName());
+        InstrumentationRegistry.getInstrumentation().getUiAutomation().grantRuntimePermission(context.getPackageName(),
+                Build.VERSION.SDK_INT >= 33 ? android.Manifest.permission.READ_MEDIA_IMAGES : android.Manifest.permission.READ_EXTERNAL_STORAGE);
+        if (Build.VERSION.SDK_INT >= 33) InstrumentationRegistry.getInstrumentation().getUiAutomation()
+                .grantRuntimePermission(context.getPackageName(), android.Manifest.permission.POST_NOTIFICATIONS);
+    }
+
+    private void photoSnapshot(RemotePhotosActivity activity, String name) {
+        View decor = activity.getWindow().getDecorView();
+        assertTrue((activity.getWindow().getAttributes().flags & WindowManager.LayoutParams.FLAG_SECURE) != 0);
+        Bitmap image = Bitmap.createBitmap(decor.getWidth(), decor.getHeight(), Bitmap.Config.ARGB_8888);
+        try {
+            decor.draw(new Canvas(image));
+            File folder = new File(context.getExternalFilesDir(null), "ui-qa"); assertTrue(folder.isDirectory() || folder.mkdirs());
+            try (OutputStream output = new FileOutputStream(new File(folder, name + ".png"))) { assertTrue(image.compress(Bitmap.CompressFormat.PNG, 100, output)); }
+            for (View view : descendants(decor)) if (view instanceof TextView text && text.isShown() && text.getLayout() != null) {
+                int available = text.getWidth() - text.getCompoundPaddingLeft() - text.getCompoundPaddingRight();
+                for (int line = 0; line < text.getLineCount(); line++) assertTrue("Photo UI text must fit", text.getLayout().getLineMax(line) <= available + 4);
+            }
+        } catch (IOException failure) { throw new AssertionError(failure); }
+        finally { image.recycle(); }
+    }
+
+    private android.net.Uri insertPhotoFixture(byte[] bytes) throws Exception {
+        org.junit.Assume.assumeTrue(Build.VERSION.SDK_INT >= 29);
+        android.content.ContentValues metadata = new android.content.ContentValues();
+        metadata.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "vanishr-qa-" + UUID.randomUUID() + ".jpg");
+        metadata.put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+        metadata.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Vanishr-QA");
+        metadata.put(android.provider.MediaStore.Images.Media.IS_PENDING, 1);
+        android.net.Uri uri = context.getContentResolver().insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, metadata);
+        assertNotNull(uri);
+        try {
+            try (OutputStream output = context.getContentResolver().openOutputStream(uri)) { assertNotNull(output); output.write(bytes); }
+            metadata.clear(); metadata.put(android.provider.MediaStore.Images.Media.IS_PENDING, 0);
+            assertEquals(1, context.getContentResolver().update(uri, metadata, null, null)); return uri;
+        } catch (Exception failure) { context.getContentResolver().delete(uri, null, null); throw failure; }
+    }
+
+    private final class PhotoServer implements AutoCloseable {
+        final okhttp3.mockwebserver.MockWebServer server = new okhttp3.mockwebserver.MockWebServer();
+        final SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        final java.util.concurrent.BlockingQueue<RemotePhotoSession.Frame> received = new java.util.concurrent.LinkedBlockingQueue<>();
+        final ArrayDeque<RemotePhotoSession.Packet> incoming = new ArrayDeque<>();
+        final Set<UUID> delivered = new HashSet<>();
+        final okhttp3.tls.HandshakeCertificates clientTls;
+        final UUID id = UUID.randomUUID();
+        final boolean localOwner;
+        final byte[] thumbnail;
+        final java.util.concurrent.atomic.AtomicInteger originals = new java.util.concurrent.atomic.AtomicInteger();
+        final java.util.concurrent.atomic.AtomicInteger declined = new java.util.concurrent.atomic.AtomicInteger();
+        RemotePhotoSession.Session snapshot;
+        volatile boolean disconnected;
+        volatile Throwable error;
+        PhotoServer(boolean localOwner) throws Exception {
+            this.localOwner = localOwner;
+            remote.verifyPeer(userId, engine.groupSignal().publicIdentity()); saveProfilePeer(remote);
+            Bitmap icon = Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888); icon.eraseColor(Color.rgb(40, 120, 95));
+            ByteArrayOutputStream output = new ByteArrayOutputStream(); icon.compress(Bitmap.CompressFormat.JPEG, 75, output); icon.recycle(); thumbnail = output.toByteArray();
+            var certificate = new okhttp3.tls.HeldCertificate.Builder().commonName("localhost").addSubjectAlternativeName("localhost").addSubjectAlternativeName("127.0.0.1").build();
+            var serverTls = new okhttp3.tls.HandshakeCertificates.Builder().heldCertificate(certificate).build();
+            clientTls = new okhttp3.tls.HandshakeCertificates.Builder().addTrustedCertificate(certificate.certificate()).build();
+            server.useHttps(serverTls.sslSocketFactory(), false);
+            ChatEngine.Contact own = new ChatEngine.Contact(userId, deviceId, Base64.getEncoder().encodeToString(engine.groupSignal().publicIdentity()));
+            ChatEngine.Contact other = RemotePhotoSession.contact(peer);
+            if (localOwner) snapshot = new RemotePhotoSession.Session(id, other, own, false, System.currentTimeMillis() + 300_000, remote.generatePreKey(Instant.now()));
+            server.setDispatcher(new okhttp3.mockwebserver.Dispatcher() {
+                @Override public okhttp3.mockwebserver.MockResponse dispatch(okhttp3.mockwebserver.RecordedRequest request) {
+                    try {
+                        if ("/photo-events".equals(request.getPath())) return new okhttp3.mockwebserver.MockResponse().withWebSocketUpgrade(new okhttp3.WebSocketListener() { });
+                        synchronized (PhotoServer.this) {
+                            if ("/remote-photos".equals(request.getPath())) {
+                                RemotePhotoSession.Start start = RelayApi.JSON.fromJson(request.getBody().readUtf8(), RemotePhotoSession.Start.class);
+                                snapshot = new RemotePhotoSession.Session(start.id(), own, other, true, System.currentTimeMillis() + 300_000, start.key());
+                                remote.establish(userId, start.key(), Instant.now()); queue(start.id(), "HELLO", 0, 0, 0, 0, false, null);
+                                return response(snapshot);
+                            }
+                            if (request.getPath().endsWith("/accept")) {
+                                snapshot = new RemotePhotoSession.Session(snapshot.id(), snapshot.requester(), snapshot.owner(), true, snapshot.expiresAt(), snapshot.key());
+                                return response(snapshot);
+                            }
+                            if (request.getPath().endsWith("/exchange")) {
+                                if (disconnected) return new okhttp3.mockwebserver.MockResponse().setResponseCode(410).setBody("{\"error\":\"photo_session_ended\"}");
+                                RemotePhotoSession.Exchange exchange = RelayApi.JSON.fromJson(request.getBody().readUtf8(), RemotePhotoSession.Exchange.class);
+                                if (!incoming.isEmpty() && incoming.peek().id().equals(exchange.acknowledge())) incoming.remove();
+                                if (exchange.packet() != null && delivered.add(exchange.packet().id())) {
+                                    RemotePhotoSession.Send packet = exchange.packet();
+                                    byte[] plaintext = remote.decrypt(userId, new SignalClient.Packet(packet.type(), packet.ciphertext()));
+                                    try {
+                                        RemotePhotoSession.Frame frame = RelayApi.JSON.fromJson(new String(plaintext, StandardCharsets.UTF_8), RemotePhotoSession.Frame.class);
+                                        frame.message().verify(packet.id(), userId, deviceId, peerId, peerDevice, ChatEnvelope.Expiry.HOURS_24, packet.expiresAt(), null, Instant.now());
+                                        received.add(frame);
+                                        if (!localOwner) respond(frame);
+                                    } finally { Arrays.fill(plaintext, (byte) 0); }
+                                }
+                                return response(new RemotePhotoSession.Delivery(incoming.peek()));
+                            }
+                            return response(snapshot);
+                        }
+                    } catch (Throwable failure) { error = failure; return new okhttp3.mockwebserver.MockResponse().setResponseCode(500).setBody("{}"); }
+                }
+            });
+            server.start(java.net.InetAddress.getByName("127.0.0.1"), 0);
+            ChatEngine.Account previous = engine.account();
+            setField(engine, "account", new ChatEngine.Account(server.url("/").toString(), previous.handle(), userId, deviceId, "a".repeat(43), previous.expiresAt(), true));
+            engine.groupApi().close();
+            setField(engine, "api", syntheticApi(chain -> {
+                String path = chain.request().url().encodedPath();
+                if (path.equals("/account/type")) return syntheticResponse(chain.request(), 200, new RemotePhotoSession.AccountType(userId, localOwner ? "USER" : "ADMIN"));
+                if (path.equals("/users/id/" + peerId)) return syntheticResponse(chain.request(), 200, other);
+                if (path.equals("/remote-photos")) return syntheticResponse(chain.request(), 200, localOwner ? List.of(snapshot) : List.of());
+                if (path.equals("/remote-photos/" + id) && chain.request().method().equals("DELETE")) {
+                    declined.incrementAndGet(); return syntheticResponse(chain.request(), 204, null);
+                }
+                return syntheticResponse(chain.request(), 404, Map.of("error", "not_found"));
+            }));
+        }
+        okhttp3.mockwebserver.MockResponse response(Object body) { return new okhttp3.mockwebserver.MockResponse().setHeader("Content-Type", "application/json").setBody(RelayApi.JSON.toJson(body)); }
+        synchronized void queue(UUID request, String action, long photoId, long cursor, long offset, long total, boolean more, byte[] data) throws Exception {
+            long deadline = Math.min(snapshot.expiresAt(), System.currentTimeMillis() + 50_000);
+            ChatEnvelope message = new ChatEnvelope(1, UUID.randomUUID(), peerId, peerDevice, userId, deviceId, System.currentTimeMillis(), deadline, ChatEnvelope.Expiry.HOURS_24, "remote-photos", null);
+            byte[] plaintext = RelayApi.JSON.toJson(new RemotePhotoSession.Frame(snapshot.id(), request, action, photoId, cursor, offset, total, more, data, message)).getBytes(StandardCharsets.UTF_8);
+            try {
+                SignalClient.Packet packet = remote.encrypt(userId, plaintext, Instant.now());
+                incoming.add(new RemotePhotoSession.Packet(message.id(), peerId, peerDevice, deadline, packet.type(), packet.ciphertext()));
+            } finally { Arrays.fill(plaintext, (byte) 0); }
+        }
+        void respond(RemotePhotoSession.Frame request) throws Exception {
+            if (request.action().equals("LIST")) {
+                long first = Math.min(40, request.cursor() - 1), last = Math.max(1, first - PhotoLibrary.PAGE_SIZE + 1);
+                for (long photoId = first; photoId >= last; photoId--) queue(request.requestId(), "ENTRY", photoId, 0, 0, 0, false, thumbnail);
+                queue(request.requestId(), "PAGE_END", 0, last, 0, 0, last > 1, null);
+            } else if (request.action().equals("THUMB")) queue(request.requestId(), "THUMB", request.photoId(), 0, 0, 0, false, thumbnail);
+            else if (request.action().equals("GET")) {
+                originals.incrementAndGet();
+                for (int offset = 0; offset < photo.length; offset += PhotoLibrary.CHUNK_SIZE) {
+                    byte[] chunk = Arrays.copyOfRange(photo, offset, Math.min(photo.length, offset + PhotoLibrary.CHUNK_SIZE));
+                    queue(request.requestId(), "CHUNK", request.photoId(), 0, offset, photo.length, offset + chunk.length < photo.length, chunk);
+                }
+            }
+        }
+        RemotePhotoSession.Prepared prepare() throws Exception {
+            RemotePhotoSession.Prepared result = new RemotePhotoSession.Prepared(engine, peer, localOwner ? snapshot : null);
+            okhttp3.OkHttpClient client = (okhttp3.OkHttpClient) readField(result.api, "client");
+            setField(result.api, "client", client.newBuilder().sslSocketFactory(clientTls.sslSocketFactory(), clientTls.trustManager()).build());
+            return result;
+        }
+        RemotePhotoSession.Frame take() throws Exception {
+            RemotePhotoSession.Frame frame = received.poll(20, java.util.concurrent.TimeUnit.SECONDS);
+            if (error != null) throw new AssertionError(error);
+            assertNotNull("Encrypted photo response did not arrive", frame); return frame;
+        }
+        @Override public void close() throws Exception {
+            PhotoSharingService.endFor(userId, null);
+            awaitPhotoCondition(() -> !PhotoSharingService.busy());
+            server.shutdown(); Arrays.fill(thumbnail, (byte) 0);
+        }
+    }
+
+    @Test public void remotePhotosPageAllAccessibleImagesAndReadOnlyTheOpenedOriginal() throws Exception {
+        photoFixturePermission();
+        List<android.net.Uri> fixtures = new ArrayList<>();
+        try {
+            for (int index = 0; index < 37; index++) fixtures.add(insertPhotoFixture(photo));
+            Set<Long> expected = new HashSet<>(); for (var uri : fixtures) expected.add(android.content.ContentUris.parseId(uri));
+            Set<Long> found = new HashSet<>(); long before = Long.MAX_VALUE;
+            PhotoLibrary library = new PhotoLibrary(context);
+            for (int pages = 0; pages < 100; pages++) {
+                PhotoLibrary.Page page = library.page(before); assertTrue(page.ids().size() <= PhotoLibrary.PAGE_SIZE);
+                for (long id : page.ids()) { assertTrue(id < before); assertTrue(found.add(id)); }
+                if (!page.more()) break;
+                assertTrue(page.cursor() < before); before = page.cursor();
+            }
+            assertTrue("Pagination must not cap the gallery to one page", found.containsAll(expected));
+            long id = android.content.ContentUris.parseId(fixtures.get(0));
+            byte[] thumbnail = library.thumbnail(id); assertTrue(thumbnail.length <= PhotoLibrary.THUMBNAIL_BYTES);
+            try (PhotoLibrary.Opened original = library.open(id)) {
+                ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                while (original.position() < original.size) { byte[] chunk = original.next(); assertTrue(chunk.length <= PhotoLibrary.CHUNK_SIZE); bytes.write(chunk); }
+                assertArrayEquals(photo, bytes.toByteArray());
+            }
+        } finally { for (var uri : fixtures) context.getContentResolver().delete(uri, null, null); }
+    }
+
+    @Test public void remotePhotosOwnerServiceWorksAfterClosingChatAndNotificationEndsAccess() throws Exception {
+        signedInFixture(); photoFixturePermission();
+        String pin = InstrumentationRegistry.getArguments().getString("devicePin");
+        if (pin != null) assertTrue("Use only the generated emulator credential", pin.matches("[0-9]{6}"));
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        var keyguard = context.getSystemService(android.app.KeyguardManager.class);
+        android.net.Uri image = insertPhotoFixture(photo);
+        try (PhotoServer server = new PhotoServer(true); ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            ChatEngine.Account account = engine.account();
+            setField(engine, "account", new ChatEngine.Account(account.origin(), account.handle(), account.userId(), account.deviceId(),
+                    account.accessToken(), System.currentTimeMillis() + 120_000, true));
+            RemotePhotoSession.Prepared prepared = server.prepare();
+            assertTrue(prepared.deadline < server.snapshot.expiresAt());
+            scenario.onActivity(activity -> { inject(activity); PhotoSharingService.start(activity, prepared); });
+            assertEquals("HELLO", server.take().action());
+            RemotePhotoSession active = PhotoSharingService.current(prepared.id.toString()); assertNotNull(active);
+            assertTrue(active.approvedOwner());
+            scenario.moveToState(Lifecycle.State.CREATED);
+            assertThrows(SecurityException.class, () -> vault.get("identity"));
+            Field serviceField = PhotoSharingService.class.getDeclaredField("active"); serviceField.setAccessible(true);
+            PhotoSharingService service = (PhotoSharingService) serviceField.get(null); assertNotNull(service);
+            InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> ((android.content.BroadcastReceiver) readField(service, "screenOff"))
+                    .onReceive(service, new android.content.Intent(android.content.Intent.ACTION_SCREEN_OFF)));
+            if (pin != null) {
+                device.sleep(); awaitPhotoCondition(keyguard::isDeviceLocked);
+                assertFalse(PhotoSharingService.phoneUnlocked(context));
+                assertTrue(PhotoSharingService.phonePermitsSession(context, active));
+                AndroidVault lockedVault = new AndroidVault(context);
+                try { assertThrows(AndroidVault.PhoneLockedException.class, lockedVault::unlock); }
+                finally { lockedVault.close(); }
+            }
+            UUID query = UUID.randomUUID(); long imageId = android.content.ContentUris.parseId(image);
+            server.queue(query, "GET", imageId, 0, 0, 0, false, null);
+            ByteArrayOutputStream original = new ByteArrayOutputStream();
+            for (;;) {
+                RemotePhotoSession.Frame frame = server.take(); assertEquals("CHUNK", frame.action()); assertEquals(query, frame.requestId());
+                assertEquals(original.size(), frame.offset()); original.write(frame.data()); if (!frame.more()) break;
+            }
+            assertArrayEquals("Background sharing must transfer the original bytes without reopening chat storage", photo, original.toByteArray());
+            assertFalse(active.ended());
+            if (pin != null) assertTrue("Original transfer must finish without unlocking the owner phone", keyguard.isDeviceLocked());
+            var notifications = context.getSystemService(android.app.NotificationManager.class).getActiveNotifications();
+            android.app.Notification notification = Arrays.stream(notifications).filter(value -> value.getId() == PhotoSharingService.NOTIFICATION).findFirst().orElseThrow().getNotification();
+            assertEquals("Photo sharing active", notification.extras.getString(android.app.Notification.EXTRA_TITLE));
+            assertTrue((notification.flags & android.app.Notification.FLAG_ONGOING_EVENT) != 0);
+            assertTrue(notification.actions[0].actionIntent.isImmutable()); assertEquals("End access", notification.actions[0].title.toString());
+            assertEquals(notification.actions[0].actionIntent, notification.deleteIntent);
+            assertNotNull(notification.publicVersion);
+            assertEquals("Photo sharing active", notification.publicVersion.extras.getString(android.app.Notification.EXTRA_TITLE));
+            assertNull("Lock-screen notification must not disclose the contact", notification.publicVersion.extras.getString(android.app.Notification.EXTRA_TEXT));
+            assertEquals(notification.actions[0].actionIntent, notification.publicVersion.actions[0].actionIntent);
+            notification.publicVersion.actions[0].actionIntent.send();
+            awaitPhotoCondition(() -> active.ended() && !PhotoSharingService.busy());
+            assertFalse(active.approvedOwner());
+            assertEquals(true, readField(prepared.vault, "closed"));
+            assertThrows(SecurityException.class, () -> prepared.vault.get("identity"));
+        } finally {
+            unlockPhotoFixture(pin);
+            context.getContentResolver().delete(image, null, null);
+        }
+    }
+
+    @Test public void remotePhotosViewerShowsThumbnailsThenLoadsOnlyTheTappedPhoto() throws Exception {
+        signedInFixture(); photoFixturePermission();
+        try (PhotoServer server = new PhotoServer(false); ActivityScenario<MainActivity> main = ActivityScenario.launch(MainActivity.class)) {
+            RemotePhotoSession.Prepared prepared = server.prepare();
+            main.onActivity(activity -> { inject(activity); PhotoSharingService.start(activity, prepared); });
+            awaitPhotoCondition(() -> PhotoSharingService.current(prepared.id.toString()) != null);
+            try (ActivityScenario<RemotePhotosActivity> viewer = ActivityScenario.launch(new android.content.Intent(context, RemotePhotosActivity.class).putExtra("session", prepared.id.toString()))) {
+                RemotePhotoSession active = PhotoSharingService.current(prepared.id.toString());
+                awaitPhotoCondition(() -> active.photos().size() >= PhotoLibrary.PAGE_SIZE);
+                assertEquals("Scrolling thumbnails must not upload originals", 0, server.originals.get());
+                viewer.onActivity(activity -> photoSnapshot(activity, "62-remote-photos-grid"));
+                viewer.onActivity(activity -> {
+                    assertTrue((activity.getWindow().getAttributes().flags & WindowManager.LayoutParams.FLAG_SECURE) != 0);
+                    GridView grid = (GridView) readField(activity, "grid");
+                    assertTrue(grid.performItemClick(grid.getChildAt(0), 0, grid.getAdapter().getItemId(0)));
+                });
+                awaitPhotoCondition(() -> active.fullImage() != null);
+                assertEquals(1, server.originals.get());
+                assertTrue(active.fullImage().getWidth() > 160);
+                RemotePhotosActivity[] screen = new RemotePhotosActivity[1]; viewer.onActivity(activity -> screen[0] = activity);
+                awaitPhotoCondition(() -> ((ImageView) readField(screen[0], "image")).getDrawable() != null);
+                viewer.onActivity(activity -> { assertEquals(View.VISIBLE, ((View) readField(activity, "image")).getVisibility()); photoSnapshot(activity, "63-remote-photo-full"); });
+                server.disconnected = true;
+                awaitPhotoCondition(active::ended);
+                awaitPhotoCondition(() -> active.fullImage() == null && active.photos().isEmpty());
+                viewer.onActivity(activity -> invoke(activity, "finishSharing"));
+            }
+        }
+    }
+
+    @Test public void remotePhotosRoleGateAndDecliningApprovalNeverOpenTheGallery() throws Exception {
+        signedInFixture(); photoFixturePermission();
+        try (PhotoServer server = new PhotoServer(true); ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            assertFalse(RemotePhotoSession.administrator(engine));
+            assertThrows(SecurityException.class, () -> new RemotePhotoSession.Prepared(engine, peer, null));
+            scenario.onActivity(this::inject);
+            scenario.onActivity(activity -> {
+                var worker = (java.util.concurrent.ExecutorService) readField(activity, "work");
+                try { worker.submit(() -> invoke(activity, "photoRequestsOnce")).get(10, java.util.concurrent.TimeUnit.SECONDS); }
+                catch (Exception failure) { throw new AssertionError(failure); }
+            });
+            var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+            assertTrue(device.wait(androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.text("Allow photo access?")), 5000));
+            snapshot(scenario, "64-remote-photo-approval");
+            scenario.onActivity(activity -> {
+                assertEquals(false, readField(activity, "photoAdmin"));
+                assertFalse(PhotoSharingService.busy());
+                assertEquals("Allow", dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+                assertTrue(((TextView) dialog(activity).findViewById(android.R.id.message)).getText().toString().contains("even while this phone is locked"));
+                dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+            });
+            awaitPhotoCondition(() -> server.declined.get() == 1);
+            assertFalse(PhotoSharingService.busy()); assertTrue(server.received.isEmpty());
+        }
+    }
+
+    @Test public void remotePhotosSignOutAndSystemStopClearTheApprovedSession() throws Exception {
+        photoFixturePermission();
+        for (String reason : List.of("signout", "screen-off", "timeout")) {
+            vault.unlock(); signedInFixture();
+            try (PhotoServer server = new PhotoServer(!reason.equals("screen-off")); ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+                RemotePhotoSession.Prepared prepared = server.prepare();
+                scenario.onActivity(activity -> { inject(activity); PhotoSharingService.start(activity, prepared); });
+                if (server.localOwner) assertEquals("HELLO", server.take().action());
+                else awaitPhotoCondition(() -> PhotoSharingService.current(prepared.id.toString()) != null
+                        && !PhotoSharingService.current(prepared.id.toString()).photos().isEmpty());
+                RemotePhotoSession current = PhotoSharingService.current(prepared.id.toString());
+                if (!server.localOwner) assertFalse("Viewer approval does not authorize continuing on a locked viewer", current.approvedOwner());
+                if (reason.equals("signout")) engine.logout();
+                else {
+                    Field serviceField = PhotoSharingService.class.getDeclaredField("active"); serviceField.setAccessible(true);
+                    PhotoSharingService service = (PhotoSharingService) serviceField.get(null); assertNotNull(service);
+                    InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
+                        if (reason.equals("timeout")) service.onTimeout(1, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+                        else ((android.content.BroadcastReceiver) readField(service, "screenOff")).onReceive(service, new android.content.Intent(android.content.Intent.ACTION_SCREEN_OFF));
+                    });
+                }
+                awaitPhotoCondition(() -> !PhotoSharingService.busy());
+                assertTrue(current.ended()); assertNull(current.fullImage()); assertTrue(current.photos().isEmpty());
+                assertThrows(SecurityException.class, () -> prepared.vault.get("identity"));
+            }
+            if (engine != null) engine.close();
+            resetQaFixture(); createFixtureKey(AndroidVault.MASTER);
+            vault = new AndroidVault(context); vault.unlock(); engine = new ChatEngine(vault);
+        }
+    }
+
+    @Test public void remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount() throws Exception {
+        signedInFixture();
+        try (PhotoServer server = new PhotoServer(false); ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                inject(activity); setField(activity, "selectedPeer", peerId); invoke(activity, "render");
+                var worker = (java.util.concurrent.ExecutorService) readField(activity, "work");
+                try { worker.submit(() -> invoke(activity, "photoRequestsOnce")).get(10, java.util.concurrent.TimeUnit.SECONDS); }
+                catch (Exception failure) { throw new AssertionError(failure); }
+            });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+            scenario.onActivity(activity -> invoke(activity, "conversationMenu", new Class<?>[]{ChatEngine.Peer.class, View.class}, peer, root(activity)));
+            assertTrue(device.wait(androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.text("Photos")), 5000));
+            device.pressBack();
+            scenario.onActivity(activity -> {
+                setField(activity, "photoAdmin", false);
+                invoke(activity, "conversationMenu", new Class<?>[]{ChatEngine.Peer.class, View.class}, peer, root(activity));
+            });
+            assertTrue(device.wait(androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.text("Profile")), 5000));
+            assertFalse(device.hasObject(androidx.test.uiautomator.By.text("Photos"))); device.pressBack();
+        }
+    }
+
+    @Test public void clearChatRemovesLocalMessagesAndOutboxWithoutRemovingIdentityOrReplayProtection() throws Exception {
+        signedInFixture(); conversationsFixture();
+        String identity = engine.identityCode();
+        engine.renameContact(peer, "Private friend");
+        List<ChatEngine.Entry> removed = engine.entries(peerId);
+        byte[] oldCiphertext = vault.get("body/" + once.id());
+        byte[] seen = Long.toString(once.expiresAt()).getBytes(StandardCharsets.US_ASCII);
+        ChatEngine.Entry unrelated = entry(false, "Unrelated conversation", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", 0);
+        UUID otherPeer = UUID.randomUUID();
+        vault.transaction(() -> {
+            write("entry/" + unrelated.id(), new ChatEngine.Entry(unrelated.id(), otherPeer, unrelated.expiresAt(), unrelated.expiry(), false, false, unrelated.state()));
+            vault.put("seen/" + once.id(), seen);
+            write("ack/" + once.id(), new ChatEngine.Ack(once.id(), once.expiresAt(), "delivered"));
+            ChatEngine.Entry outgoing = removed.stream().filter(ChatEngine.Entry::outgoing).findFirst().orElseThrow();
+            write("outbox/" + outgoing.id(), new ChatEngine.Outbox(new ChatEngine.Send(outgoing.id(), peerId, peerDevice,
+                    outgoing.expiry(), outgoing.expiresAt(), 2, new byte[32], null), null));
+            return null;
+        });
+        byte[] unrelatedBody = vault.get("body/" + unrelated.id());
+        engine.clearChat(peerId);
+        assertTrue(engine.entries(peerId).isEmpty());
+        assertEquals(1, engine.entries(otherPeer).size());
+        assertArrayEquals(unrelatedBody, vault.get("body/" + unrelated.id()));
+        assertEquals(identity, engine.identityCode());
+        assertTrue(engine.groupSignal().isVerified(peerId));
+        assertEquals("Private friend", engine.privateName(peer));
+        assertTrue(engine.peers().stream().anyMatch(value -> value.userId().equals(peerId)));
+        assertArrayEquals(seen, vault.get("seen/" + once.id()));
+        ChatEngine.Ack acknowledgement = RelayApi.JSON.fromJson(new String(vault.get("ack/" + once.id()), StandardCharsets.UTF_8), ChatEngine.Ack.class);
+        assertEquals("delivered", acknowledgement.action()); assertEquals(once.expiresAt(), acknowledgement.expiresAt());
+        for (ChatEngine.Entry entry : removed) {
+            assertNull(vault.get("entry/" + entry.id())); assertNull(vault.get("body/" + entry.id())); assertNull(vault.get("outbox/" + entry.id()));
+        }
+        assertThrows(Exception.class, () -> vault.unseal(AndroidVault.contentAlias(once.expiresAt(), once.id()), oldCiphertext));
+        engine.clearChat(peerId);
+        assertThrows(SecurityException.class, () -> engine.clearChat(UUID.randomUUID()));
+        assertArrayEquals(unrelatedBody, vault.get("body/" + unrelated.id()));
+    }
+
+    @Test public void clearChatMenuFollowsRemoveContactAndRequiresConfirmation() throws Exception {
+        signedInFixture(); conversationsFixture();
+        int count = engine.entries(peerId).size();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                setField(activity, "selectedPeer", peerId); inject(activity);
+                ((EditText) readField(activity, "composer")).setText("Draft to clear");
+                descendants(root(activity)).stream().filter(view -> "Conversation options".equals(view.getContentDescription())).findFirst().orElseThrow().performClick();
+            });
+            var clear = device.wait(androidx.test.uiautomator.Until.findObject(androidx.test.uiautomator.By.text("Clear chat")), 5000);
+            assertNotNull(clear);
+            assertTrue(clear.getVisibleBounds().centerY() > device.findObject(androidx.test.uiautomator.By.text("Remove contact")).getVisibleBounds().centerY());
+            clear.click();
+            assertTrue(device.wait(androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.text("Clear chat?")), 5000));
+            snapshot(scenario, "66-clear-chat-confirmation");
+            scenario.onActivity(activity -> dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick());
+            assertEquals(count, engine.entries(peerId).size());
+            scenario.onActivity(activity -> {
+                assertEquals("Draft to clear", ((EditText) readField(activity, "composer")).getText().toString());
+                invoke(activity, "clearChatDialog", new Class<?>[]{ChatEngine.Peer.class}, peer);
+                dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+            });
+            assertTrue(device.wait(androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.text("Just the two of you")), 10000));
+            scenario.onActivity(activity -> {
+                assertTrue(engine.entries(peerId).isEmpty()); assertEquals(peerId, readField(activity, "selectedPeer"));
+                assertEquals("", ((EditText) readField(activity, "composer")).getText().toString());
+                assertTrue(engine.groupSignal().isVerified(peerId));
+            });
+            snapshot(scenario, "67-cleared-chat");
+        }
     }
 
     @Test public void peerPresenceExpiresAndRejectsUnverifiedChangedAndUnsolicitedIdentities() throws Exception {

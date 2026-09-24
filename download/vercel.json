@@ -19,10 +19,10 @@
       ]
     },
     {
-      "source": "/vanishr-0.4.1.apk",
+      "source": "/vanishr-0.4.2.apk",
       "headers": [
         {"key": "Content-Type", "value": "application/vnd.android.package-archive"},
-        {"key": "Content-Disposition", "value": "attachment; filename=vanishr-0.4.1.apk"},
+        {"key": "Content-Disposition", "value": "attachment; filename=vanishr-0.4.2.apk"},
         {"key": "Cache-Control", "value": "public, max-age=3600, must-revalidate"}
       ]
     },

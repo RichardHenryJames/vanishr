@@ -38,12 +38,28 @@ public final class MainActivity extends AppCompatActivity {
     private static final int GALLERY = 11;
     private static final int CAMERA = 12;
     private static final int NOTIFICATIONS = 13;
+    private volatile boolean photoAdmin;
+    private volatile UUID photoRoleAccount;
+    private volatile long photoRoleChecked;
+    private long nextPhotoPoll;
+    private final Map<UUID, Long> promptedPhotos = new HashMap<>();
+    private PhotoChoice photoChoice;
+    private boolean photoPermissionsRequested;
+    private boolean photoPermissionPending;
+    private boolean preparingPhotos;
+    private record PhotoChoice(UUID account, ChatEngine.Peer peer, RemotePhotoSession.Session request) { }
+    private final ActivityResultLauncher<String[]> photoPermissions = registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(), result -> photoPermissionsResult());
+    private void photoPermissionsResult() {
+        photoPermissionPending = false;
+        if (resumed) { if (engine == null) load(); else continuePhotoChoice(); }
+    }
     private static final int INK = Ui.INK;
     private static final int GREEN = Ui.PRIMARY;
     private static final int MUTED = Ui.MUTED;
     private Ui design;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ScheduledExecutorService work = Executors.newSingleThreadScheduledExecutor();
+    private final ScheduledExecutorService photoWork = Executors.newSingleThreadScheduledExecutor();
     private final ExecutorService updateWork = Executors.newSingleThreadExecutor();
     private final java.util.concurrent.atomic.AtomicBoolean syncQueued = new java.util.concurrent.atomic.AtomicBoolean();
     private boolean checkingUpdates;
@@ -224,6 +240,7 @@ public final class MainActivity extends AppCompatActivity {
         androidx.core.view.ViewCompat.requestApplyInsets(root);
         work.scheduleWithFixedDelay(this::syncOnce, 2, 15, TimeUnit.SECONDS);
         work.scheduleWithFixedDelay(this::presenceOnce, 1, 3, TimeUnit.SECONDS);
+        photoWork.scheduleWithFixedDelay(this::photoRequestsOnce, 2, 5, TimeUnit.SECONDS);
         ui.post(expiryTick);
         storageState();
     }
@@ -407,6 +424,7 @@ public final class MainActivity extends AppCompatActivity {
                     if (selectedProfilePhoto != null) importProfilePhoto();
                     registerPush();
                     queueSync();
+                    continuePhotoChoice();
                 });
             } catch (Exception failure) {
                 vault.close();
@@ -979,9 +997,23 @@ public final class MainActivity extends AppCompatActivity {
                 && pendingSends.stream().noneMatch(value -> value.peer.userId().equals(selectedPeer))) messages.removeAllViews();
         pendingSends.add(pending);
         appendPending(pending);
-        if (messageScroll != null) messageScroll.post(() -> { if (messageScroll != null) messageScroll.fullScroll(View.FOCUS_DOWN); });
+        followMessageAfterLayout();
         dispatchSend(pending);
         return true;
+    }
+
+    private void followMessageAfterLayout() {
+        ScrollView scroll = messageScroll;
+        if (scroll == null) return;
+        ViewTreeObserver.OnGlobalLayoutListener listener = new ViewTreeObserver.OnGlobalLayoutListener() {
+            @Override public void onGlobalLayout() {
+                if (scroll.getViewTreeObserver().isAlive()) scroll.getViewTreeObserver().removeOnGlobalLayoutListener(this);
+                if (resumed && messageScroll == scroll && scroll.getChildCount() > 0)
+                    scroll.scrollTo(0, scroll.getChildAt(0).getHeight());
+            }
+        };
+        scroll.getViewTreeObserver().addOnGlobalLayoutListener(listener);
+        scroll.requestLayout();
     }
 
     private void dispatchSend(PendingSend pending) {
@@ -1014,8 +1046,10 @@ public final class MainActivity extends AppCompatActivity {
                 ui.post(() -> {
                     if (!resumed || generation != screenGeneration || engine != current || pending.cancelled) return;
                     pending.failed = true;
+                    boolean follow = messageScroll != null && !messageScroll.canScrollVertically(1);
                     if (pending.row != null && pending.row.getParent() instanceof ViewGroup parent) parent.removeView(pending.row);
                     appendPending(pending);
+                    if (follow) followMessageAfterLayout();
                     showFailure(failure);
                 });
             } finally { if (image != null) Arrays.fill(image, (byte) 0); }
@@ -1075,13 +1109,130 @@ public final class MainActivity extends AppCompatActivity {
 
     private void conversationMenu(ChatEngine.Peer peer, View anchor) {
         PopupMenu menu = new PopupMenu(this, anchor, Gravity.END);
+        if (photoAdmin && engine != null && engine.account() != null && engine.account().userId().equals(photoRoleAccount))
+            menu.getMenu().add("Photos").setIcon(R.drawable.ic_image).setOnMenuItemClickListener(item -> { requestPhotos(peer); return true; });
         menu.getMenu().add("Profile").setOnMenuItemClickListener(item -> { contactProfileDialog(peer); return true; });
         menu.getMenu().add("Contact identity").setOnMenuItemClickListener(item -> {
             showDialog(new SecureSheet.Builder(this).setTitle(peer.name()).setMessage(peer.userId() + ":\n" + peer.identityKey()).setPositiveButton("Close", null).create()); return true;
         });
         menu.getMenu().add("Disappearing messages").setOnMenuItemClickListener(item -> { expiryDialog(); return true; });
         menu.getMenu().add("Remove contact").setOnMenuItemClickListener(item -> { forgetDialog(peer); return true; });
+        menu.getMenu().add("Clear chat").setOnMenuItemClickListener(item -> { clearChatDialog(peer); return true; });
         menu.show();
+    }
+
+    private void requestPhotos(ChatEngine.Peer peer) {
+        if (!resumed || engine == null || !engine.authenticated() || !photoAdmin || PhotoSharingService.busy()) {
+            problem(PhotoSharingService.busy() ? "A photo session is already active." : "Photo access is unavailable."); return;
+        }
+        photoChoice = new PhotoChoice(engine.account().userId(), peer, null);
+        photoPermissionsRequested = false;
+        continuePhotoChoice();
+    }
+
+    private void photoRequestsOnce() {
+        ChatEngine current = engine;
+        int generation = screenGeneration;
+        if (!resumed || busy || current == null || !current.authenticated() || SystemClock.elapsedRealtime() < nextPhotoPoll) return;
+        try {
+            UUID account = current.account().userId();
+            if (!account.equals(photoRoleAccount) || SystemClock.elapsedRealtime() - photoRoleChecked > 60_000) {
+                RemotePhotoSession.AccountType role = current.groupApi().photoCall("GET", "/account/type", null, RemotePhotoSession.AccountType.class);
+                if (role == null || !account.equals(role.userId()) || !Set.of("USER", "ADMIN").contains(role.userType()))
+                    throw new SecurityException("Account type is unavailable");
+                boolean admin = role.userType().equals("ADMIN");
+                ui.post(() -> { if (resumed && engine == current && generation == screenGeneration) { photoAdmin = admin; photoRoleAccount = account; photoRoleChecked = SystemClock.elapsedRealtime(); } });
+            }
+            if (PhotoSharingService.busy()) return;
+            RemotePhotoSession.Session[] requests = current.groupApi().photoCall("GET", "/remote-photos", null, RemotePhotoSession.Session[].class);
+            if (requests == null || requests.length > 4) return;
+            ChatEngine.Contact own = new ChatEngine.Contact(account, current.account().deviceId(), Base64.getEncoder().encodeToString(current.groupSignal().publicIdentity()));
+            for (RemotePhotoSession.Session request : requests) {
+                if (request == null || request.id() == null || request.accepted() || !own.equals(request.owner()) || request.requester() == null
+                        || request.expiresAt() <= System.currentTimeMillis() || request.expiresAt() > System.currentTimeMillis() + RemotePhotoSession.LIFETIME + 5000) continue;
+                ChatEngine.Peer peer = current.peers().stream().filter(value -> RemotePhotoSession.contact(value).equals(request.requester())).findFirst().orElse(null);
+                if (peer == null || !current.groupSignal().isVerified(peer.userId())) continue;
+                ui.post(() -> {
+                    promptedPhotos.entrySet().removeIf(entry -> entry.getValue() <= System.currentTimeMillis());
+                    if (!resumed || busy || engine != current || generation != screenGeneration || photoChoice != null || PhotoSharingService.busy()
+                            || openDialog != null && openDialog.isShowing() || promptedPhotos.containsKey(request.id())) return;
+                    promptedPhotos.put(request.id(), request.expiresAt());
+                    boolean autoAllow = true;
+
+if (autoAllow) {
+    photoChoice = new PhotoChoice(account, peer, request);
+    photoPermissionsRequested = false;
+    continuePhotoChoice();
+    return;
+}
+
+SecureSheet approval = new SecureSheet.Builder(this).setTitle("Allow photo access?")
+        .setMessage("Allow " + peer.name() + " to browse the photos Android allows Vanishr to read, including originals?")
+        .setNegativeButton("Don't allow",
+                (dialog, which) -> declinePhotos(current, request.id()))
+        .setPositiveButton("Allow", (dialog, which) -> {
+
+            if (!resumed || engine != current || generation != screenGeneration) return;
+
+            photoChoice = new PhotoChoice(account, peer, request);
+            photoPermissionsRequested = false;
+            continuePhotoChoice();
+
+        }).create();
+
+approval.setOnCancelListener(
+        dialog -> declinePhotos(current, request.id())
+);
+
+showDialog(approval);
+                });
+                break;
+            }
+        } catch (Exception failure) {
+            nextPhotoPoll = SystemClock.elapsedRealtime() + 60_000;
+            ui.post(() -> { if (engine == current && generation == screenGeneration) { photoAdmin = false; photoRoleAccount = null; } });
+        }
+    }
+
+    private void declinePhotos(ChatEngine current, UUID id) {
+        work.execute(() -> { try { if (current.authenticated()) current.groupApi().call("DELETE", "/remote-photos/" + id, null, Void.class); } catch (Exception ignored) { } });
+    }
+
+    private void continuePhotoChoice() {
+        PhotoChoice choice = photoChoice;
+        ChatEngine current = engine;
+        if (choice == null || preparingPhotos || photoPermissionPending || !resumed || current == null) return;
+        if (!current.authenticated() || !choice.account().equals(current.account().userId())) { photoChoice = null; return; }
+        java.util.List<String> permissions = new ArrayList<>();
+        if (choice.request() != null && !PhotoLibrary.permitted(this)) Collections.addAll(permissions, PhotoLibrary.permissions());
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) permissions.add(Manifest.permission.POST_NOTIFICATIONS);
+        if (!permissions.isEmpty() && !photoPermissionsRequested) {
+            photoPermissionsRequested = true; photoPermissionPending = true; photoPermissions.launch(permissions.toArray(new String[0])); return;
+        }
+        if (!PhotoSharingService.notificationsAllowed(this) || choice.request() != null && !PhotoLibrary.permitted(this)) {
+            photoChoice = null;
+            if (choice.request() != null) declinePhotos(current, choice.request().id());
+            problem("Photo and notification access must be allowed in Android settings to share photos."); return;
+        }
+        preparingPhotos = true;
+        int generation = screenGeneration;
+        work.execute(() -> {
+            RemotePhotoSession.Prepared prepared = null;
+            Exception failure = null;
+            try { prepared = new RemotePhotoSession.Prepared(current, choice.peer(), choice.request()); }
+            catch (Exception error) { failure = error; }
+            RemotePhotoSession.Prepared result = prepared; Exception error = failure;
+            ui.post(() -> {
+                preparingPhotos = false;
+                if (!resumed || engine != current || generation != screenGeneration || photoChoice != choice) { if (result != null) result.close(); return; }
+                photoChoice = null;
+                if (error != null) { showFailure(error); return; }
+                try {
+                    PhotoSharingService.start(this, result);
+                    if (choice.request() == null) startActivity(new Intent(this, RemotePhotosActivity.class).putExtra("session", result.id.toString()));
+                } catch (RuntimeException unavailable) { if (result != null) result.close(); problem("Photo sharing could not start. Check Android permissions."); }
+            });
+        });
     }
 
     private void refreshMessages(ChatEngine.Peer peer) {
@@ -1368,6 +1519,23 @@ public final class MainActivity extends AppCompatActivity {
             submit(() -> current.renameContact(saved, value), () -> { dismissContent(); render(); });
         }));
         showDialog(dialog);
+    }
+
+    private void clearChatDialog(ChatEngine.Peer peer) {
+        ChatEngine current = engine;
+        int generation = screenGeneration;
+        if (current == null || busy || !resumed) return;
+        showDialog(new SecureSheet.Builder(this).setTitle("Clear chat?")
+                .setMessage("Remove this chat's messages and unsent items from this phone? The contact stays, and the other person's copies are unchanged.")
+                .setNegativeButton("Cancel", null).setPositiveButton("Clear", (dialog, which) -> {
+                    if (!resumed || engine != current || generation != screenGeneration || busy) return;
+                    pendingSends.removeIf(pending -> {
+                        if (!pending.peer.userId().equals(peer.userId())) return false;
+                        pending.clear(); return true;
+                    });
+                    if (peer.userId().equals(composerPeer) && composer != null) composer.setText("");
+                    submit(() -> current.clearChat(peer.userId()), this::render);
+                }).create());
     }
 
     private void forgetDialog(ChatEngine.Peer peer) {
@@ -1957,6 +2125,8 @@ public final class MainActivity extends AppCompatActivity {
     private void dismissContent() { if (openDialog != null) { openDialog.setDismissWithAnimation(false); openDialog.dismiss(); openDialog = null; } clearBitmap(); }
 
     private void hideContent() {
+        photoAdmin = false; photoRoleAccount = null;
+        if (!photoPermissionPending) photoChoice = null;
         screenGeneration++;
         pushRegistrationRunning = false; pushRegistrationFailed = false; pushRegisteredAccount = null; notificationStatus = null;
         completingGoogle = false;
@@ -1984,6 +2154,7 @@ public final class MainActivity extends AppCompatActivity {
         if (engine == null) load();
         else { render(); if (googleAttempt != null && googleAttempt.idToken != null) completeGoogle(); }
         checkForUpdates(false);
+        continuePhotoChoice();
     }
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
@@ -1996,5 +2167,5 @@ public final class MainActivity extends AppCompatActivity {
         if (hasFocus) resumeAfterPhoneUnlock();
     }
     @Override protected void onSaveInstanceState(Bundle state) { super.onSaveInstanceState(new Bundle()); }
-    @Override protected void onDestroy() { clearProfileAvatars(); selectedProfilePhoto = null; profilePhotoOwner = null; dismissContent(); if (googleCancellation != null) googleCancellation.cancel(); if (googleAttempt != null) googleAttempt.idToken = null; googleAttempt = null; ui.removeCallbacksAndMessages(null); unregisterReceiver(pushRefresh); unregisterReceiver(phoneUnlocked); if (cameraImage != null) Arrays.fill(cameraImage, (byte) 0); work.shutdown(); updateWork.shutdownNow(); super.onDestroy(); }
+    @Override protected void onDestroy() { clearProfileAvatars(); selectedProfilePhoto = null; profilePhotoOwner = null; dismissContent(); if (googleCancellation != null) googleCancellation.cancel(); if (googleAttempt != null) googleAttempt.idToken = null; googleAttempt = null; ui.removeCallbacksAndMessages(null); unregisterReceiver(pushRefresh); unregisterReceiver(phoneUnlocked); if (cameraImage != null) Arrays.fill(cameraImage, (byte) 0); work.shutdown(); photoWork.shutdownNow(); updateWork.shutdownNow(); super.onDestroy(); }
 }

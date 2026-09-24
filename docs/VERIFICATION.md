@@ -1,11 +1,178 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-09-22. This is a development foundation,
+Evidence refreshed on Windows, 2026-09-24. This is a development foundation,
 not a production security assessment or independent audit.
+
+## Owner lock continuation (unreleased)
+
+- The local client permits only an already accepted owner Remote Photos session
+  to continue after owner screen-off/lock. New approval/startup still requires
+  unlock; viewer lock, sign-out, End access, permission/device-security loss,
+  connection failure and existing expiry still end access. Normal chat storage
+  and Keystore policy are unchanged.
+- The approval text explicitly discloses locked-phone access. The notification's
+  redacted lock-screen version omits the contact name and retains the immutable
+  End access action.
+- QA app/instrumentation build and lint pass. All six focused Remote Photos
+  regressions passed in 58.906 seconds on the isolated Android 12 emulator.
+  With a generated test PIN, the owner test entered the actual locked-keyguard
+  state, transferred byte-exact original photo data without unlocking, verified
+  that the normal chat vault still rejected access, and ended the session through
+  the redacted notification action. Temporary photo keys were erased afterward.
+  Viewer screen-off, sign-out, service timeout, admin-only UI, denial, thumbnail
+  pagination and the explicit locked-phone approval text also passed.
+- Initial attempts hit a screenshot-confirmed System UI ANR, then a relocked
+  fixture after System UI restarted. The PIN-enabled test setup now waits for
+  the normal Android PIN field before entering its generated credential; no
+  production unlock check was bypassed. Attempt reports were preserved.
+- Evidence: `.tools/remote-photos-owner-lock-build.txt`,
+  `.tools/remote-photos-owner-lock-fixture-build.txt` and
+  `.tools/remote-photos-owner-lock-focused.txt`. Physical phones, OEM/Doze behavior
+  and Android 14+ runtime acceptance remain unverified. The full 99-method suite
+  and signed live release gate were not rerun for this local follow-up.
+- This change is not in the published 0.4.2 APK, and no relay, hosted account or
+  immutable distribution has been changed.
+
+## Release 0.4.2
+
+- Published on 2026-09-24 as 0.4.2/code 23. ADMIN-only initiation and one owner
+  Allow/Don't allow gate are implemented,
+  with required Android permissions and an owner-approved persistent notification
+  offering End access for background sessions.
+- Clear chat follows Remove contact in the direct-chat menu, with a local-only
+  confirmation. Two focused checks passed in 10.210 seconds for ordering,
+  cancellation, deleted content keys and outbox, preserved contact/identity,
+  unchanged other chats and retained expiry-bounded replay markers.
+- The combined candidate passed the full JVM gate (63 executed tests, one
+  opt-in live-test skip), Android unit tests, QA lint and all 99 Android QA
+  methods. The tested Remote Photos relay is deployed only to the existing
+  vanishr-dev-rg host, preserving accounts and provider configuration; temporary
+  transfer storage was removed.
+- The original-signer APK passed release lint and the R8/instrumentation build.
+  The complete signed live workflow passed in 326.940 seconds: actual FCM, owner
+  photo approval, two thumbnail pages, byte-exact original transfer after owner
+  backgrounding, immutable-notification revocation, Clear chat cancellation and
+  confirmation, and successful encrypted messaging afterward. Five protected-
+  device tests passed in 3.513 seconds and no-screen-lock rejection in 0.020 seconds.
+  A generated synthetic admin was demoted in cleanup; no existing admin, real
+  gallery or personal device was used. Synthetic images and temporary PIN were
+  removed. No production security checks were relaxed.
+- Signed APK: 44,282,893 bytes, SHA-256
+  `7f0eaca14c8c6adae23c27b94cb07569bbb92ee493ca5dfec74aae47c5a90042`.
+  The immutable 27-file bundle is 58,670,230 bytes; audit verified 184 matching
+  workspace source files and 402 source entries, with private values and native
+  test libraries excluded. Source ZIP: 9,792,581 bytes, SHA-256
+  `1966ebee26c543fdee1152279ed67bf583062f29f9aa5ae6f125e46446400500`.
+  The 16 optional unavailable upstream source artifacts are unchanged from 0.4.1.
+- Production deployment `dpl_3ZBC9JRiEvTci79NR8wCUCjz7RHk` is READY at
+  `https://vanishr-download.vercel.app` on the existing Vanishr Hobby/static
+  project, with zero functions/builds and no domain, plan or Google configuration
+  changes. All 27 files were hash-verified in the browser before upload.
+- Anonymous public verification passed all 26 file hashes/sizes, the original
+  APK signer, no-store code-23 feed and security headers. Four crawlable pages,
+  seven canonical redirects and nine private/missing-path 404s passed. Records:
+  `.tools/distribution-audit-0.4.2.json`, `.tools/website-build-0.4.2.json`,
+  `.tools/public-release-verification-0.4.2.json` and
+  `.tools/public-website-verification-0.4.2.json`. Final publication-status edits
+  to README/this document postdate the immutable source archive; it was not rebuilt.
+- The owned Android 12 test emulator was stopped after generated PIN and synthetic
+  app-data cleanup. Existing user accounts and real galleries were not modified.
+- Local and live test evidence:
+  Evidence: `.tools/clear-chat-0.4.2-focused.txt`,
+  `.tools/release-0.4.2-jvm-verify.txt`, `.tools/release-0.4.2-unit-tests.txt`,
+  `.tools/profile-0.4.2-qa-verification.json`, `.tools/release-0.4.2-package.txt`,
+  `.tools/remote-photos-0.4.2-relay-publication.txt` and
+  `.tools/release-verification-0.4.2/verified-artifact.json`
+  (`livePushVerified:true`, `liveRemotePhotosVerified:true`).
+- One isolated-libsignal-session regression passed, proving stable pinned identity,
+  independent chat/photo ratchets and replay rejection. Five focused relay tests
+  passed in 24.04 seconds for roles, owner consent, packet retries/revocation,
+  independent connections, device changes, prekey substitution and expiry.
+- Six Android QA tests passed in 84.497 seconds on the isolated Android 12 device.
+  They cover 37 synthetic MediaStore photos across pages, exact original bytes,
+  thumbnails before originals, owner transfer after chat/vault closure, immutable
+  notification End access, admin-only menu, denial without gallery access, remote
+  disconnect cleanup, and sign-out/screen-off/Android-timeout cleanup callbacks.
+  TLS mock-server trust is test-only; production TLS validation is unchanged.
+- A runtime check exposed TLS pool teardown on the Android main thread. Teardown
+  now cancels from a background thread and clears session state on its serialized
+  worker; the full six-test focused rerun passed. Initial fixture cleanup/compile
+  issues were repaired without relaxing security assertions.
+- Full JVM verification passed 63 executed tests with one opt-in LiveRelayTest
+  skipped, and the relay artifact still excludes client cryptography. Android
+  unit tests, QA/release lint and the R8-optimized release build passed. All 97
+  ScreenFlow QA methods passed across seven batches. The final notification
+  dismissal action was then verified by three focused checks at 320dp and 130%
+  text in 65.616 seconds; the final release build/lint was rerun successfully.
+- Full QA found a previously hidden send-error row below the scroll viewport.
+  Layout-aware following now keeps new/expanded pending rows visible without
+  taking composer focus or moving an intentionally scrolled-up conversation.
+  The send/retry pair passed in 15.216 seconds and the full suite then passed.
+  Optional read-only photo polling has its own worker, short timeout and backoff,
+  so it cannot occupy the serialized chat worker. A teardown test now waits for
+  service shutdown before asserting erased keys; its focused rerun passed in
+  50.770 seconds and the affected full batches were rerun.
+- Synthetic secure screenshots verify the grid, full photo and single approval
+  sheet at normal and narrow sizes. Notification dismissal uses the same immutable
+  End access action. Original bytes are preserved across transfer; the viewer's
+  64 MiB original/4096-pixel display bounds remain explicitly documented, not an
+  unlimited-resolution claim.
+- No physical-phone/OEM or Android 14+ partial-access/foreground-service runtime
+  acceptance is claimed. The signed live gate and public verification above
+  supplement these earlier local/mock-TLS checks; neither is an independent audit.
+- Evidence: `.tools/remote-photos-security-focused.txt`,
+  `.tools/remote-photos-background-relay.txt`, `.tools/remote-photos-all-focused.txt`
+  and `.tools/remote-photos-lifecycle-focused.txt`,
+  `.tools/remote-photos-jvm-verify.txt`, `.tools/remote-photos-unit-tests.txt`,
+  `.tools/profile-0.4.2-qa-verification.json`, `.tools/remote-photos-narrow-qa.txt`
+  and `.tools/remote-photos-release-build.txt`. No immutable 0.4.1 distribution
+  files or existing hosted user accounts were changed for this feature.
+
+## Account types (relay only, 2026-09-24)
+
+- Migration V5 adds constrained `accounts.user_type` metadata, default `USER`,
+  permitted values `USER` and `ADMIN`. `GET /account/type` reads only the current
+  authenticated enrolled account's type from PostgreSQL. No client role-write
+  endpoint or new chat permission is introduced.
+- Six focused account-type/rename checks passed in 29.20 seconds, including a
+  real V4-to-V5 migration with existing password/Google accounts and an idempotent
+  rerun. Account IDs, handles and authentication mappings were preserved. Defaults,
+  constraint rejection, enrollment/anonymous denial, self-only visibility, client
+  self-promotion rejection, rename retention and unchanged inbox isolation passed.
+- The full JVM gate initially identified the existing exact account-schema
+  allowlist needing the new column. That assertion was updated, retaining its
+  exact-column check and adding the ordinary Google-account role expectation.
+  Five focused checks then passed in 19.82 seconds; the full rerun passed 57
+  executed tests with one separately opt-in LiveRelayTest skipped. The relay
+  artifact still excludes client-only cryptography.
+- Deployment was restricted to the existing `vanishr-dev-rg` relay. Trusted TLS
+  and health passed, temporary transfer storage was removed, and a live anonymous
+  request to `/account/type` returned 401 with `Cache-Control: no-store`.
+- The explicitly requested account was inspected before assignment, then promoted
+  in a bounded transaction guarded by its immutable UUID and expected current
+  handle. Exactly one row was required; only `user_type` was changed. A post-commit
+  read confirmed `ADMIN`. Account identifiers are kept in local operational
+  evidence, not this public document. Passwords, device keys and messages were
+  neither read nor changed by the assignment.
+- PostgreSQL database `vanishr`, table `public.accounts`, was confirmed on the
+  approved VM using the `vanishr_accounts` volume at `/var/lib/postgresql/data`.
+  Username rename history is not stored; code and tests establish ID continuity
+  for renames, not independent historical ownership of a former handle.
+- Evidence: `.tools/account-type-upgrade-focused.txt`,
+  `.tools/account-type-schema-focused.txt`, `.tools/account-type-jvm-verify.txt`,
+  `.tools/account-type-relay-publication.txt`,
+  `.tools/account-type-hosted-inspection.txt`,
+  `.tools/account-type-hosted-promotion.txt` and
+  `.tools/account-type-hosted-verification.json`.
+- Android, client cryptography and the immutable published 0.4.1 distribution
+  were unchanged; their device/live workflow tests were not rerun for this
+  server-only metadata change. Special admin chat features remain unspecified
+  and unimplemented; role assignment does not override expiry, verification,
+  group ownership or encrypted-content access boundaries.
 
 ## Release 0.4.1
 
-- Candidate, not yet published. Version 0.4.1/code 22 adds offline contact Last
+- Published on 2026-09-23. Version 0.4.1/code 22 adds offline contact Last
   seen beneath the direct-chat name, below Typing and Online in precedence.
 - The relay stores only the latest foreground heartbeat and pinned audience
   with an atomic 24-hour TTL. Reads do not extend retention. Mutual identities,
@@ -44,12 +211,20 @@ not a production security assessment or independent audit.
   Its source ZIP is 9,745,853 bytes, SHA-256
   `06a47e919d448b899fa41311e0d5b9330e6c49d87335bce9346cf8ff478abca7`.
   The 16 optional unavailable upstream source artifacts are unchanged from 0.3.9.
-- Static publication is blocked on a fresh interactive Vercel sign-in. No file
-  upload or deployment creation was attempted; the public APK/feed remains
-  0.3.9/code 21. The audited `.tools/vercel-download-0.4.1` must not be overwritten
-  or recreated. Resume with its exact allowlist, then verify anonymous hashes,
-  original signer, no-store code-22 feed and all website routes/security headers.
-  This post-audit status update is intentionally newer than the source archive.
+- After the user renewed Vercel authentication, all 27 audited files were
+  hash-verified in the browser and uploaded to the existing Vanishr Hobby/static
+  project. Production deployment `dpl_Hqub7AdhiuEVUaNgToSGoUw7gxnF` is READY at
+  `https://vanishr-download.vercel.app`, with zero functions or builds. No domain,
+  paid-plan, analytics configuration or account-data changes were made.
+- Anonymous verification passed all 26 public file hashes/sizes, the original
+  APK signing identity, no-store code-22 feed and security headers. Four crawlable
+  pages, seven canonical redirects and nine private/missing-path 404s passed.
+  The Android download page renders without horizontal overflow at 320, 390 and
+  1280 pixels, links to the correct APK/source and discloses bounded last seen.
+  No Google Analytics requests were observed before consent in that check.
+- The audited `.tools/vercel-download-0.4.1` remains immutable. Publication-status
+  edits to README and this document intentionally postdate the source archive;
+  neither the source ZIP nor the signed APK was repackaged after verification.
 - The isolated Android 12 emulator was stopped after generated credential,
   synthetic app-data and screen-setting cleanup. No shared device was used.
 - Evidence: `.tools/last-seen-0.4.1-relay-focused.txt`,
@@ -60,7 +235,9 @@ not a production security assessment or independent audit.
   (`livePushVerified:true`). The last QA change only lengthened the header fixture
   to 23 hours for the subsequent narrow-screen test; production code is unchanged.
   Packaging evidence: `.tools/distribution-audit-0.4.1.json` and
-  `.tools/website-build-0.4.1.json`.
+  `.tools/website-build-0.4.1.json`. Publication evidence:
+  `.tools/public-release-verification-0.4.1.json` and
+  `.tools/public-website-verification-0.4.1.json`.
 - Existing 0.3.9 biometric-compatible storage and migration behavior is retained;
   physical-phone/OEM and Android 15+ runtime caveats still apply.
 

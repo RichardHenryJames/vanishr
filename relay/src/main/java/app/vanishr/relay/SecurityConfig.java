@@ -64,8 +64,9 @@ public class SecurityConfig {
             if (request.getContentLengthLong() > limit) { error(response, 413, "request_too_large"); return; }
             try {
                 String source = RedisRelay.digest(request.getRemoteAddr().getBytes(StandardCharsets.US_ASCII));
-                limiter.require("ip:" + source, 300, 60);
                 String path = request.getRequestURI();
+                boolean photoExchange = request.getMethod().equals("POST") && path.matches("/remote-photos/[0-9a-fA-F-]{36}/exchange");
+                limiter.require((photoExchange ? "photo-ip:" : "ip:") + source, photoExchange ? 1200 : 300, 60);
                 if (path.equals("/auth/google/challenge")) limiter.require("google-challenge:" + source, 10, 60);
                 else if (path.equals("/auth/refresh")) limiter.require("renew:" + source, 30, 60);
                 else if (List.of("/auth/register", "/auth/login", "/auth/google").contains(path)) limiter.require("auth:" + source, 10, 60);
@@ -77,7 +78,7 @@ public class SecurityConfig {
                     request.setAttribute("sessionKey", AuthService.tokenKey(token));
                     SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(actor, null,
                             List.of(new SimpleGrantedAuthority(actor.deviceId() == null ? "ENROLL" : "DEVICE"))));
-                    limiter.require("device:" + (actor.deviceId() == null ? actor.userId() : actor.deviceId()), 180, 60);
+                    limiter.require((photoExchange ? "photo-device:" : "device:") + (actor.deviceId() == null ? actor.userId() : actor.deviceId()), photoExchange ? 600 : 180, 60);
                 }
                 chain.doFilter(new LimitedRequest(request, limit), response);
             } catch (ApiException failure) { error(response, failure.status.value(), failure.getMessage()); }

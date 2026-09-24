@@ -28,9 +28,14 @@ final class RelayApi implements AutoCloseable {
             super("Relay request failed");
             this.status = status;
                 this.code = Set.of("device_already_registered", "device_unavailable", "account_unavailable", "google_sign_in_unavailable", "prekeys_unavailable",
-                    "group_full","group_capacity","group_changed","group_not_ready","group_identity_changed","group_owner_required","owner_must_close_group").contains(code) ? code : "";
+                    "group_full","group_capacity","group_changed","group_not_ready","group_identity_changed","group_owner_required","owner_must_close_group",
+                    "photo_peer_offline", "photo_session_ended", "photo_transfer_busy", "photo_identity_changed", "admin_required").contains(code) ? code : "";
         }
         String userMessage() {
+            if (code.equals("photo_peer_offline")) return "The other phone is offline. Ask them to open Vanishr.";
+            if (code.equals("photo_session_ended")) return "Photo access ended. A new approval is required.";
+            if (code.equals("photo_identity_changed")) return "This contact's identity changed. Verify it again.";
+            if (code.equals("admin_required")) return "Only administrators can request photo access.";
             if (code.equals("group_full")) return "This group has reached its 200-member limit.";
             if (code.equals("group_capacity")) return "An account can have up to 20 active groups and invitations.";
             if (code.equals("group_changed")) return "Group membership changed. Refresh and try again.";
@@ -65,7 +70,7 @@ final class RelayApi implements AutoCloseable {
             .connectionSpecs(Collections.singletonList(ConnectionSpec.MODERN_TLS)).followRedirects(false).followSslRedirects(false)
             .connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).callTimeout(30, TimeUnit.SECONDS).build();
     private final HttpUrl origin;
-    private String token;
+    private volatile String token;
     @FunctionalInterface interface SessionRefresh { void refresh(boolean rejected) throws Exception; }
     private SessionRefresh sessionRefresh;
 
@@ -154,8 +159,26 @@ final class RelayApi implements AutoCloseable {
         }
     }
 
-    WebSocket events(Runnable wake, java.util.function.Consumer<Boolean> state) {
-        return client.newWebSocket(request("/events").build(), new WebSocketListener() {
+    <Result> Result photoCall(String method, String path, Object body, Class<Result> type) throws Exception {
+        RequestBody content = body == null ? null : RequestBody.create(JSON.toJson(body).getBytes(StandardCharsets.UTF_8), MediaType.get("application/json"));
+        Call call = client.newCall(request(path).method(method, content).build());
+        call.timeout().timeout(5, TimeUnit.SECONDS);
+        try (Response response = call.execute()) {
+            if (response.body() == null) throw new IOException("Photo service unavailable");
+            byte[] bytes = AndroidVault.boundedRead(response.body().byteStream(), response.isSuccessful() ? 100_000 : 4096);
+            try {
+                if (!response.isSuccessful()) throw failure(response.code(), bytes);
+                return JSON.fromJson(new String(bytes, StandardCharsets.UTF_8), type);
+            } finally { Arrays.fill(bytes, (byte) 0); }
+        }
+    }
+
+    WebSocket events(Runnable wake, java.util.function.Consumer<Boolean> state) { return events("/events", client, wake, state); }
+    WebSocket photoEvents(Runnable wake, java.util.function.Consumer<Boolean> state) {
+        return events("/photo-events", client.newBuilder().pingInterval(10, TimeUnit.SECONDS).build(), wake, state);
+    }
+    private WebSocket events(String path, OkHttpClient transport, Runnable wake, java.util.function.Consumer<Boolean> state) {
+        return transport.newWebSocket(request(path).build(), new WebSocketListener() {
             @Override public void onOpen(WebSocket socket, Response response) { state.accept(true); wake.run(); }
             @Override public void onMessage(WebSocket socket, String text) { if (text.equals("{\"event\":\"new_message\"}")) wake.run(); }
             @Override public void onClosing(WebSocket socket, int code, String reason) { state.accept(false); socket.close(code, null); }

@@ -39,6 +39,22 @@ public final class SignalClient {
 
     public byte[] publicIdentity() { return store.getIdentityKeyPair().getPublicKey().serialize(); }
 
+    public SignalClient isolatedSession(SecureVault destination) throws Exception {
+        if (destination == vault || !destination.names("").isEmpty()) throw new IllegalArgumentException("Session store must be empty");
+        return vault.transaction(() -> {
+            byte[] identity = store.getIdentityKeyPair().serialize();
+            try {
+                destination.transaction(() -> {
+                    destination.put("identity", identity);
+                    destination.put("registration", integer(store.getLocalRegistrationId()));
+                    destination.put("next-key", integer(new SecureRandom().nextInt(1_000_000) + 1));
+                    return null;
+                });
+                return new SignalClient(UUID.fromString(localAddress.getName()), destination);
+            } finally { java.util.Arrays.fill(identity, (byte) 0); }
+        });
+    }
+
     public void verifyPeer(UUID peer, byte[] independentlyVerifiedIdentity) throws Exception {
         IdentityKey identity = new IdentityKey(independentlyVerifiedIdentity);
         vault.transaction(() -> {

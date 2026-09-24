@@ -113,10 +113,14 @@ class RelayIntegrationTest {
         }
 
         private org.springframework.web.socket.WebSocketSession foreground(Device device) throws Exception {
+        return foreground(device, false);
+        }
+
+        private org.springframework.web.socket.WebSocketSession foreground(Device device, boolean photos) throws Exception {
         var session = mock(org.springframework.web.socket.WebSocketSession.class);
         when(session.getId()).thenReturn(UUID.randomUUID().toString());
         when(session.isOpen()).thenReturn(true);
-        when(session.getAttributes()).thenReturn(Map.of("sessionKey", AuthService.tokenKey(device.token())));
+        when(session.getAttributes()).thenReturn(Map.of("sessionKey", AuthService.tokenKey(device.token()), "photoChannel", photos));
         when(session.getPrincipal()).thenReturn(new org.springframework.security.authentication.UsernamePasswordAuthenticationToken(
             new Actor(device.userId(), device.deviceId()), null));
         realtime.afterConnectionEstablished(session);
@@ -750,7 +754,225 @@ class RelayIntegrationTest {
             .andExpect(status().isOk()).andExpect(jsonPath("$.userId").value(alice.userId().toString()));
         }
 
-    @Test void concurrentUsernameClaimsCannotAssignTheSameHandleToTwoAccounts() throws Exception {
+    private RemotePhotos.Request photoRequest(UUID id, Device admin, Device owner) throws Exception {
+        return new RemotePhotos.Request(id, presencePeer(owner), json.convertValue(admin.crypto().generatePreKey(Instant.now()), AccountDirectory.PreKey.class));
+    }
+
+                @Test void remotePhotosRequireAdminAndTheAddressedOwnersApproval() throws Exception {
+                Device admin = device("photos_admin"), owner = device("photos_owner"), outsider = device("photos_outsider");
+                foreground(admin); foreground(owner); foreground(outsider);
+                foreground(admin, true); foreground(owner, true);
+                UUID id = UUID.randomUUID();
+                RemotePhotos.Request start = photoRequest(id, admin, owner);
+                request(body(post("/remote-photos"), start), null).andExpect(status().isUnauthorized());
+                request(body(post("/remote-photos"), start), admin).andExpect(status().isForbidden());
+                database.update("UPDATE accounts SET user_type='ADMIN' WHERE id=?", admin.userId());
+                String encoded = request(body(post("/remote-photos"), start), admin).andExpect(status().isCreated())
+                    .andExpect(jsonPath("$.accepted").value(false)).andReturn().getResponse().getContentAsString();
+                RemotePhotos.Session pending = json.readValue(encoded, RemotePhotos.Session.class);
+                request(get("/remote-photos"), owner).andExpect(status().isOk()).andExpect(jsonPath("$[0].id").value(id.toString()));
+                request(get("/remote-photos"), outsider).andExpect(status().isOk()).andExpect(content().json("[]"));
+                request(get("/remote-photos/" + id), outsider).andExpect(status().isNotFound());
+                request(body(post("/remote-photos/" + id + "/accept"), new RemotePhotos.Approval(presencePeer(admin))), admin)
+                    .andExpect(status().isForbidden());
+                request(body(post("/remote-photos/" + id + "/accept"), new RemotePhotos.Approval(presencePeer(outsider))), owner)
+                    .andExpect(status().isConflict());
+                request(body(post("/remote-photos/" + id + "/accept"), new RemotePhotos.Approval(presencePeer(admin))), owner)
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.accepted").value(true))
+                    .andExpect(jsonPath("$.expiresAt").value(pending.expiresAt()));
+                long ttl = redis.getExpire("rps:" + id, java.util.concurrent.TimeUnit.MILLISECONDS);
+                assertTrue(ttl > 0 && ttl <= RemotePhotos.LIFETIME);
+                request(body(post("/remote-photos"), start), admin).andExpect(status().isCreated())
+                    .andExpect(jsonPath("$.expiresAt").value(pending.expiresAt()));
+                request(delete("/remote-photos/" + id), owner).andExpect(status().isNoContent());
+                request(get("/remote-photos/" + id), admin).andExpect(status().isGone());
+                }
+
+                    @Test void remotePhotosExchangeNeedsConsentAndNeverResurrectsAcknowledgedOrRevokedPhotos() throws Exception {
+                    Device admin = device("photos_transfer_admin"), owner = device("photos_transfer_owner"), outsider = device("photos_transfer_outside");
+                    database.update("UPDATE accounts SET user_type='ADMIN' WHERE id=?", admin.userId());
+                    foreground(admin); foreground(owner); foreground(outsider);
+                    foreground(admin, true); foreground(owner, true);
+                    UUID session = UUID.randomUUID();
+                    RemotePhotos.Request start = photoRequest(session, admin, owner);
+                    request(body(post("/remote-photos"), start), admin).andExpect(status().isCreated());
+                    RemotePhotos.Send packet = new RemotePhotos.Send(UUID.randomUUID(), System.currentTimeMillis() + 50_000, 2, new byte[128]);
+                    RemotePhotos.Exchange send = new RemotePhotos.Exchange(null, packet);
+                    String route = "/remote-photos/" + session + "/exchange";
+                    request(body(post(route), send), admin).andExpect(status().isForbidden());
+                    request(body(post("/remote-photos/" + session + "/accept"), new RemotePhotos.Approval(presencePeer(admin))), owner).andExpect(status().isOk());
+                    request(body(post(route), send), outsider).andExpect(status().isNotFound());
+                    request(body(post(route), send), admin).andExpect(status().isOk());
+                    request(body(post(route), send), admin).andExpect(status().isOk());
+                    RemotePhotos.Exchange poll = new RemotePhotos.Exchange(null, null);
+                    request(body(post(route), poll), owner).andExpect(status().isOk())
+                        .andExpect(jsonPath("$.packet.id").value(packet.id().toString()))
+                        .andExpect(jsonPath("$.packet.senderId").value(admin.userId().toString()));
+                    long ttl = redis.getExpire("rpq:" + session + ":" + owner.deviceId(), java.util.concurrent.TimeUnit.MILLISECONDS);
+                    assertTrue(ttl > 0 && ttl <= RemotePhotos.PACKET_LIFETIME);
+                    request(body(post(route), new RemotePhotos.Exchange(packet.id(), null)), owner).andExpect(status().isOk())
+                        .andExpect(jsonPath("$.packet").doesNotExist());
+                    request(body(post(route), send), admin).andExpect(status().isOk());
+                    request(body(post(route), poll), owner).andExpect(status().isOk()).andExpect(jsonPath("$.packet").doesNotExist());
+                    RemotePhotos.Send next = new RemotePhotos.Send(UUID.randomUUID(), packet.expiresAt(), 2, new byte[128]);
+                    request(body(post(route), new RemotePhotos.Exchange(null, next)), admin).andExpect(status().isOk());
+                    request(body(post(route), new RemotePhotos.Exchange(next.id(), null)), owner).andExpect(status().isOk());
+                    request(body(post(route), send), admin).andExpect(status().isOk());
+                    request(body(post(route), poll), owner).andExpect(status().isOk()).andExpect(jsonPath("$.packet").doesNotExist());
+                    request(body(post(route), new RemotePhotos.Exchange(null, new RemotePhotos.Send(packet.id(), packet.expiresAt(), 3, new byte[128]))), admin)
+                        .andExpect(status().isConflict());
+                    request(delete("/remote-photos/" + session), owner).andExpect(status().isNoContent());
+                    request(body(post(route), send), admin).andExpect(status().isGone());
+                    request(body(post("/remote-photos"), start), admin).andExpect(status().isGone());
+                    assertFalse(Boolean.TRUE.equals(redis.hasKey("rpq:" + session + ":" + owner.deviceId())));
+                    }
+
+                    @Test void remotePhotosEndAfterDisconnectRoleRevocationAndIdentityReplacement() throws Exception {
+                Device admin = device("photo_live_admin"), owner = device("photo_live_owner");
+                database.update("UPDATE accounts SET user_type='ADMIN' WHERE id=?", admin.userId());
+                foreground(admin);
+                foreground(admin, true);
+                request(body(post("/remote-photos"), photoRequest(UUID.randomUUID(), admin, owner)), admin)
+                    .andExpect(status().isConflict()).andExpect(jsonPath("$.error").value("photo_peer_offline"));
+                var ownerConnection = foreground(owner);
+                UUID id = UUID.randomUUID();
+                request(body(post("/remote-photos"), photoRequest(id, admin, owner)), admin).andExpect(status().isCreated());
+                realtime.afterConnectionClosed(ownerConnection, org.springframework.web.socket.CloseStatus.NORMAL);
+                request(get("/remote-photos/" + id), admin).andExpect(status().isOk()).andExpect(jsonPath("$.accepted").value(false));
+                ownerConnection = foreground(owner);
+                var photoConnection = foreground(owner, true);
+                request(body(post("/remote-photos/" + id + "/accept"), new RemotePhotos.Approval(presencePeer(admin))), owner).andExpect(status().isOk());
+                realtime.afterConnectionClosed(ownerConnection, org.springframework.web.socket.CloseStatus.NORMAL);
+                request(get("/remote-photos/" + id), admin).andExpect(status().isOk()).andExpect(jsonPath("$.accepted").value(true));
+                assertNull(realtime.connection(new Actor(owner.userId(), owner.deviceId())));
+                realtime.afterConnectionClosed(photoConnection, org.springframework.web.socket.CloseStatus.NORMAL);
+                request(get("/remote-photos/" + id), admin).andExpect(status().isGone());
+                assertFalse(Boolean.TRUE.equals(redis.hasKey("rps:" + id)));
+                foreground(owner);
+                UUID next = UUID.randomUUID();
+                request(body(post("/remote-photos"), photoRequest(next, admin, owner)), admin).andExpect(status().isCreated());
+                database.update("UPDATE accounts SET user_type='USER' WHERE id=?", admin.userId());
+                request(get("/remote-photos/" + next), owner).andExpect(status().isGone());
+                assertFalse(Boolean.TRUE.equals(redis.hasKey("rps:" + next)));
+                }
+
+    @Test void remotePhotosRecheckRoleAndDeviceAfterOwnerApproval() throws Exception {
+        Device admin = device("photo_role_admin"), owner = device("photo_role_owner");
+        database.update("UPDATE accounts SET user_type='ADMIN' WHERE id=?", admin.userId());
+        foreground(admin, true); foreground(owner); foreground(owner, true);
+        UUID first = UUID.randomUUID();
+        request(body(post("/remote-photos"), photoRequest(first, admin, owner)), admin).andExpect(status().isCreated());
+        request(body(post("/remote-photos/" + first + "/accept"), new RemotePhotos.Approval(presencePeer(admin))), owner).andExpect(status().isOk());
+        database.update("UPDATE accounts SET user_type='USER' WHERE id=?", admin.userId());
+        request(body(post("/remote-photos/" + first + "/exchange"), new RemotePhotos.Exchange(null, null)), owner).andExpect(status().isGone());
+        database.update("UPDATE accounts SET user_type='ADMIN' WHERE id=?", admin.userId());
+        UUID second = UUID.randomUUID();
+        request(body(post("/remote-photos"), photoRequest(second, admin, owner)), admin).andExpect(status().isCreated());
+        request(body(post("/remote-photos/" + second + "/accept"), new RemotePhotos.Approval(presencePeer(admin))), owner).andExpect(status().isOk());
+        database.update("UPDATE devices SET auth_version=? WHERE id=?", UUID.randomUUID(), owner.deviceId());
+        request(get("/remote-photos/" + second), admin).andExpect(status().isGone());
+        assertFalse(Boolean.TRUE.equals(redis.hasKey("rps:" + second)));
+    }
+
+    @Test void remotePhotosExpiryCannotBeExtendedOrPrekeysSubstituted() throws Exception {
+        Device admin = device("photo_expiry_admin"), owner = device("photo_expiry_owner");
+        database.update("UPDATE accounts SET user_type='ADMIN' WHERE id=?", admin.userId());
+        foreground(admin, true); foreground(owner); foreground(owner, true);
+        RemotePhotos.Request wrongKey = photoRequest(UUID.randomUUID(), owner, owner);
+        request(body(post("/remote-photos"), wrongKey), admin).andExpect(status().isConflict());
+        for (boolean accepted : List.of(false, true)) {
+            UUID id = UUID.randomUUID();
+            request(body(post("/remote-photos"), photoRequest(id, admin, owner)), admin).andExpect(status().isCreated());
+            if (accepted) request(body(post("/remote-photos/" + id + "/accept"), new RemotePhotos.Approval(presencePeer(admin))), owner).andExpect(status().isOk());
+            RemotePhotos.Stored before = json.readValue(redis.opsForValue().get("rps:" + id), RemotePhotos.Stored.class);
+            long deadline = accepted ? System.currentTimeMillis() - 1 : System.currentTimeMillis() + RemotePhotos.LIFETIME - RemotePhotos.REQUEST_LIFETIME - 1;
+            RemotePhotos.Session expired = new RemotePhotos.Session(id, before.session().requester(), before.session().owner(), accepted, deadline, before.session().key());
+            redis.opsForValue().set("rps:" + id, json.writeValueAsString(new RemotePhotos.Stored(expired, before.requesterVersion(), before.ownerVersion(),
+                    before.requesterConnection(), before.ownerConnection())), Duration.ofSeconds(5));
+            request(get("/remote-photos/" + id), admin).andExpect(status().isGone());
+        }
+    }
+
+                @Test void accountTypesMigrationPreservesExistingAccounts() throws Exception {
+            var configuration = org.flywaydb.core.Flyway.configure()
+                .dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
+                .schemas("account_type_upgrade_fixture").defaultSchema("account_type_upgrade_fixture")
+                .locations("classpath:db/migration");
+            try {
+                configuration.target("4").load().migrate();
+                UUID passwordAccount = UUID.randomUUID(), googleAccount = UUID.randomUUID();
+                database.update("INSERT INTO account_type_upgrade_fixture.accounts(id, handle, password_hash, display_name) VALUES (?, ?, ?, ?)",
+                    passwordAccount, "existing_password", "synthetic-password-verifier", "Existing Name");
+                database.update("INSERT INTO account_type_upgrade_fixture.accounts(id, handle, google_subject) VALUES (?, ?, ?)",
+                    googleAccount, "existing_google", "synthetic-google-subject");
+                var before = database.queryForList("SELECT id, handle, password_hash, google_subject, display_name FROM account_type_upgrade_fixture.accounts ORDER BY handle");
+                configuration.target("5").load().migrate();
+                assertEquals(before, database.queryForList("SELECT id, handle, password_hash, google_subject, display_name FROM account_type_upgrade_fixture.accounts ORDER BY handle"));
+                assertEquals(List.of("USER", "USER"), database.queryForList("SELECT user_type FROM account_type_upgrade_fixture.accounts ORDER BY handle", String.class));
+                assertEquals(0, configuration.load().migrate().migrationsExecuted);
+            } finally { database.execute("DROP SCHEMA IF EXISTS account_type_upgrade_fixture CASCADE"); }
+            }
+
+            @Test void accountTypesDefaultToUserAndRequireAnEnrolledOwner() throws Exception {
+        Device regular = device("type_regular");
+        AccountDirectory directory = new AccountDirectory(database, json, Clock.systemUTC());
+        AccountDirectory.GoogleAccount google = directory.googleAccount("google-user-type-fixture");
+        assertEquals(AccountDirectory.UserType.USER, directory.accountType(google.userId()).userType());
+        request(get("/account/type"), null).andExpect(status().isUnauthorized());
+        request(get("/account/type"), regular).andExpect(status().isOk())
+            .andExpect(jsonPath("$.userId").value(regular.userId().toString()))
+            .andExpect(jsonPath("$.userType").value("USER"))
+            .andExpect(header().string("Cache-Control", "no-store"));
+        String registration = request(body(post("/auth/register"), Map.of("handle", "type_enroll", "password", "test-only-password-12345")), null)
+            .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
+        AuthService.Token bootstrap = json.readValue(registration, AuthService.Token.class);
+        request(get("/account/type"), new Device(bootstrap.userId(), null, bootstrap.accessToken(), null))
+            .andExpect(status().isForbidden());
+        assertEquals(AccountDirectory.UserType.USER, directory.accountType(bootstrap.userId()).userType());
+        assertThrows(org.springframework.dao.DataIntegrityViolationException.class,
+            () -> database.update("UPDATE accounts SET user_type = 'UNKNOWN' WHERE id = ?", regular.userId()));
+        assertThrows(org.springframework.dao.DataIntegrityViolationException.class,
+            () -> database.update("UPDATE accounts SET user_type = NULL WHERE id = ?", regular.userId()));
+        }
+
+        @Test void accountTypesStayWithUuidAcrossRenameWithoutGrantingOtherAccountAccess() throws Exception {
+        Device owner = device("type_owner"), other = device("type_other");
+        UUID originalVersion = database.queryForObject("SELECT auth_version FROM devices WHERE id = ?", UUID.class, owner.deviceId());
+        assertEquals(1, database.update("UPDATE accounts SET user_type = 'ADMIN' WHERE id = ? AND handle = ?",
+            owner.userId(), "type_owner"));
+        request(get("/account/type"), owner).andExpect(status().isOk()).andExpect(jsonPath("$.userType").value("ADMIN"));
+        request(body(patch("/account/username"), Map.of("handle", "type_renamed")), owner).andExpect(status().isOk())
+            .andExpect(jsonPath("$.userId").value(owner.userId().toString()));
+        request(get("/account/type"), owner).andExpect(status().isOk())
+            .andExpect(jsonPath("$.userId").value(owner.userId().toString())).andExpect(jsonPath("$.userType").value("ADMIN"));
+        request(get("/account/type").param("userId", owner.userId().toString()), other).andExpect(status().isOk())
+            .andExpect(jsonPath("$.userId").value(other.userId().toString())).andExpect(jsonPath("$.userType").value("USER"));
+        request(get("/users/type_renamed"), other).andExpect(status().isOk()).andExpect(jsonPath("$.userType").doesNotExist());
+        request(get("/users/id/" + owner.userId() + "/profile"), other).andExpect(status().isOk()).andExpect(jsonPath("$.userType").doesNotExist());
+        verifyAndEstablish(other, owner);
+        request(body(post("/messages"), encrypted(other, owner, "role-boundary-fixture".getBytes(StandardCharsets.UTF_8),
+            Expiry.HOUR_1, System.currentTimeMillis() + 120_000, null)), other).andExpect(status().isCreated());
+        assertEquals(1, database.update("UPDATE accounts SET user_type = 'ADMIN' WHERE id = ?", other.userId()));
+        request(get("/messages/pending"), other).andExpect(status().isOk()).andExpect(content().json("[]"));
+        assertEquals(originalVersion, database.queryForObject("SELECT auth_version FROM devices WHERE id = ?", UUID.class, owner.deviceId()));
+        assertEquals(1, database.update("UPDATE accounts SET user_type = 'USER' WHERE id = ?", owner.userId()));
+        request(get("/account/type"), owner).andExpect(status().isOk()).andExpect(jsonPath("$.userType").value("USER"));
+        }
+
+        @Test void accountTypesCannotBeAssignedThroughClientRequests() throws Exception {
+        Device owner = device("type_unchanged");
+        request(body(post("/auth/register"), Map.of("handle", "type_injected", "password", "test-only-password-12345", "userType", "ADMIN")), null)
+            .andExpect(status().isBadRequest());
+        request(body(patch("/account/profile"), Map.of("displayName", "Example", "userType", "ADMIN")), owner)
+            .andExpect(status().isBadRequest());
+        request(body(patch("/account/username"), Map.of("handle", "type_changed", "userType", "ADMIN")), owner)
+            .andExpect(status().isBadRequest());
+        request(body(patch("/account/type"), Map.of("userType", "ADMIN")), owner).andExpect(status().isMethodNotAllowed());
+        request(body(post("/account/type"), Map.of("userType", "ADMIN")), owner).andExpect(status().isMethodNotAllowed());
+        request(get("/account/type"), owner).andExpect(status().isOk()).andExpect(jsonPath("$.userType").value("USER"));
+        }
+
+        @Test void concurrentUsernameClaimsCannotAssignTheSameHandleToTwoAccounts() throws Exception {
         Device alice = device("alice");
         Device bob = device("bob");
         AccountDirectory directory = new AccountDirectory(database, json, Clock.systemUTC());
@@ -896,7 +1118,8 @@ class RelayIntegrationTest {
         request(body(post("/auth/google/challenge"), new GoogleAuth.Start(null)), null)
                 .andExpect(status().isServiceUnavailable()).andExpect(content().json("{\"error\":\"google_sign_in_unavailable\"}"));
         List<String> fields = database.queryForList("SELECT column_name FROM information_schema.columns WHERE table_name = 'accounts' AND table_schema = 'public' ORDER BY ordinal_position", String.class);
-        assertEquals(List.of("id", "handle", "password_hash", "google_subject", "display_name"), fields);
+        assertEquals(List.of("id", "handle", "password_hash", "google_subject", "display_name", "user_type"), fields);
+        assertEquals(AccountDirectory.UserType.USER, directory.accountType(first.userId()).userType());
         assertNull(database.queryForObject("SELECT display_name FROM accounts WHERE id = ?", String.class, first.userId()));
     }
 

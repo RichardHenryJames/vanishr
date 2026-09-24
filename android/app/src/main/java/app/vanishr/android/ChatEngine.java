@@ -352,7 +352,17 @@ final class ChatEngine implements AutoCloseable {
         });
     }
 
+    void clearChat(UUID peerId) throws Exception {
+        if (account == null || peers().stream().noneMatch(peer -> peer.userId().equals(peerId)))
+            throw new SecurityException("Contact is unavailable");
+        for (String name : vault.names("entry/")) {
+            Entry entry = read(name, Entry.class);
+            if (entry.groupEpoch() == null && peerId.equals(entry.peerId())) erase(entry, null);
+        }
+    }
+
     void forget(Peer peer) throws Exception {
+        PhotoSharingService.endFor(account.userId(), peer.userId());
         for (Entry entry : entries(peer.userId())) erase(entry, "delete");
         vault.transaction(() -> {
             photos.forget(peer);
@@ -739,6 +749,7 @@ final class ChatEngine implements AutoCloseable {
 
     void invalidateToken() throws Exception {
         if (account == null) return;
+        PhotoSharingService.endFor(account.userId(), null);
         connectionGeneration++; realtimeReady = false;
         presence.disconnected();
         account = new Account(account.origin(), account.handle(), account.userId(), account.deviceId(), "", 0, account.enrolled());
@@ -750,6 +761,7 @@ final class ChatEngine implements AutoCloseable {
     }
 
     void logout() throws Exception {
+        if (account != null) PhotoSharingService.endFor(account.userId(), null);
         try {
             try { if (authenticated()) flushAcks(); }
             catch (IOException failure) { online = false; }

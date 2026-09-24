@@ -283,15 +283,169 @@ public class ReleaseWorkflowTest {
 
     private Peer peer(String origin) throws Exception {
         RelayApi api = new RelayApi(origin, null);
-        String handle = "release_peer_" + UUID.randomUUID().toString().replace("-", "").substring(0, 10);
-        ChatEngine.Token enrollment = api.call("POST", "/auth/register", new ChatEngine.Login(
-            handle, UUID.randomUUID().toString(), null), ChatEngine.Token.class);
+        Bundle arguments = InstrumentationRegistry.getArguments();
+        boolean photoAdmin = "true".equals(arguments.getString("releaseRemotePhotos"));
+        String handle = photoAdmin ? arguments.getString("photoAdminHandle") : "release_peer_" + UUID.randomUUID().toString().replace("-", "").substring(0, 10);
+        String password = photoAdmin ? arguments.getString("photoAdminPassword") : UUID.randomUUID().toString();
+        if (photoAdmin) assertTrue("Only a provisioned synthetic admin may be used", handle != null && handle.matches("release_photo_[0-9a-f]{16}"));
+        ChatEngine.Token enrollment = api.call("POST", photoAdmin ? "/auth/login" : "/auth/register", new ChatEngine.Login(handle, password, null), ChatEngine.Token.class);
         SignalClient signal = new SignalClient(enrollment.userId(), new DeviceSecurityTest.MemoryVault());
         api.token(enrollment.accessToken());
         ChatEngine.Token session = api.call("POST", "/devices", new ChatEngine.DeviceRegistration(UUID.randomUUID(), signal.publicIdentity(), false), ChatEngine.Token.class);
         api.token(session.accessToken());
         api.call("POST", "/keys", Collections.singletonMap("keys", List.of(signal.generatePreKey(Instant.now()))), Void.class);
         return new Peer(api, session, signal, handle);
+    }
+
+    private void clearChatWorkflow(Peer peer, ChatEngine.Contact own) throws Exception {
+        clickIcon("Conversation options"); clickPopupItem("Clear chat"); awaitText("Clear chat?");
+        capture("29-release-clear-chat-confirmation"); clickText("Cancel");
+        assertTrue("Cancel keeps the chat history", device.hasObject(By.text("hello")));
+        clickIcon("Conversation options"); clickPopupItem("Clear chat"); awaitText("Clear chat?"); clickText("Clear");
+        awaitText("Just the two of you"); capture("30-release-cleared-chat");
+        assertEquals(own, peer.api().call("GET", "/users/id/" + own.userId(), null, ChatEngine.Contact.class));
+        fill("Message", "Message after clearing"); clickIcon("Send");
+        ChatEngine.Incoming message = eventually(() -> {
+            ChatEngine.Incoming[] pending = peer.api().call("GET", "/messages/pending", null, ChatEngine.Incoming[].class);
+            return pending.length == 0 ? null : pending[0];
+        });
+        byte[] plaintext = peer.crypto().decrypt(own.userId(), new SignalClient.Packet(message.type(), message.ciphertext()));
+        try { assertEquals("Message after clearing", RelayApi.JSON.fromJson(new String(plaintext, StandardCharsets.UTF_8), ChatEnvelope.class).text()); }
+        finally { Arrays.fill(plaintext, (byte) 0); }
+        peer.api().call("POST", "/messages/" + message.id() + "/read", null, Void.class);
+        assertTrue(device.wait(Until.hasObject(By.desc("READ")), 30_000));
+    }
+
+    private final class PhotoLink implements AutoCloseable {
+        final RelayApi api;
+        final SignalClient signal;
+        final ChatEngine.Contact own;
+        final Peer peer;
+        final UUID id = UUID.randomUUID();
+        RemotePhotoSession.Session session;
+        UUID acknowledged;
+        PhotoLink(Peer peer, ChatEngine.Contact own) throws Exception {
+            this.peer = peer; this.own = own;
+            api = new RelayApi(peer.api().origin(), peer.session().accessToken());
+            signal = peer.crypto().isolatedSession(new DeviceSecurityTest.MemoryVault());
+            signal.verifyPeer(own.userId(), Base64.getDecoder().decode(own.identityKey()));
+            var connected = new java.util.concurrent.atomic.AtomicBoolean();
+            api.photoEvents(() -> { }, connected::set);
+            eventually(() -> connected.get() ? Boolean.TRUE : null);
+            RemotePhotoSession.AccountType role = api.call("GET", "/account/type", null, RemotePhotoSession.AccountType.class);
+            assertEquals("ADMIN", role.userType()); assertEquals(peer.session().userId(), role.userId());
+            session = api.call("POST", "/remote-photos", new RemotePhotoSession.Start(id, own, signal.generatePreKey(Instant.now())), RemotePhotoSession.Session.class);
+            assertFalse(session.accepted());
+        }
+        void send(UUID query, String action, long photo, long cursor) throws Exception {
+            long now = System.currentTimeMillis(), deadline = Math.min(session.expiresAt(), now + 50_000);
+            ChatEnvelope message = new ChatEnvelope(1, UUID.randomUUID(), peer.session().userId(), peer.session().deviceId(), own.userId(), own.deviceId(),
+                    now, deadline, ChatEnvelope.Expiry.HOURS_24, "remote-photos", null);
+            byte[] plaintext = RelayApi.JSON.toJson(new RemotePhotoSession.Frame(id, query, action, photo, cursor, 0, 0, false, null, message)).getBytes(StandardCharsets.UTF_8);
+            try {
+                SignalClient.Packet encrypted = signal.encrypt(own.userId(), plaintext, Instant.now());
+                RemotePhotoSession.Delivery delivery = api.call("POST", "/remote-photos/" + id + "/exchange",
+                        new RemotePhotoSession.Exchange(acknowledged, new RemotePhotoSession.Send(message.id(), deadline, encrypted.type(), encrypted.ciphertext())), RemotePhotoSession.Delivery.class);
+                assertNull("A request is sent only after acknowledging the previous response", delivery.packet());
+            } finally { Arrays.fill(plaintext, (byte) 0); }
+        }
+        RemotePhotoSession.Frame receive() throws Exception {
+            RemotePhotoSession.Packet packet = eventually(() -> api.call("POST", "/remote-photos/" + id + "/exchange",
+                    new RemotePhotoSession.Exchange(acknowledged, null), RemotePhotoSession.Delivery.class).packet());
+            assertEquals(own.userId(), packet.senderId()); assertEquals(own.deviceId(), packet.senderDeviceId());
+            byte[] plaintext = signal.decrypt(own.userId(), new SignalClient.Packet(packet.type(), packet.ciphertext()));
+            try {
+                RemotePhotoSession.Frame frame = RelayApi.JSON.fromJson(new String(plaintext, StandardCharsets.UTF_8), RemotePhotoSession.Frame.class);
+                assertEquals(id, frame.sessionId());
+                frame.message().verify(packet.id(), own.userId(), own.deviceId(), peer.session().userId(), peer.session().deviceId(),
+                        ChatEnvelope.Expiry.HOURS_24, packet.expiresAt(), null, Instant.now());
+                acknowledged = packet.id(); return frame;
+            } finally { Arrays.fill(plaintext, (byte) 0); }
+        }
+        @Override public void close() throws Exception {
+            try { api.call("DELETE", "/remote-photos/" + id, null, Void.class); }
+            finally { api.close(); }
+        }
+    }
+
+    private void remotePhotosWorkflow(ActivityScenario<MainActivity> scenario, Peer peer, ChatEngine.Contact own) throws Exception {
+        Context context = instrumentation.getTargetContext();
+        List<android.net.Uri> images = new ArrayList<>();
+        Bitmap bitmap = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888);
+        java.util.Random noise = new java.util.Random(42);
+        int[] pixels = new int[320 * 240];
+        for (int index = 0; index < pixels.length; index++) pixels[index] = Color.rgb(noise.nextInt(256), noise.nextInt(256), noise.nextInt(256));
+        bitmap.setPixels(pixels, 0, 320, 0, 0, 320, 240);
+        ByteArrayOutputStream encoded = new ByteArrayOutputStream();
+        assertTrue(bitmap.compress(Bitmap.CompressFormat.JPEG, 90, encoded)); bitmap.recycle();
+        byte[] original = encoded.toByteArray();
+        try {
+            for (int index = 0; index < 13; index++) {
+                android.content.ContentValues values = new android.content.ContentValues();
+                values.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "vanishr-release-" + UUID.randomUUID() + ".jpg");
+                values.put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+                values.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/VanishrRelease");
+                values.put(android.provider.MediaStore.Images.Media.IS_PENDING, 1);
+                android.net.Uri image = context.getContentResolver().insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+                assertNotNull(image); images.add(image);
+                try (java.io.OutputStream output = context.getContentResolver().openOutputStream(image)) { assertNotNull(output); output.write(original); }
+                values.clear(); values.put(android.provider.MediaStore.Images.Media.IS_PENDING, 0);
+                assertEquals(1, context.getContentResolver().update(image, values, null, null));
+            }
+            try (PhotoLink link = new PhotoLink(peer, own)) {
+                RelayApi.ApiFailure unapproved = assertThrows(RelayApi.ApiFailure.class, () -> link.api.call("POST", "/remote-photos/" + link.id + "/exchange",
+                        new RemotePhotoSession.Exchange(null, null), RemotePhotoSession.Delivery.class));
+                assertEquals(403, unapproved.status);
+                awaitText("Allow photo access?"); capture("31-release-photo-approval"); clickText("Allow");
+                String permission = android.os.Build.VERSION.SDK_INT >= 33 ? android.Manifest.permission.READ_MEDIA_IMAGES : android.Manifest.permission.READ_EXTERNAL_STORAGE;
+                if (context.checkSelfPermission(permission) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    UiObject2 allow = device.wait(Until.findObject(By.res(java.util.regex.Pattern.compile(".*:id/permission_allow(?:_all)?_button"))), 10_000);
+                    assertNotNull("Android photo permission must be explicitly allowed on the synthetic device", allow); allow.click();
+                }
+                link.session = eventually(() -> {
+                    RemotePhotoSession.Session current = link.api.call("GET", "/remote-photos/" + link.id, null, RemotePhotoSession.Session.class);
+                    return current.accepted() ? current : null;
+                });
+                assertEquals("HELLO", link.receive().action());
+                long cursor = Long.MAX_VALUE; List<Long> listed = new ArrayList<>();
+                for (int page = 0; page < 2; page++) {
+                    UUID query = UUID.randomUUID(); link.send(query, "LIST", 0, cursor);
+                    int thumbnails = 0;
+                    while (true) {
+                        RemotePhotoSession.Frame frame = link.receive(); assertEquals(query, frame.requestId());
+                        if (frame.action().equals("PAGE_END")) { cursor = frame.cursor(); if (page == 0) assertTrue(frame.more()); break; }
+                        assertEquals("ENTRY", frame.action()); assertNotNull(frame.data()); assertTrue(frame.data().length <= 12_000);
+                        listed.add(frame.photoId()); thumbnails++; Arrays.fill(frame.data(), (byte) 0);
+                    }
+                    assertTrue(thumbnails > 0 && thumbnails <= 12);
+                }
+                long selected = android.content.ContentUris.parseId(images.get(0)); assertTrue(listed.contains(selected));
+                android.app.NotificationManager notifications = context.getSystemService(android.app.NotificationManager.class);
+                var notice = eventually(() -> Arrays.stream(notifications.getActiveNotifications())
+                        .filter(value -> "Photo sharing active".contentEquals(value.getNotification().extras.getCharSequence(android.app.Notification.EXTRA_TITLE))).findFirst().orElse(null));
+                scenario.moveToState(Lifecycle.State.CREATED);
+                UUID query = UUID.randomUUID(); link.send(query, "GET", selected, 0);
+                ByteArrayOutputStream transferred = new ByteArrayOutputStream();
+                while (true) {
+                    RemotePhotoSession.Frame frame = link.receive(); assertEquals(query, frame.requestId()); assertEquals("CHUNK", frame.action());
+                    assertEquals(transferred.size(), frame.offset()); assertEquals(original.length, frame.total());
+                    transferred.write(frame.data()); Arrays.fill(frame.data(), (byte) 0);
+                    if (!frame.more()) break;
+                }
+                assertArrayEquals("Background transfer must preserve the original bytes", original, transferred.toByteArray());
+                var end = Arrays.stream(notice.getNotification().actions).filter(action -> "End access".contentEquals(action.title)).findFirst().orElseThrow();
+                assertTrue(end.actionIntent.isImmutable()); end.actionIntent.send();
+                eventually(() -> {
+                    try { link.api.call("GET", "/remote-photos/" + link.id, null, RemotePhotoSession.Session.class); return null; }
+                    catch (RelayApi.ApiFailure failure) { assertEquals(410, failure.status); return Boolean.TRUE; }
+                });
+                scenario.moveToState(Lifecycle.State.RESUMED); awaitText(peer.handle()); capture("32-release-photo-access-ended");
+            }
+        } finally {
+            scenario.moveToState(Lifecycle.State.RESUMED);
+            for (android.net.Uri image : images) context.getContentResolver().delete(image, null, null);
+            Arrays.fill(original, (byte) 0);
+        }
     }
 
     private UUID send(Peer sender, ChatEngine.Incoming recipient, String text, byte[] photo, ChatEnvelope.Expiry expiry) throws Exception {
@@ -592,6 +746,8 @@ public class ReleaseWorkflowTest {
             profilePhotoWorkflow(peer, own);
             if ("true".equals(arguments.getString("releasePush"))) notificationWorkflow(scenario, peer, outgoing);
             presenceWorkflow(scenario, peer, own);
+            if ("true".equals(arguments.getString("releaseRemotePhotos"))) remotePhotosWorkflow(scenario, peer, own);
+            clearChatWorkflow(peer, own);
             Bitmap bitmap = Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888);
             bitmap.eraseColor(Color.rgb(37, 112, 91));
             ByteArrayOutputStream encoded = new ByteArrayOutputStream();

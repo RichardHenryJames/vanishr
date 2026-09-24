@@ -97,6 +97,10 @@ public class RelayController {
         return accounts.profile(actor.userId());
     }
 
+    @GetMapping("/account/type") public AccountDirectory.AccountType accountType(@AuthenticationPrincipal Actor actor) {
+        return accounts.accountType(actor.userId());
+    }
+
     @PatchMapping("/account/profile") public AccountDirectory.Profile updateProfile(@AuthenticationPrincipal Actor actor,
                                                                                   @Valid @RequestBody AccountDirectory.ProfileChange change) {
         rates.require("profile:" + actor.userId(), 10, 60);

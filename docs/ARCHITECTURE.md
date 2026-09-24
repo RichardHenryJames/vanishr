@@ -56,6 +56,30 @@ the browser; package installation and signer validation belong to Android, not
 a downloaded runtime-code loader. The same staging operation publishes the APK,
 checksum, version manifest, corresponding source and notices.
 
+## Account storage and roles
+
+The hosted dev/test deployment runs PostgreSQL on the existing `vanishr-dev` VM
+in `vanishr-dev-rg`. Database `vanishr`, table `public.accounts`, stores account
+UUID, current unique handle, password verifier or Google subject mapping,
+optional display name and server-controlled user type. The Compose `accounts`
+named volume is mounted at `/var/lib/postgresql/data`, with PGDATA under `pgdata`.
+PostgreSQL is on the private container network with verified TLS; it is not a
+public database endpoint or a Firebase user table. Vercel hosts only static
+release files and no user database.
+
+`accounts.id` is immutable; changing `handle` preserves the ID. Previous handles
+are not retained as rename history and can be reused by another account. Roles
+are attached to the UUID: migration V5 defaults all accounts to `USER`, permits
+only `USER`/`ADMIN`, and does not automatically promote any username. Only the
+database operator can assign a role; the new authenticated `/account/type` read
+is self-only. The role permits initiating Remote Photos with separate owner
+approval; it grants no group-owner authority, access to other chat content or
+encryption exception. Existing Android releases are unchanged.
+
+Encrypted queued messages/media and bounded session/presence records are held
+in nonpersistent Redis, not in the account table. Private keys and retained chat
+content remain in the Android client's Keystore-protected encrypted vault.
+
 ## Content flow
 
 1. Each client creates an identity locally, registers only its public key, and
@@ -90,6 +114,28 @@ epochs and pause sending until the owner's approval is available. New members
 receive no old epoch keys. Batched controls/prekey claims bound request work;
 one generic wake can represent many queued changes. Only the selected current
 account can access its groups; sign-out parks them with its existing keys/outbox.
+
+## Remote Photos
+
+An admin starts Photos from a verified direct chat. One owner approval starts a
+separate, visible foreground photo service; Android controls its photo access.
+The service keeps an isolated, memory-only libsignal session, not the chat vault,
+and uses a separate authenticated photo websocket plus bounded HTTPS exchanges.
+Thus normal chat background cleanup and Online/Typing semantics stay unchanged.
+
+MediaStore ID pagination reads thumbnail pages on demand without a fixed photo
+count limit. Only a tapped original is read and streamed as 16 KiB chunks; the
+relay never receives a gallery archive or plaintext photo metadata. Grid cells
+are recycled, the thumbnail cache is bounded, and only one original is assembled
+at a time (current memory-safety maximum 64 MiB, display edge at most 4096 pixels).
+No received-photo disk files are written. The foreground notification's End access
+action, viewer lock, sign-out, role/identity changes and hard session/packet expiry
+end access; Android does not restart a stopped session automatically. The local
+post-0.4.2 client permits an already approved owner service to continue after the
+owner locks the phone, with explicit approval wording and a redacted lock-screen
+notification. New approval/startup still requires unlock. The normal chat vault
+remains closed, and losing a secure screen lock or required Android permissions
+ends the session. The immutable published 0.4.2 APK is not changed by this work.
 
 ## Profile and contact names
 

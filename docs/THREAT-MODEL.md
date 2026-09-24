@@ -85,6 +85,20 @@ claims. Usernames may be reused after renaming, so existing contacts and session
 remain bound to immutable account UUIDs and pinned keys. Names are not identity
 proofs. Google names, email addresses and photos are not imported automatically.
 
+Account type is server-controlled metadata attached to the immutable account UUID.
+The PostgreSQL `accounts.user_type` column permits only `USER` or `ADMIN`, defaults
+to `USER` for existing and new accounts, and is not accepted by any client write
+API. An enrolled account may read its own current type via `GET /account/type`;
+contact lookup/profile responses do not disclose it. Only an authenticated database
+operator may change a type, targeting a previously inspected UUID and expected
+current handle in a bounded transaction, never an automatic username rule.
+Renaming or reusing a former handle cannot transfer the role. `ADMIN` permits
+requesting Remote Photos, subject to the owner's explicit session approval below,
+but grants no other message access, expiry exceptions or encryption-key access.
+Future privileged features need explicit server-side
+authorization checked against the current role; client UI or a cached role is
+not an authorization boundary.
+
 Private contact nicknames stay in the owner's encrypted local account partition
 and are never sent to the relay or the contact. A shared profile refresh may update
 the contact's current username and profile name, but never that private override
@@ -141,6 +155,64 @@ audience database or background presence service. Older clients retain their
 Online/Typing contract and do not publish last seen; both people must update for
 the new feature. A malicious peer can misreport activity or retain previously
 received metadata; status is not identity-verification or message-delivery proof.
+
+## Owner-approved Remote Photos
+
+Only an enrolled account whose current database role is `ADMIN` may request this
+feature; both clients require an independently verified saved direct contact.
+The owner receives one Allow/Don't allow prompt naming the contact and explaining
+background and locked-phone access to photos Android permits this app to read,
+including originals. Approval and service startup still require an unlocked phone.
+Android's photo/notification permission prompts still apply. Partial photo access
+is respected; no permanent sharing-enabled flag, silent approval, new-photo upload
+job or automatic grant on app restart is added.
+
+An accepted session runs in a non-exported Android data-sync foreground service
+with a persistent private notification and an immutable End access action. The
+user explicitly approved this notification-based background design. Closing the
+owner's chat activity or locking that phone does not end an already accepted
+owner session. A redacted lock-screen notification names the active feature and
+retains End access without disclosing the contact. Viewer screen-off/lock still
+ends access, as does an owner lock before acceptance. End access, sign-out, contact
+removal, removal of the device screen lock, loss of required permission, rejected authentication,
+photo-connection loss, role/device change, Android service timeout or the session
+deadline ends it. A force-stopped or killed service does not automatically restart.
+Android/OEM background limits cannot be bypassed or guaranteed.
+
+The server checks the current admin role, participant identities/generations,
+explicit owner approval and separate authenticated `/photo-events` connections
+on session access and every exchange. These connections do not mark the owner
+Online in chat. Requests expire logically after two minutes; all session records,
+indexes and revocation/replay markers have atomic TTLs bounded to fifteen minutes.
+Ciphertext packets expire within sixty seconds and never beyond the session.
+Neither reading nor retrying extends these deadlines. The relay holds at most one
+pending packet per direction and bounded retry digests, not a gallery archive.
+
+Each photo session uses official libsignal with independently pinned existing
+identities and fresh prekeys in separate in-memory stores. Chat ratchets are not
+copied or advanced; the normal encrypted chat vault still closes on background.
+This feature intentionally retains a temporary client identity copy and photo
+session keys in memory while an approved owner service is active, including while
+the owner phone is locked. This explicitly requested exception applies only to
+the isolated, accepted photo session; it does not reopen the chat vault or relax
+Android Keystore, device-unlock, or photo-permission requirements. Android/OEM
+power management may pause or terminate transfer while locked; reboot/force-stop
+does not restore sharing. The published 0.4.2 build predates this local lock-policy change.
+No private key leaves its own device. Temporary stores are cleared on termination.
+Encrypted application envelopes bind session, request, packet, sender/recipient
+devices and original deadlines, preventing responses from another conversation
+or session from being accepted.
+
+MediaStore is read in twelve-item pages with no fixed gallery-count cap. The
+phone creates thumbnails only for requested pages. A tap streams just that
+original photo in bounded chunks through the opaque relay. The viewer retains a
+bounded thumbnail cache and one original in memory, never a plaintext disk cache.
+The current viewer limits an original to 64 MiB and decodes a display bitmap no
+larger than 4096 pixels per edge; unsupported/oversized images show an error.
+Stalled transfers end after sixty seconds without progress. The phone's source
+files remain untouched. Like any authorized sharing, an admin can retain received
+photos using another camera or modified client; revocation cannot erase copies
+already received. Approval is therefore meaningful disclosure, not remote DRM.
 
 ## Private profile photos
 
@@ -229,6 +301,15 @@ replenishment. Simultaneous 200-phone/OEM and sustained production-load testing
 remain required; no VM size or paid services are increased for this feature.
 
 ## Client storage
+
+Clear chat in a direct conversation removes only that account's local message
+entries, protected content keys, encrypted outbox items and unstored UI sends.
+It requires confirmation and keeps the contact, pinned identity, Signal ratchet,
+private nickname and other conversations. Existing delivery/read acknowledgements
+and replay markers retain their original bounded deadlines so clearing does not
+resurrect received messages. It does not issue a remote deletion, reset expiry,
+erase the other person's copies or revoke an independently approved photo session.
+An upload already in progress may have reached the relay before it is cleared.
 
 Send taps immediately show an in-memory Sending bubble, not a delivery receipt.
 At most eight not-yet-stored sends are retained; each has an ID and absolute

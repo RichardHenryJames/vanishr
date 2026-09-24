@@ -46,6 +46,7 @@ independent of login attempts. No access bearer is required or sent on renewal.
 | `GET /account/username` | DEVICE owner | `{userId,handle}` | Current account username |
 | `PATCH /account/username` | DEVICE owner; 5/min/account | `{handle}` -> `{userId,handle}` | Updates only authenticated account; database uniqueness; no device/key changes |
 | `GET /account/profile` | DEVICE owner | `{userId,handle,displayName}` | Display name is nullable until explicitly saved |
+| `GET /account/type` | DEVICE owner | `{userId,userType}` | Current `USER` or `ADMIN` metadata for the authenticated account only; no client write endpoint or extra permissions |
 | `PATCH /account/profile` | DEVICE owner; 10/min/account | `{displayName}` -> profile | Updates only authenticated account; 1-40 characters, not unique |
 | `GET /users/id/{userId}/profile` | DEVICE | `{userId,handle,displayName}` | Shared account metadata; private nicknames are never returned |
 | `POST /keys` | DEVICE owner | `{keys:[PublicBundle,...]}` -> 204 | 1-32 per request, at most 256 available; 24h public-key TTL; cleanup every minute |
@@ -68,6 +69,59 @@ auth endpoints intentionally handle public/authentication material. The relay
 cannot cryptographically prove an arbitrary malicious client submitted real
 ciphertext. It has no plaintext message field or decrypt functionality, and
 tests demonstrate the official client's encryption-before-upload path.
+
+## Account type
+
+Migration V5 adds `accounts.user_type`: non-null `USER` (default) or `ADMIN`,
+enforced by a PostgreSQL check constraint. Existing accounts retain their UUIDs,
+handles, authentication mappings and device keys. Username changes update only
+`handle`, not `id` or `user_type`; former handles are not an identity history.
+
+`GET /account/type` reads the current database value for the authenticated enrolled
+account. It has no target account parameter, and returns no other account fields.
+No profile, registration, login or username payload can set a role. Contact lookup
+does not expose it. Assignment is a database-operator action using an inspected
+UUID plus its expected current username, not a username-based bootstrap migration.
+No permission bypass is enabled by this metadata alone. Remote Photos additionally
+requires the addressed owner's approval for each bounded session.
+
+## Remote Photos
+
+All routes require a current DEVICE session. Only a current `ADMIN` can initiate;
+other participants can read/approve their own request, exchange after acceptance,
+or stop it. Clients independently require saved, verified direct contacts. Public
+contact lookup and ordinary message access are unchanged.
+
+| Method / Path | Contract |
+| --- | --- |
+| `GET /photo-events` (WSS) | Separate authenticated connection with the same generic wake event; does not replace `/events` or confer chat presence |
+| `POST /remote-photos` | `{id,owner:{userId,deviceId,identityKey},key:PublicBundle}` -> session; ADMIN-only, three requests/min/device; requester photo connection and owner's initial chat connection required |
+| `GET /remote-photos` | Up to four current sessions for the authenticated device |
+| `GET /remote-photos/{id}` | Participant-only session; expired/revoked/disconnected returns 410 |
+| `POST /remote-photos/{id}/accept` | `{requester:{userId,deviceId,identityKey}}` -> accepted session; addressed owner only, live photo connection required |
+| `POST /remote-photos/{id}/exchange` | `{acknowledge?,packet?:{id,expiresAt,type,ciphertext}}` -> `{packet?:{id,senderId,senderDeviceId,expiresAt,type,ciphertext}}`; both current participants and approval required; ciphertext <=65536 bytes |
+| `DELETE /remote-photos/{id}` | Either participant stops access and removes queued ciphertext |
+
+Session: `{id,requester,owner,accepted,expiresAt,key}`. The public bundle identity
+must match the requester's registered key; libsignal verifies its signatures on
+the client. Session deadline is at most fifteen minutes, with only two minutes
+to accept a request. The accepted deadline is never extended. Each packet is
+bounded to sixty seconds and to the original session deadline. One packet per
+direction and at most 10000 retry digests per sender/session bound relay memory;
+identical retries do not redeliver acknowledged packets. There is no gallery-count
+limit or full-gallery upload. A separate 600/min/device, 1200/min/IP exchange
+budget prevents photo chunks from consuming normal chat request counters.
+
+Normal chat may disconnect while the owner-approved foreground service maintains
+its photo channel. Role, device generation, authentication and both photo
+connections are rechecked, not cached as a permanent approval flag. Owner Android
+photo/notification permissions, a configured secure screen lock and End access
+remain mandatory. In the local post-0.4.2 client, approval/startup require an
+unlocked phone, but an already accepted owner session can continue while that
+phone is locked. Viewer lock or owner lock before acceptance still ends access.
+Normal chat vault access remains unlock-only; server authorization is unchanged.
+Client metadata/thumbnails/original chunks use separate official Signal sessions,
+not plaintext JSON photo paths or a custom encryption algorithm.
 
 ## Online, typing and last seen
 
@@ -218,7 +272,7 @@ HTTPS port refuses actual cleartext at the TLS layer; 426 is defense in depth.
 
 ## Minimum durable schema
 
-`accounts(id UUID PK, handle VARCHAR(32) UNIQUE, password_hash VARCHAR(100), google_subject VARCHAR(255) UNIQUE, display_name VARCHAR(40))`
+`accounts(id UUID PK, handle VARCHAR(32) UNIQUE, password_hash VARCHAR(100), google_subject VARCHAR(255) UNIQUE, display_name VARCHAR(40), user_type VARCHAR(16) NOT NULL DEFAULT 'USER' CHECK (user_type IN ('USER','ADMIN')))`
 
 `devices(id UUID PK, user_id UUID UNIQUE FK, identity_key VARCHAR(64), auth_version UUID, registered_at TIMESTAMPTZ)`
 
@@ -254,6 +308,8 @@ an exposed product workflow; do not add a content-recovery API.
 | `gm:`, `gb:` | One shared group ciphertext/image | Original deadline, <=24h |
 | `gr:`, `gi:` | Per-member states and expiry-scored group message IDs | Original deadline / <=24h index |
 | `gc:`, `gcr:`, `gci:` | Recipient-bound encrypted Signal controls, retry digests and index | <=24h, bounded at creation |
+| `rps:`, `rpsi:`, `rps-ended:` | Approved-photo session/public bundle, participant indexes and revocation marker | <=15min; pending approval logically <=2min |
+| `rpq:`, `rpr:` | Single queued encrypted photo packet/direction and bounded retry digests | Packet <=60s; digests <=15min/session deadline |
 
 Runtime requires nonpersistent single-node Redis. Lua scripts atomically attach
 media and enqueue/acknowledge delivery, never reset content lifetime on retries.
