@@ -75,7 +75,7 @@ public final class PhotoSharingService extends Service {
             : new Intent(context, RemotePhotosActivity.class).putExtra("session", session.id().toString());
         open.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         PendingIntent content = PendingIntent.getActivity(context, NOTIFICATION, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        String title = session.owner() ? "Photo sharing active" : "Remote photos";
+        String title = "Vanishr is active";
         Notification publicVersion = new Notification.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_image)
             .setContentTitle(title).setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOngoing(true).setOnlyAlertOnce(true).setCategory(Notification.CATEGORY_SERVICE)
