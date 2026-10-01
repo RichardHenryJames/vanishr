@@ -76,11 +76,11 @@ public final class PhotoSharingService extends Service {
         open.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         PendingIntent content = PendingIntent.getActivity(context, NOTIFICATION, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         String title = "Vanishr is active";
-        Notification publicVersion = new Notification.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_image)
+        Notification publicVersion = new Notification.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_stat_vanishr)
             .setContentTitle(title).setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOngoing(true).setOnlyAlertOnce(true).setCategory(Notification.CATEGORY_SERVICE)
             .setContentIntent(content).setDeleteIntent(end).addAction(R.drawable.ic_x, "End access", end).build();
-        Notification.Builder builder = new Notification.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_image)
+        Notification.Builder builder = new Notification.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_stat_vanishr)
             .setContentTitle(title).setPublicVersion(publicVersion)
                 .setOngoing(true).setOnlyAlertOnce(true).setCategory(Notification.CATEGORY_SERVICE)
                 .setDeleteIntent(end)

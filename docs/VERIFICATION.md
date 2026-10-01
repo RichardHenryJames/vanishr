@@ -1,7 +1,101 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-09-24. This is a development foundation,
+Evidence refreshed on Windows, 2026-10-01. This is a development foundation,
 not a production security assessment or independent audit.
+
+## Release 0.4.5
+
+- Code 26: new logo and automatic official-admin conversations. The relay (schema
+  V6 single-admin lock, V7 admin introductions) was deployed to the existing
+  `vanishr-dev-rg` host on 2026-10-01 before the APK. Live read-only checks: schema
+  version 7, exactly one admin (same UUID digest as before), valid unique-admin
+  index, triggers, restrictive foreign key, exact deployed JAR hash, four services
+  healthy, no change to PostgreSQL/Redis/HTTPS containers, trusted-TLS health 200,
+  anonymous admin-directory request 401 with no-store, 0 introduction rows (no
+  backfill) and 74 existing accounts unchanged. The admin profile is display name
+  `Vanishr`, username `vanishr`; no email is stored anywhere in the account schema.
+  VM size and the subscription spending limit were unchanged; temporary transfer
+  storage was removed.
+- Introductions are database-trigger-created for accounts inserted after V7 only
+  (password and Google). Participants see only their own introduction; the admin
+  directory is paged at 64 and rate-limited. Peer encryption state is created only
+  when a conversation is opened or a message arrives.
+- The signed app pins the official origin, admin account/device UUIDs and the
+  admin's public-identity SHA-256. A different relay-reported identity, an
+  unrelated contact in a user's response, a wrong admin account, a changed peer
+  identity or a removed contact is refused or not silently restored. Automatic
+  direct-chat trust does not count as independent verification for groups,
+  profile photos, presence or Remote Photos (tested).
+- Twenty-two targeted PostgreSQL/Redis relay tests passed with no failures,
+  errors or skips, covering V5-to-V7 migrations without backfill, participant
+  scoping, Google/enrollment timing, 65-account pagination and client-injection
+  rejection. Twenty targeted native Android tests passed on a fresh isolated
+  Android 12 emulator in 69.235 seconds (new onboarding cases plus group,
+  profile-photo, Remote Photos, notification, home and login regressions);
+  `AppUpdatesTest` unit tests and QA/release lint passed. An earlier Android 16
+  emulator run failed at its generated-PIN fixture before the affected tests
+  ran, so it is not counted as evidence.
+- Not verified: the full JVM and 99+ method Android suites and the signed live
+  workflow were not rerun for this release; physical devices and OEM behavior;
+  a live end-to-end account creation against the hosted relay. If the admin's
+  registered device is replaced, the compiled pin intentionally blocks automatic
+  admin chats until a reviewed app update. The first new-user binding on the
+  admin side trusts authenticated relay enrollment; a compromised relay could
+  omit or lie about that binding, but cannot impersonate the pinned admin to
+  users' apps.
+- Published on 2026-10-01 as 0.4.5/code 26: production deployment
+  `dpl_BZ8SRyT8a1RVxfgnd6gM7wYazqw7` in the existing `vanishr-download` project on
+  the Vanishr Hobby team (zero builds/functions). The public alias
+  `vanishr-download.vercel.app` was repointed from the 0.4.4 deployment
+  `vanishr-release-044-ea0i8o0nv-vanishr.vercel.app`, which remains available as
+  the rollback target. The immutable 29-file bundle (59,416,250 bytes) passed the
+  audit (199 matching source files, 417 source entries, no known secrets or native
+  test libraries). Signed APK: 44,388,181 bytes, SHA-256
+  `9013504b3f694c7b8cd5c271c3f3bbc5e0bb903bf0c74125d695451ead2b23e0`, original
+  signer. Anonymous verification matched 28 public files/hashes, the original APK
+  signer, the no-store code-26 feed, security headers and six private-path 404s.
+  The temporary Vercel CLI login and local project link were removed. README and
+  this document's publication-status edits postdate the source archive; it was not
+  rebuilt. Records: `.tools/distribution-audit-0.4.5.json` and
+  `.tools/public-release-verification-0.4.5.json`.
+- Evidence: `.tools/admin-onboarding-0.4.5-final-qa.txt`,
+  `.tools/admin-onboarding-0.4.5-android12-ui/`, `relay/target/surefire-reports`
+  and the hosted postflight records retained in the session workspace.
+
+## Permanent single admin (relay only, unreleased, 2026-10-01)
+
+- Migration V6 pins the existing sole admin's UUID, limits `ADMIN` to one account,
+  and rejects pin replacement/removal or deletion/change of that UUID. Revoking
+  the role does not release the pin. Empty installations grant nobody admin
+  automatically; multiple existing admins make the migration roll back.
+- The relay validates the current role against the pin before reporting `ADMIN`
+  or granting Remote Photos access. Client requests cannot initialize the pin,
+  promote an account or transfer the role. Username reuse never transfers it.
+- Twenty targeted PostgreSQL/Redis integration checks passed in 36.71 seconds,
+  with no failures, errors or skips. They cover zero/one/multiple-admin upgrades,
+  migration reruns, concurrent initialization, forbidden pin mutation/removal,
+  role revocation/re-enablement, rename/reuse, client role injection, and runtime
+  denial of an unpinned role even when a database trigger is deliberately
+  bypassed in the disposable test database. Existing Remote Photos consent,
+  revocation, expiry and identity checks also passed.
+- Maven packaging succeeded. The packaged V6 migration matches the source, and
+  the relay artifact still excludes client-core and libsignal dependencies.
+  Editor diagnostics and diff checks are clean. The release-test script parses
+  and rejects `-RemotePhotos` before any emulator, account or cloud side effects;
+  it no longer creates temporary admins on the shared hosted relay. The 0.4.2
+  live test described below is historical, not a repeatable shared-admin fixture.
+- Initial validation was blocked by host memory pressure and then a stopped
+  Docker engine. A bounded-memory retry with the local engine running completed.
+  One new test initially expected payload rejection before the existing
+  enrollment-scope rejection; it now checks both boundaries separately.
+- Evidence: `relay/target/surefire-reports/app.vanishr.relay.RelayIntegrationTest.txt`
+  and the corresponding XML report. The full JVM suite, Android build/device
+  suites, and hosted upgrade were not run for this relay-only change.
+- No hosted database or relay has been updated, and no APK has been published.
+  Before deployment, inspect the current admin count/identity; do not resolve an
+  ambiguous database by choosing or demoting an account automatically.
+  These checks do not protect against takeover of the pinned account or a
+  trusted host/database owner deliberately changing the protections.
 
 ## Owner lock continuation (unreleased)
 

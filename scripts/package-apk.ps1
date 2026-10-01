@@ -2,6 +2,7 @@
 param([switch]$InitializeSigningKey, [uri]$RelayOrigin, [switch]$WithInstrumentation, [string]$GoogleServicesFile)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
+& (Join-Path $PSScriptRoot 'prepare-brand-assets.ps1') -Verify
 $signingDirectory = Join-Path $root '.secrets/android-signing'
 $keystore = Join-Path $signingDirectory 'release.p12'
 $passwordFile = Join-Path $signingDirectory 'password.txt'

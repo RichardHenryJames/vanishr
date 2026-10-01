@@ -14,7 +14,7 @@ if ($version -cnotmatch '^\d+\.\d+\.\d+$' -or $feed.versionCode -le 0 -or $feed.
 $apk = Get-Item (Join-Path $Stage "vanishr-$version.apk")
 if ($apk.Length -ne $feed.size -or (Get-FileHash $apk.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne $feed.sha256) { throw 'Website release metadata does not match the APK.' }
 $assets = @('app-overview.jpg', 'app-overview-mobile.jpg', 'social.jpg', 'conversations.png', 'chat.png', 'profile.png', 'manrope.ttf', 'MANROPE-OFL.txt', 'lucide.min.js', 'LUCIDE-LICENSE.txt')
-$static = @('site.css', 'site.js', 'robots.txt', 'sitemap.xml', 'llms.txt') + @($assets | ForEach-Object { 'assets/' + $_ })
+$static = @('site.css', 'site.js', 'robots.txt', 'sitemap.xml', 'llms.txt', 'icon.png', 'favicon.ico', 'apple-touch-icon.png') + @($assets | ForEach-Object { 'assets/' + $_ })
 foreach ($relative in $static) {
     $target = Join-Path $Stage $relative
     $null = New-Item -ItemType Directory -Path (Split-Path $target -Parent) -Force

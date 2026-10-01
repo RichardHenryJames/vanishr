@@ -103,6 +103,7 @@ public final class MainActivity extends AppCompatActivity {
     private java.util.List<ChatEngine.Entry> shownEntries = java.util.List.of();
     private java.util.List<ChatEngine.Peer> shownPeers = java.util.List.of();
     private java.util.List<GroupChat.Conversation> shownGroups = java.util.List.of();
+    private long shownAdminDirectory;
     private ImageButton sendControl;
     private ImageButton attachmentControl;
     private TextView expiryLabel;
@@ -285,6 +286,11 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private View profileAvatar(UUID userId, String name, int size, int color) {
+        if (engine != null && engine.account() != null && !userId.equals(engine.account().userId()) && engine.onboarding().official(userId)) {
+            ImageView logo = design.logo(size); logo.setId(View.NO_ID);
+            logo.setLayoutParams(new LinearLayout.LayoutParams(dp(size), dp(size)));
+            return logo;
+        }
         FrameLayout frame = new FrameLayout(this); frame.setSaveEnabled(false);
         frame.setLayoutParams(new LinearLayout.LayoutParams(dp(size), dp(size)));
         TextView fallback = design.avatar(name, size, color);
@@ -332,6 +338,7 @@ public final class MainActivity extends AppCompatActivity {
     private void title(String name, boolean back) {
         LinearLayout heading = horizontal();
         if (back) heading.addView(icon(android.R.drawable.ic_media_previous, "Back", () -> { selectedPeer = null; render(); }));
+        if ("vanishr".equals(name)) heading.addView(design.logo(36));
         TextView title = design.text(name, 26, 800, INK);
         title.setGravity(Gravity.CENTER_VERTICAL);
         heading.addView(title, new LinearLayout.LayoutParams(0, dp(64), 1));
@@ -647,6 +654,7 @@ public final class MainActivity extends AppCompatActivity {
         LinearLayout toolbar = horizontal(); toolbar.setPadding(dp(17), 0, dp(17), 0);
         toolbar.setContentDescription("Chats");
         LinearLayout brand = horizontal();
+        brand.addView(design.logo(28));
         brand.addView(design.text("vanishr", 25, 800, INK));
         homeConnection = new View(this);
         LinearLayout.LayoutParams indicator = new LinearLayout.LayoutParams(dp(6), dp(6)); indicator.setMarginStart(dp(9));
@@ -679,7 +687,8 @@ public final class MainActivity extends AppCompatActivity {
         ScrollView scroll = new ScrollView(this);
         contactRows = vertical(); scroll.setFillViewport(true); scroll.addView(contactRows);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        shownPeers = engine.peers(); shownGroups=engine.groups().conversations(); renderContacts();
+        shownPeers = engine.peers(); shownGroups=engine.groups().conversations();
+        shownAdminDirectory = engine.onboarding().generation(); renderContacts();
         contactSearch.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence value, int start, int count, int after) { }
             @Override public void onTextChanged(CharSequence value, int start, int before, int count) {
@@ -838,13 +847,25 @@ public final class MainActivity extends AppCompatActivity {
             row.addView(profileAvatar(peer.userId(), peer.name(), 46, design.avatarColor(peer.userId())));
             LinearLayout identity = vertical(); identity.setPadding(dp(12), 0, dp(8), 0);
             TextView title=design.text(peer.name(),14,700,INK); title.setSingleLine(true); title.setEllipsize(android.text.TextUtils.TruncateAt.END); identity.addView(title);
+            if (engine.onboarding().official(peer.userId())) identity.addView(design.text("Official admin", 11, 500, MUTED));
             row.addView(identity, new LinearLayout.LayoutParams(0, -2, 1));
             long unread = engine.entries(peer.userId()).stream().filter(entry -> !entry.outgoing() && !entry.state().equals("READ")).count();
             row.addView(unreadBadge(peer.userId(),unread));
             row.addView(design.symbol(R.drawable.ic_chevron_right, 16, MUTED));
-            row.setOnClickListener(view -> { selectedPeer = peer.userId(); render(); });
+            row.setOnClickListener(view -> {
+                ChatEngine current = engine;
+                if (current.independentlyVerified(peer.userId())) { selectedPeer = peer.userId(); render(); }
+                else submit(() -> current.prepareConversation(peer), () -> { selectedPeer = peer.userId(); render(); });
+            });
             row.setOnLongClickListener(view -> { forgetDialog(peer); return true; });
             addChatRow(row);
+        }
+        if (engine.onboarding().admin()) {
+            ChatEngine current = engine;
+            if (current.onboarding().hasPrevious()) contactRows.addView(command("First new accounts", () ->
+                    submit(current.onboarding()::first, this::render)));
+            if (current.onboarding().hasNext()) contactRows.addView(command("More new accounts", () ->
+                    submit(current.onboarding()::next, this::render)));
         }
         if (contactRows.getChildCount() == 0) {
             LinearLayout empty = vertical(); empty.setGravity(Gravity.CENTER); empty.setPadding(dp(20), dp(64), dp(20), dp(32));
@@ -855,6 +876,11 @@ public final class MainActivity extends AppCompatActivity {
             empty.addView(message, new LinearLayout.LayoutParams(-1, -2));
             if (filter.isEmpty() && !unreadOnly) { empty.addView(design.spacer(20)); empty.addView(design.button("Add a contact", true, this::addContactDialog)); }
             contactRows.addView(empty, new LinearLayout.LayoutParams(-1, -2));
+        }
+        if (engine.onboarding().problem() != null) {
+            TextView warning = design.text(engine.onboarding().problem(), 12, 500, Ui.ERROR);
+            warning.setPadding(dp(18), dp(12), dp(18), dp(12));
+            contactRows.addView(warning, 0);
         }
     }
 
@@ -911,7 +937,9 @@ public final class MainActivity extends AppCompatActivity {
         LinearLayout composeArea=vertical(); composeArea.setBackgroundColor(Ui.SURFACE); composeArea.setPadding(dp(12),dp(7),dp(12),dp(12));
         LinearLayout settings = horizontal(); settings.setMinimumHeight(dp(38)); settings.setPadding(dp(5),0,dp(5),0);
         settings.addView(design.symbol(R.drawable.ic_shield_check, 14, GREEN));
-        TextView verified = design.text(group==null ? "Verified" : "Private group", 10, 500, MUTED); verified.setPadding(dp(5), 0, 0, 0);
+        String trust = group != null ? "Private group" : engine.independentlyVerified(peer.userId()) ? "Verified"
+                : engine.onboarding().official(peer.userId()) ? "Official admin" : "Account enrolled";
+        TextView verified = design.text(trust, 10, 500, MUTED); verified.setPadding(dp(5), 0, 0, 0);
         settings.addView(verified, new LinearLayout.LayoutParams(0, -2, 1));
         expiryLabel = design.text(expiryName(expiry), 10, 700, GREEN);
         android.graphics.drawable.Drawable clock=ContextCompat.getDrawable(this,R.drawable.ic_clock_3).mutate(); clock.setTint(GREEN); clock.setBounds(0,0,dp(13),dp(13));
@@ -1151,7 +1179,7 @@ public final class MainActivity extends AppCompatActivity {
                 if (request == null || request.id() == null || request.accepted() || !own.equals(request.owner()) || request.requester() == null
                         || request.expiresAt() <= System.currentTimeMillis() || request.expiresAt() > System.currentTimeMillis() + RemotePhotoSession.LIFETIME + 5000) continue;
                 ChatEngine.Peer peer = current.peers().stream().filter(value -> RemotePhotoSession.contact(value).equals(request.requester())).findFirst().orElse(null);
-                if (peer == null || !current.groupSignal().isVerified(peer.userId())) continue;
+                if (peer == null || !current.independentlyVerified(peer.userId())) continue;
                 ui.post(() -> {
                     promptedPhotos.entrySet().removeIf(entry -> entry.getValue() <= System.currentTimeMillis());
                     if (!resumed || busy || engine != current || generation != screenGeneration || photoChoice != null || PhotoSharingService.busy()
@@ -1396,7 +1424,7 @@ showDialog(approval);
         ChatEngine current=engine; GroupChat.Conversation group=current.groups().get(id);
         if (group==null || !current.groups().owner(group) || group.snapshot().closed()) return;
         int available=200-group.snapshot().members().size();
-        List<ChatEngine.Peer> candidates=current.peers().stream().filter(peer -> group.snapshot().members().stream().noneMatch(member -> member.userId().equals(peer.userId()))).toList();
+        List<ChatEngine.Peer> candidates=current.peers().stream().filter(peer -> current.independentlyVerified(peer.userId()) && group.snapshot().members().stream().noneMatch(member -> member.userId().equals(peer.userId()))).toList();
         if (available<=0) { problem("This group has reached its 200-member limit."); return; }
         if (candidates.isEmpty()) { problem("No more verified contacts to invite."); return; }
         String[] names=candidates.stream().map(peer -> peer.name()+" (@"+peer.username()+")").toArray(String[]::new);
@@ -2019,6 +2047,7 @@ showDialog(approval);
         catch (GeneralSecurityException | AndroidVault.PhoneLockedException failure) {
             ui.post(() -> { if (engine == current && generation == screenGeneration && !busy) { hideContent(); storageFailure(failure); } }); return;
         }
+        catch (AdminOnboarding.Failure failure) { current.onboarding().blocked(failure); current.unverifiedIncoming = true; }
         catch (Exception failure) { current.online = false; }
         ui.post(() -> {
             if (!resumed || engine != current || generation != screenGeneration || busy) return;
@@ -2029,7 +2058,9 @@ showDialog(approval);
                 if (connection != null) connection.setText(statusText());
                 java.util.List<ChatEngine.Peer> peers = current.peers();
                 java.util.List<GroupChat.Conversation> groups=current.groups().conversations();
-                if (!peers.equals(shownPeers) || !groups.equals(shownGroups)) { shownPeers = peers; shownGroups=groups; renderContacts(); }
+                if (!peers.equals(shownPeers) || !groups.equals(shownGroups) || shownAdminDirectory != current.onboarding().generation()) {
+                    shownPeers = peers; shownGroups=groups; shownAdminDirectory = current.onboarding().generation(); renderContacts();
+                }
                 for (var unread : unreadLabels.entrySet()) {
                     TextView badge = unread.getValue();
                     long count = current.entries(unread.getKey()).stream().filter(entry -> !entry.outgoing() && !entry.state().equals("READ")).count();

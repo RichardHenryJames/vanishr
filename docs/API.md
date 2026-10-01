@@ -47,6 +47,8 @@ independent of login attempts. No access bearer is required or sent on renewal.
 | `PATCH /account/username` | DEVICE owner; 5/min/account | `{handle}` -> `{userId,handle}` | Updates only authenticated account; database uniqueness; no device/key changes |
 | `GET /account/profile` | DEVICE owner | `{userId,handle,displayName}` | Display name is nullable until explicitly saved |
 | `GET /account/type` | DEVICE owner | `{userId,userType}` | Current `USER` or `ADMIN` metadata for the authenticated account only; no client write endpoint or extra permissions |
+| `GET /account/admin-contacts?after=UUID` | DEVICE owner | `{userId,admin,contacts,nextAfter}` | Official-admin introductions for this account only; at most 64 enrolled contacts per page |
+| `GET /account/admin-contacts/{peerId}` | DEVICE owner | Same page shape, at most one contact | Resolve one authorized introduction before establishing an automatic direct chat |
 | `PATCH /account/profile` | DEVICE owner; 10/min/account | `{displayName}` -> profile | Updates only authenticated account; 1-40 characters, not unique |
 | `GET /users/id/{userId}/profile` | DEVICE | `{userId,handle,displayName}` | Shared account metadata; private nicknames are never returned |
 | `POST /keys` | DEVICE owner | `{keys:[PublicBundle,...]}` -> 204 | 1-32 per request, at most 256 available; 24h public-key TTL; cleanup every minute |
@@ -77,13 +79,54 @@ enforced by a PostgreSQL check constraint. Existing accounts retain their UUIDs,
 handles, authentication mappings and device keys. Username changes update only
 `handle`, not `id` or `user_type`; former handles are not an identity history.
 
-`GET /account/type` reads the current database value for the authenticated enrolled
-account. It has no target account parameter, and returns no other account fields.
+Migration V6 permits at most one `ADMIN` and permanently pins the existing sole
+admin's UUID in the singleton `admin_identity` table. Multiple existing admins
+make migration fail transactionally; no account is chosen or demoted automatically.
+With no existing admin, the pin stays empty and nobody can acquire the role until
+a trusted database operator explicitly pins an inspected existing UUID and enables
+that account in one bounded transaction. Registration never initializes the pin.
+Once pinned, it cannot be changed, deleted or truncated through normal SQL.
+The pinned account cannot be deleted or have its UUID changed. An operator may
+revoke its role, but the pin remains and only that same account can be re-enabled.
+
+`GET /account/type` reads the current database role and permanent pin together for
+the authenticated enrolled account. An `ADMIN` row without a matching pin fails
+closed with 503 `admin_identity_unavailable`, including on privileged requests.
+It has no target account parameter, and returns no other account fields.
 No profile, registration, login or username payload can set a role. Contact lookup
-does not expose it. Assignment is a database-operator action using an inspected
-UUID plus its expected current username, not a username-based bootstrap migration.
+does not expose it. There is no promotion, replacement-admin or role-transfer API.
+Reusing the admin's old username does not confer any privilege.
 No permission bypass is enabled by this metadata alone. Remote Photos additionally
 requires the addressed owner's approval for each bounded session.
+
+## Official-admin introductions
+
+Migration V7 atomically links newly inserted accounts to the permanent admin pin;
+it does not backfill existing accounts or change account roles. Password and
+Google registrations use the same database trigger. Repeated Google sign-in
+does not create another link. Accounts without an enrolled device are not
+returned to the admin until enrollment completes.
+
+`admin` is `{userId,deviceId,identityKey}` for the current pinned admin.
+Each contact is `{userId,deviceId,identityKey,handle,displayName}`. Ordinary
+introduced users receive only that admin; the current admin receives only the
+new accounts linked to it. Query parameters cannot select another caller.
+The single-peer route returns an empty list for an unrelated account.
+Missing/revoked admin roles disable discovery without transferring the pin.
+Neither response contains email, passwords, tokens or private keys.
+
+Pages are ordered by immutable peer UUID. `nextAfter`, when present, is the last
+UUID in the current 64-entry page. Both routes share a 30-request/minute/device
+rate limit. Clients show further pages explicitly rather than creating an
+unbounded collection of local encryption sessions.
+
+These are authenticated discovery responses, not independent identity proofs.
+The signed official client additionally validates its compiled-in admin origin,
+account/device IDs and public fingerprint. The admin's trusted client validates
+its own pinned identity and treats new participants as relay-enrolled accounts.
+It never overwrites an established peer identity automatically. Automatic
+direct-chat trust does not satisfy independent-verification requirements for
+group, profile-photo, presence or Remote Photos features.
 
 ## Remote Photos
 
@@ -273,6 +316,19 @@ HTTPS port refuses actual cleartext at the TLS layer; 426 is defense in depth.
 ## Minimum durable schema
 
 `accounts(id UUID PK, handle VARCHAR(32) UNIQUE, password_hash VARCHAR(100), google_subject VARCHAR(255) UNIQUE, display_name VARCHAR(40), user_type VARCHAR(16) NOT NULL DEFAULT 'USER' CHECK (user_type IN ('USER','ADMIN')))`
+
+`admin_identity(singleton BOOLEAN PK DEFAULT TRUE CHECK (singleton), user_id UUID UNIQUE FK accounts(id))`
+
+`admin_introductions(user_id UUID PK FK accounts(id) ON DELETE CASCADE, admin_id UUID FK admin_identity(user_id), CHECK (user_id <> admin_id))`
+
+Introductions are durable registration/contact metadata, not expiring message
+payloads. The insert trigger never chooses a new admin, and existing account
+rows are not backfilled.
+
+The partial unique index on `accounts(user_type) WHERE user_type = 'ADMIN'`
+rejects multiple admins, including concurrent writes. Triggers require every
+admin role to match the permanent singleton pin and reject pin mutation/removal;
+the restrictive foreign key prevents deleting or changing the pinned UUID.
 
 `devices(id UUID PK, user_id UUID UNIQUE FK, identity_key VARCHAR(64), auth_version UUID, registered_at TIMESTAMPTZ)`
 

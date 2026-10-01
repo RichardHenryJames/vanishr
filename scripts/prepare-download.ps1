@@ -1,5 +1,5 @@
 #requires -Version 7.4
-param([switch]$PrepareNoticesOnly, [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.4.4')
+param([switch]$PrepareNoticesOnly, [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.4.5')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $tools = Join-Path $root '.tools'
@@ -33,6 +33,7 @@ if ($PrepareNoticesOnly) {
     Write-Output "Prepared notices for $($inventory.Count) runtime components. Rebuild the signed APK before packaging downloads."
     return
 }
+& (Join-Path $PSScriptRoot 'prepare-brand-assets.ps1') -Verify
 
 $apkFile = Join-Path $root 'android/app/build/outputs/apk/release/app-release.apk'
 $metadata = Get-Content (Join-Path $root 'android/app/build/outputs/apk/release/output-metadata.json') -Raw | ConvertFrom-Json
@@ -61,6 +62,7 @@ foreach ($directory in @($stage, $source)) {
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
 }
 $sourcePaths = @('LICENSE', 'NOTICE.md', 'README.md', 'pom.xml', '.gitignore', '.dockerignore',
+    'Vanishr Icon.png', 'scripts/prepare-brand-assets.ps1',
     'android/build.gradle', 'android/settings.gradle', 'android/gradle.properties', 'android/app/build.gradle', 'android/app/proguard-rules.pro',
     'android/app/src', 'client-core/pom.xml', 'client-core/build.gradle', 'client-core/src', 'relay/pom.xml', 'relay/src',
     'docs/API.md', 'docs/ARCHITECTURE.md', 'docs/ENCRYPTION.md', 'docs/THREAT-MODEL.md', 'docs/VERIFICATION.md', 'docs/GOOGLE-SETUP.md',
@@ -68,7 +70,8 @@ $sourcePaths = @('LICENSE', 'NOTICE.md', 'README.md', 'pom.xml', '.gitignore', '
     'scripts/build-android.ps1', 'scripts/new-local-config.ps1', 'scripts/package-apk.ps1', 'scripts/start-local.ps1', 'scripts/test-android.ps1',
     'scripts/test-release.ps1', 'scripts/prepare-ui-assets.ps1', 'scripts/verify.ps1', 'scripts/read-google-config.ps1', 'scripts/prepare-download.ps1',
     'scripts/render-website.ps1', 'scripts/prepare-website.ps1', 'scripts/prepare-site-assets.ps1',
-    'download/index.html', 'download/site.css', 'download/site.js', 'download/site-settings.json', 'download/vercel.json',
+    'download/index.html', 'download/icon.png', 'download/favicon.ico', 'download/apple-touch-icon.png',
+    'download/site.css', 'download/site.js', 'download/site-settings.json', 'download/vercel.json',
     'download/android', 'download/security', 'download/privacy', 'download/assets', 'download/robots.txt', 'download/sitemap.xml', 'download/llms.txt')
 foreach ($relative in $sourcePaths) {
     $destination = Join-Path $source $relative
@@ -116,17 +119,6 @@ $update = [ordered]@{
     size = $apk.Length
 }
 [System.IO.File]::WriteAllText((Join-Path $stage 'updates.json'), ($update | ConvertTo-Json), [System.Text.UTF8Encoding]::new($false))
-Add-Type -AssemblyName System.Drawing
-$bitmap = [System.Drawing.Bitmap]::new(152, 152)
-$drawing = [System.Drawing.Graphics]::FromImage($bitmap)
-$font = [System.Drawing.Font]::new('Georgia', 74, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
-$brush = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::White)
-try {
-    $drawing.Clear([System.Drawing.Color]::FromArgb(20, 100, 72))
-    $drawing.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
-    $drawing.DrawString('V', $font, $brush, 38, 29)
-    $bitmap.Save((Join-Path $stage 'icon.png'), [System.Drawing.Imaging.ImageFormat]::Png)
-} finally { $brush.Dispose(); $font.Dispose(); $drawing.Dispose(); $bitmap.Dispose() }
 $null = & (Join-Path $PSScriptRoot 'render-website.ps1') -Stage $stage
 $total = (Get-ChildItem $stage -Recurse -File | Measure-Object Length -Sum).Sum
 if ($total -ge 99000000) { throw 'Static bundle exceeds the safe Vercel Hobby upload size.' }

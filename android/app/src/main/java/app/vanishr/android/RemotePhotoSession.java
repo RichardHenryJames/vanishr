@@ -44,7 +44,7 @@ final class RemotePhotoSession implements AutoCloseable {
         final RelayApi api;
         final Session request;
         Prepared(ChatEngine engine, ChatEngine.Peer peer, Session request) throws Exception {
-            if (!engine.authenticated() || !engine.groupSignal().isVerified(peer.userId())
+            if (!engine.authenticated() || !engine.independentlyVerified(peer.userId())
                     || engine.peers().stream().noneMatch(saved -> contact(saved).equals(contact(peer))))
                 throw new SecurityException("Verify this contact before sharing photos");
             if (request == null && !administrator(engine)) throw new SecurityException("Only administrators can request photos");

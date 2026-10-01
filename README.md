@@ -7,8 +7,24 @@ messenger. Do not use it for real sensitive conversations yet.**
 
 ## Hosted Development Build
 
-Download the signed Android 0.4.2 APK, matching application/libsignal source and
+Download the signed Android 0.4.5 APK, matching application/libsignal source and
 license notices at **https://vanishr-download.vercel.app**.
+
+Release 0.4.5/code 26 adds the Vanishr logo (launcher and themed icon,
+notification icon, app headers, website favicon and social preview) and an
+official-admin chat. Accounts created after the relay update automatically get
+the permanent official admin, **Vanishr (@vanishr)**, in their chat list; the
+admin sees those new accounts in a paged list (64 per page). The signed app pins
+the official relay origin and the admin's account/device/public-identity
+fingerprint, so this one conversation needs no manual safety-number step, and an
+unexpected key change blocks it. This automatic trust is separate from independent
+verification: groups, private profile photos, presence and Remote Photos still
+require it. Existing accounts are not backfilled, and no email address is stored.
+The relay also allows exactly one admin, permanently pinned to the existing account.
+Evidence: 22 targeted relay integration tests, 20 targeted native Android tests
+on an isolated Android 12 emulator, unit tests and QA/release lint. The full
+JVM/Android suites, physical devices and the signed live workflow were not rerun.
+See [verification](docs/VERIFICATION.md#release-045).
 
 Release 0.4.2/code 23 adds admin-initiated Remote Photos after one owner approval.
 It browses Android-permitted photos in pages, transfers only requested originals,

@@ -65,6 +65,7 @@ final class ChatEngine implements AutoCloseable {
     private final GroupChat groups;
     private final ProfilePhotos photos;
     private final ContactPresence presence;
+    private final AdminOnboarding onboarding;
     private Account account;
     private RelayApi api;
     private SignalClient signal;
@@ -80,10 +81,15 @@ final class ChatEngine implements AutoCloseable {
     boolean unverifiedIncoming;
 
     ChatEngine(AndroidVault vault) throws Exception {
+        this(vault, AdminOnboarding.OFFICIAL);
+    }
+
+    ChatEngine(AndroidVault vault, AdminOnboarding.Pin adminPin) throws Exception {
         this.vault = vault;
         groups = new GroupChat(this,vault);
         photos = new ProfilePhotos(this,vault);
         presence = new ContactPresence(this);
+        onboarding = new AdminOnboarding(this, vault, adminPin);
         account = read("account", Account.class);
         if (account != null) {
             api = new RelayApi(account.origin(), account.accessToken());
@@ -106,6 +112,11 @@ final class ChatEngine implements AutoCloseable {
     GroupChat groups() { return groups; }
     ProfilePhotos photos() { return photos; }
     ContactPresence presence() { return presence; }
+    AdminOnboarding onboarding() { return onboarding; }
+    boolean independentlyVerified(UUID userId) {
+        return signal != null && signal.isVerified(userId) && vault.get("contact/" + userId) != null && !onboarding.automatic(userId);
+    }
+    void prepareConversation(Peer peer) throws Exception { onboarding.prepare(peer); }
     boolean realtimeReady() { return realtimeReady; }
     RelayApi groupApi() { return api; }
     SignalClient groupSignal() { return signal; }
@@ -140,7 +151,7 @@ final class ChatEngine implements AutoCloseable {
         return name;
     }
 
-    private static void validateProfile(Profile profile, UUID userId) {
+    static void validateProfile(Profile profile, UUID userId) {
         if (profile == null || !userId.equals(profile.userId()) || profile.handle() == null || !profile.handle().matches("[a-z0-9_]{3,32}"))
             throw new SecurityException("Profile does not match the account");
         if (profile.displayName() != null && !validName(profile.displayName(), false).equals(profile.displayName()))
@@ -201,7 +212,7 @@ final class ChatEngine implements AutoCloseable {
         if (System.currentTimeMillis() < nextProfileCheck) return;
         nextProfileCheck = System.currentTimeMillis() + 30_000;
         applyProfile(api.call("GET", "/account/profile", null, Profile.class));
-        List<Peer> contacts = peers();
+        List<Peer> contacts = savedPeers();
         if (contacts.isEmpty()) { profileCursor = 0; return; }
         int count = Math.min(10, contacts.size());
         for (int index = 0; index < count; index++) {
@@ -321,6 +332,15 @@ final class ChatEngine implements AutoCloseable {
     String safetyNumber() throws Exception { return safetyNumber(account.userId(), Base64.getEncoder().encodeToString(signal.publicIdentity())); }
 
     List<Peer> peers() {
+        Map<UUID, Peer> combined = new LinkedHashMap<>();
+        for (Peer peer : savedPeers()) combined.put(peer.userId(), peer);
+        for (Peer peer : onboarding.peers()) combined.putIfAbsent(peer.userId(), peer);
+        List<Peer> result = new ArrayList<>(combined.values());
+        result.sort(Comparator.comparing(Peer::name));
+        return result;
+    }
+
+    private List<Peer> savedPeers() {
         List<Peer> peers = new ArrayList<>();
         for (String name : vault.names("contact/")) peers.add(read(name, Peer.class));
         peers.sort(Comparator.comparing(Peer::name));
@@ -345,6 +365,7 @@ final class ChatEngine implements AutoCloseable {
         if (!current.userId().equals(independentlyVerified.userId()) || !current.deviceId().equals(independentlyVerified.deviceId())
                 || !current.identityKey().equals(independentlyVerified.identityKey())) throw new SecurityException("Contact identity changed; verify it again");
         vault.transaction(() -> {
+            onboarding.manuallyVerified(current);
             signal.verifyPeer(current.userId(), Base64.getDecoder().decode(current.identityKey()));
             write("contact/" + current.userId(), current);
             if (!privateName(current).isEmpty()) renameContact(current, privateName(current));
@@ -369,6 +390,7 @@ final class ChatEngine implements AutoCloseable {
             signal.forgetPeer(peer.userId());
             vault.remove("contact/" + peer.userId());
             vault.remove("contact-name/" + peer.userId());
+            onboarding.dismiss(peer.userId());
             return null;
         });
     }
@@ -402,9 +424,11 @@ final class ChatEngine implements AutoCloseable {
         long expiresAt = Math.addExact(createdAt, expiry.milliseconds);
         if (expiresAt <= System.currentTimeMillis()) throw new IllegalArgumentException("Message expired");
         purge();
+        onboarding.prepare(peer);
         if (vault.names("entry/").size() >= 100) throw new IllegalStateException("Local message capacity reached");
         try {
             Contact current = api.call("GET", "/users/id/" + peer.userId(), null, Contact.class);
+            onboarding.requireCurrent(peer.userId(), current);
             if (!current.deviceId().equals(peer.deviceId()) || !current.identityKey().equals(peer.identityKey()))
                 throw new SecurityException("Peer device changed; independent verification is required");
         } catch (IOException failure) {
@@ -576,7 +600,11 @@ final class ChatEngine implements AutoCloseable {
 
     private void receive(Incoming message) throws Exception {
         if (message.expiresAt() <= System.currentTimeMillis()) return;
-        if (!signal.isVerified(message.senderId()) || peers().stream().noneMatch(peer -> peer.userId().equals(message.senderId()) && peer.deviceId().equals(message.senderDeviceId()))) { unverifiedIncoming = true; return; }
+        if (!signal.isVerified(message.senderId()) || read("contact/" + message.senderId(), Peer.class) == null)
+            onboarding.acceptIncoming(message.senderId(), message.senderDeviceId());
+        onboarding.requireSaved(message.senderId());
+        Peer sender = read("contact/" + message.senderId(), Peer.class);
+        if (!signal.isVerified(message.senderId()) || sender == null || !sender.deviceId().equals(message.senderDeviceId())) { unverifiedIncoming = true; return; }
         if (vault.get("seen/" + message.id()) != null) return;
         if (vault.names("entry/").size() >= 100) return;
         byte[] imageCiphertext = message.mediaId() == null ? null : api.download(message.mediaId());
@@ -637,6 +665,7 @@ final class ChatEngine implements AutoCloseable {
             refreshProfiles();
             photos.sync();
             online = true;
+            onboarding.refresh();
         } catch (RelayApi.ApiFailure failure) {
             online = false;
             if (failure.status == 401) invalidateToken();

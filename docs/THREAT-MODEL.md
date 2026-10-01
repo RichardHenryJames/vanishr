@@ -25,14 +25,16 @@ static distribution may be uploaded, preserving the signed app and update feed.
 The endpoints, Android OS, libsignal native library, device random-number generator,
 app signing/distribution system, and the user's identity-verification channel must
 be trusted. TLS authenticates the relay; it does not authenticate a conversation peer.
-Users must verify peer identity fingerprints over an independent authenticated channel
-before either sending or decrypting messages. A changed identity blocks the conversation.
+Ordinary contacts require peer identity fingerprints verified over an independent
+authenticated channel before sending or decrypting messages. The explicitly
+approved official-admin onboarding exception is described below. A changed
+identity still blocks the conversation.
 
 Username lookup is discovery only. The user independently compares the displayed
 SHA-256 fingerprint of the canonical account UUID and public identity key, then
 confirms verification. The client re-fetches the username binding before pinning
 it and rejects changed account/device/key values. No pasted identity code or
-automatic trust-on-first-use is required or permitted.
+automatic trust-on-first-use is permitted for ordinary contacts.
 
 Optional Google sign-in authenticates the account, never the peer or encryption keys.
 It is disabled until a Web OAuth client ID and allowed Android client IDs are configured.
@@ -90,14 +92,75 @@ The PostgreSQL `accounts.user_type` column permits only `USER` or `ADMIN`, defau
 to `USER` for existing and new accounts, and is not accepted by any client write
 API. An enrolled account may read its own current type via `GET /account/type`;
 contact lookup/profile responses do not disclose it. Only an authenticated database
-operator may change a type, targeting a previously inspected UUID and expected
-current handle in a bounded transaction, never an automatic username rule.
-Renaming or reusing a former handle cannot transfer the role. `ADMIN` permits
+operator may manage the existing admin's role, never an automatic username rule.
+Migration V6 permanently pins the sole existing admin's immutable UUID and adds
+a unique partial index limiting `ADMIN` to one account. Multiple admins cause a
+transactional migration failure, not an arbitrary selection or silent demotion.
+With no existing admin, nobody is promoted; a trusted operator must explicitly
+pin an inspected account and enable it in a bounded transaction.
+
+Triggers reject a different account becoming admin and reject changing, deleting
+or truncating the singleton pin. A restrictive foreign key prevents changing or
+deleting the pinned account UUID. Revocation leaves the pin intact: no replacement
+account becomes eligible, and only the original account may be re-enabled.
+The server reads role and pin together and fails closed on a mismatched admin,
+even if a role-only database guard was bypassed. There is no client promotion,
+transfer or automatic admin-recovery endpoint. Live release tests must not create
+temporary admins on a shared relay.
+
+Renaming or reusing a former handle cannot transfer the role. These safeguards
+do not protect against takeover of the pinned account, host compromise, or a
+database owner deliberately altering the schema/pin; those remain trusted
+boundaries, not claims of being unhackable. `ADMIN` permits
 requesting Remote Photos, subject to the owner's explicit session approval below,
 but grants no other message access, expiry exceptions or encryption-key access.
 Future privileged features need explicit server-side
 authorization checked against the current role; client UI or a cached role is
 not an authorization boundary.
+
+## Automatic official-admin conversations
+
+For accounts created after migration V7, registration atomically records a durable
+relationship to the permanently pinned admin UUID. Existing accounts are not
+backfilled. New users get the official admin in their chat list; the admin gets
+a participant-scoped, paginated directory of new enrolled accounts. Registration
+does not promote anyone or create a message. Email addresses are not retained.
+The admin sees current shared names, usernames and public device identities,
+not other conversations or private contact nicknames. This is a human admin
+account, not an AI bot.
+
+The signed app pins the official relay origin, admin account/device UUIDs and
+SHA-256 public-identity fingerprint. The relay cannot replace that trust root.
+Only this explicit onboarding path avoids the manual verification prompt.
+The admin's client must also possess the pinned local identity before it can
+automatically establish these new conversations. On the admin side, the initial
+new-user binding trusts authenticated relay enrollment, not independent proof
+of a person's real-world identity. A compromised relay can lie about that first
+new-user binding or omit introductions; it cannot impersonate the pinned admin
+to the trusted client without the corresponding private key.
+
+The client pins an introduced user's identity when opening or receiving that
+conversation, then uses the existing official libsignal sessions and authenticated
+message envelopes. Arbitrary senders outside this relationship remain untrusted.
+Previously pinned keys/devices are never silently replaced. An admin identity
+change requires a reviewed signed-app pin update and explicit re-onboarding,
+not a username rule, remote configuration update or verification bypass.
+
+Automatic direct-chat trust is kept separate from independent verification.
+It does not automatically authorize group ownership/invitations, private profile
+photos, presence/last-seen sharing, Remote Photos, Android permissions or the
+owner's Auto-allow setting. Those existing independent-verification and consent
+checks remain in place. Users can remove an automatic contact; an encrypted
+local dismissal prevents refreshes or incoming packets from silently restoring it.
+
+Only one directory page of at most 64 contacts is cached in the owning account's
+encrypted vault. The admin can browse further pages using More new accounts;
+opened conversations remain saved normally. This avoids allocating encryption
+sessions for every registration. Directory metadata and dismissals are durable
+account/contact settings, not message payloads; they remain subject to the
+existing protected-vault capacity and account-isolation boundaries. The relay
+rechecks the current admin role for discovery, and pauses discovery when it is
+revoked without transferring the permanent pin.
 
 Private contact nicknames stay in the owner's encrypted local account partition
 and are never sent to the relay or the contact. A shared profile refresh may update

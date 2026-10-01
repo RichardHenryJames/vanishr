@@ -49,7 +49,7 @@ final class ContactPresence {
         if (!foreground || !engine.authenticated()) return null;
         List<ChatEngine.Peer> peers = new ArrayList<>(engine.peers());
         peers.sort(Comparator.comparing(peer -> !peer.userId().equals(conversation)));
-        List<ChatEngine.Contact> contacts = peers.stream().filter(peer -> engine.groupSignal().isVerified(peer.userId()))
+        List<ChatEngine.Contact> contacts = peers.stream().filter(peer -> engine.independentlyVerified(peer.userId()))
                 .limit(128).map(ContactPresence::identity).toList();
         long remaining = Math.max(0, Math.min(TYPING_LIFETIME, typingUntil - now));
         UUID typing = remaining > 0 && contacts.stream().anyMatch(peer -> peer.userId().equals(conversation)) ? conversation : null;
@@ -106,7 +106,7 @@ final class ContactPresence {
         Seen state = states.get(peer.userId());
         if (state == null || state.expiresAt() <= now || !state.peer().equals(identity(peer))) return "";
         ChatEngine.Peer saved = engine.peers().stream().filter(value -> value.userId().equals(peer.userId())).findFirst().orElse(null);
-        if (saved == null || !identity(saved).equals(state.peer()) || !engine.groupSignal().isVerified(peer.userId())) return "";
+        if (saved == null || !identity(saved).equals(state.peer()) || !engine.independentlyVerified(peer.userId())) return "";
         if (state.lastSeenAt() == null) return state.typingUntil() > now ? "Typing" : "Online";
         long age = now - state.lastSeenAt();
         if (age < 60_000) return "Last seen just now";

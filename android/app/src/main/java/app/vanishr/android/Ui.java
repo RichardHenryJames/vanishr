@@ -142,6 +142,19 @@ final class Ui {
         return image;
     }
 
+    ImageView logo(int size) {
+        ImageView image = new ImageView(context);
+        image.setId(R.id.brand_logo);
+        image.setImageResource(R.drawable.vanishr_logo);
+        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(dp(size), dp(size));
+        layout.setMarginEnd(dp(8));
+        image.setLayoutParams(layout);
+        image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        image.setSaveEnabled(false);
+        return image;
+    }
+
     TextView avatar(String name, int size, int color) {
         String trimmed = name.strip();
         String initials = trimmed.isEmpty() ? "?" : trimmed.substring(0, trimmed.offsetByCodePoints(0, 1)).toUpperCase(java.util.Locale.ROOT);

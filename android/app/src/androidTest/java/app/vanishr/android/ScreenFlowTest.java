@@ -128,11 +128,245 @@ public class ScreenFlowTest {
     private void write(String name, Object value) { vault.put(name, RelayApi.JSON.toJson(value).getBytes(StandardCharsets.UTF_8)); }
 
     private void signedInFixture() throws Exception {
+        signedInFixture(AdminOnboarding.OFFICIAL);
+    }
+
+    private void signedInFixture(AdminOnboarding.Pin pin) throws Exception {
         vault.transaction(() -> {
             write("account", new ChatEngine.Account("https://127.0.0.1:1/", "alex", userId, deviceId, "synthetic-fixture", System.currentTimeMillis() + 3_600_000, true));
             return null;
         });
-        engine = new ChatEngine(vault); engine.online = true;
+        engine = new ChatEngine(vault, pin); engine.online = true;
+    }
+
+    private AdminOnboarding.Pin adminPin(UUID id, UUID device, SignalClient signal) throws Exception {
+        return new AdminOnboarding.Pin("https://127.0.0.1:1/", id, device,
+            ChatEngine.safetyNumber(id, Base64.getEncoder().encodeToString(signal.publicIdentity())).replace(" ", "").toLowerCase(Locale.ROOT));
+    }
+
+    private AdminOnboarding.Introduction introduction(UUID id, UUID device, SignalClient signal, String handle) {
+        return new AdminOnboarding.Introduction(id, device, Base64.getEncoder().encodeToString(signal.publicIdentity()), handle, handle.equals("vanishr") ? "Vanishr" : null);
+    }
+
+    private void adminTransport(java.util.concurrent.atomic.AtomicReference<AdminOnboarding.Page> directory,
+                                List<ChatEngine.Incoming> incoming, List<ChatEngine.Send> outgoing, PublicBundle prekey) {
+        engine.groupApi().close();
+        setField(engine, "api", syntheticApi(chain -> {
+            var request = chain.request(); String path = request.url().encodedPath();
+            AdminOnboarding.Page page = directory.get();
+            if (path.equals("/account/admin-contacts")) return syntheticResponse(request, 200, page);
+            if (path.startsWith("/account/admin-contacts/")) {
+                UUID id = UUID.fromString(path.substring("/account/admin-contacts/".length()));
+                return syntheticResponse(request, 200, new AdminOnboarding.Page(page.userId(), page.admin(),
+                    page.contacts().stream().filter(value -> id.equals(value.userId())).toList(), null));
+            }
+            for (AdminOnboarding.Introduction contact : page.contacts()) {
+                if (path.equals("/users/id/" + contact.userId()) || path.equals("/users/" + contact.handle()))
+                    return syntheticResponse(request, 200, RemotePhotoSession.contact(contact.peer()));
+                if (path.equals("/users/id/" + contact.userId() + "/profile"))
+                    return syntheticResponse(request, 200, new ChatEngine.Profile(contact.userId(), contact.handle(), contact.displayName()));
+                if (path.equals("/keys/" + contact.userId() + "/claim")) {
+                    if (prekey == null) throw new AssertionError("Automatic contacts must not acquire keys for implicit sharing");
+                    return syntheticResponse(request, 200, prekey);
+                }
+            }
+            if (path.equals("/account/profile")) return syntheticResponse(request, 200, new ChatEngine.Profile(userId, "alex", null));
+            if (path.equals("/account/type")) return syntheticResponse(request, 200, new RemotePhotoSession.AccountType(userId, engine.onboarding().admin() ? "ADMIN" : "USER"));
+            if (path.equals("/messages/pending")) {
+                List<ChatEngine.Incoming> batch = new ArrayList<>(incoming); incoming.clear();
+                return syntheticResponse(request, 200, batch);
+            }
+            if (path.equals("/messages") && request.method().equals("POST")) {
+                okio.Buffer body = new okio.Buffer(); request.body().writeTo(body);
+                ChatEngine.Send sent = RelayApi.JSON.fromJson(body.readUtf8(), ChatEngine.Send.class); outgoing.add(sent);
+                return syntheticResponse(request, 200, new ChatEngine.Status(sent.id(), "QUEUED", sent.expiresAt()));
+            }
+            if (path.equals("/messages/status")) return syntheticResponse(request, 200,
+                outgoing.stream().map(sent -> new ChatEngine.Status(sent.id(), "QUEUED", sent.expiresAt())).toList());
+            if (path.matches("/messages/[0-9a-f-]+/(delivered|read)")) return syntheticResponse(request, 200, null);
+            if (path.equals("/keys")) return syntheticResponse(request, 200, new ChatEngine.KeyCount(16));
+            if (Set.of("/groups", "/profile/packets", "/remote-photos", "/presence").contains(path)) return syntheticResponse(request, 200, List.of());
+            if (path.equals("/events")) return syntheticResponse(request, 503, Map.of("error", "fixture_offline"));
+            throw new AssertionError("Unexpected admin-onboarding fixture request");
+        }));
+    }
+
+    @Test public void adminOnboardingAddsOfficialAdminWithoutManualVerificationOrSharingPermissions() throws Exception {
+        SignalClient admin = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(adminPin(peerId, peerDevice, admin));
+        var introduced = introduction(peerId, peerDevice, admin, "vanishr");
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(
+            userId, RemotePhotoSession.contact(introduced.peer()), List.of(introduced), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        engine.onboarding().refresh();
+        assertEquals(List.of(introduced.peer()), engine.peers());
+        assertTrue(engine.groupSignal().isVerified(peerId));
+        assertFalse(engine.independentlyVerified(peerId));
+        engine.prepareConversation(introduced.peer());
+        engine.presence().foreground(true);
+        assertTrue(engine.presence().update(android.os.SystemClock.elapsedRealtime()).contacts().isEmpty());
+        engine.photos().sync();
+        assertTrue(vault.names("profile-photo-request/").isEmpty());
+        assertThrows(SecurityException.class, () -> new RemotePhotoSession.Prepared(engine, introduced.peer(), null));
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            snapshot(scenario, "80-official-admin-in-chats");
+            scenario.onActivity(activity -> {
+                assertNotNull(text(root(activity), "Official admin"));
+                setField(activity, "selectedPeer", peerId); invoke(activity, "render");
+                assertNull(dialog(activity));
+                assertNotNull(text(root(activity), "Official admin"));
+                assertNotNull(readField(activity, "composer"));
+            });
+            snapshot(scenario, "81-official-admin-conversation");
+        }
+    }
+
+    @Test public void adminOnboardingRejectsUnpinnedChangedAndUnrelatedIdentitiesAtomically() throws Exception {
+        SignalClient admin = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(adminPin(peerId, peerDevice, admin));
+        var introduced = introduction(peerId, peerDevice, admin, "vanishr");
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(
+            userId, RemotePhotoSession.contact(introduced.peer()), List.of(introduced), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        var unrelated = introduction(UUID.randomUUID(), UUID.randomUUID(), admin, "unrelated");
+        directory.set(new AdminOnboarding.Page(userId, RemotePhotoSession.contact(introduced.peer()), List.of(unrelated), null));
+        assertThrows(SecurityException.class, () -> engine.onboarding().refresh());
+        assertTrue(engine.peers().isEmpty()); assertFalse(engine.groupSignal().isVerified(peerId));
+        directory.set(new AdminOnboarding.Page(UUID.randomUUID(), RemotePhotoSession.contact(introduced.peer()), List.of(introduced), null));
+        assertThrows(SecurityException.class, () -> engine.onboarding().first());
+        directory.set(new AdminOnboarding.Page(userId, RemotePhotoSession.contact(introduced.peer()), List.of(introduced), null));
+        engine.onboarding().first();
+        SignalClient replacement = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        var changed = introduction(peerId, peerDevice, replacement, "vanishr");
+        directory.set(new AdminOnboarding.Page(userId, RemotePhotoSession.contact(changed.peer()), List.of(changed), null));
+        assertThrows(SecurityException.class, () -> engine.onboarding().first());
+        assertThrows(SecurityException.class, () -> engine.addPeer(changed.peer()));
+        assertEquals(introduced.peer(), engine.peers().get(0));
+        assertTrue(engine.onboarding().automatic(peerId));
+        assertThrows(SecurityException.class, () -> engine.groupSignal().verifyPeer(peerId, replacement.publicIdentity()));
+    }
+
+    @Test public void adminOnboardingRemovalSurvivesRefreshAndExplicitVerificationRetainsItsSeparateMeaning() throws Exception {
+        SignalClient admin = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(adminPin(peerId, peerDevice, admin));
+        var introduced = introduction(peerId, peerDevice, admin, "vanishr");
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(
+            userId, RemotePhotoSession.contact(introduced.peer()), List.of(introduced), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        engine.onboarding().refresh();
+        engine.forget(introduced.peer());
+        engine.onboarding().first();
+        assertTrue(engine.peers().isEmpty());
+        assertFalse(engine.onboarding().acceptIncoming(peerId, peerDevice));
+        assertFalse(engine.groupSignal().isVerified(peerId));
+        engine.addPeer(introduced.peer());
+        assertTrue(engine.independentlyVerified(peerId));
+        engine.onboarding().first();
+        assertTrue(engine.independentlyVerified(peerId));
+        assertEquals(1, engine.peers().size());
+    }
+
+    @Test public void adminOnboardingDirectoryIsPagedAndNewAccountsArePinnedOnlyWhenUsed() throws Exception {
+        SignalClient own = new SignalClient(userId, vault);
+        signedInFixture(adminPin(userId, deviceId, own));
+        ChatEngine.Contact official = new ChatEngine.Contact(userId, deviceId, Base64.getEncoder().encodeToString(own.publicIdentity()));
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        List<AdminOnboarding.Introduction> contacts = new ArrayList<>();
+        for (int index = 1; index <= 65; index++) contacts.add(introduction(new UUID(0, index), UUID.randomUUID(), remote, "new_account_" + index));
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId, official, contacts.subList(0, 64), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        engine.onboarding().refresh();
+        assertEquals(64, engine.peers().size()); assertFalse(engine.onboarding().hasNext());
+        long generation = engine.onboarding().generation();
+        List<ChatEngine.Peer> firstPage = engine.peers();
+        directory.set(new AdminOnboarding.Page(userId, official, contacts.subList(0, 64), contacts.get(63).userId()));
+        engine.onboarding().first();
+        assertEquals(firstPage, engine.peers());
+        assertTrue(engine.onboarding().generation() > generation);
+        assertTrue(engine.onboarding().hasNext());
+        assertTrue(vault.names("contact/").isEmpty()); assertTrue(vault.names("peer/").isEmpty());
+        ChatEngine.Peer chosen = contacts.get(0).peer();
+        engine.prepareConversation(chosen);
+        assertEquals(1, vault.names("contact/").size());
+        assertTrue(engine.groupSignal().isVerified(chosen.userId())); assertFalse(engine.independentlyVerified(chosen.userId()));
+        directory.set(new AdminOnboarding.Page(userId, official, List.of(contacts.get(64)), null));
+        engine.onboarding().next();
+        assertEquals(2, engine.peers().size()); assertFalse(engine.onboarding().hasNext()); assertTrue(engine.onboarding().hasPrevious());
+        assertTrue(engine.peers().contains(chosen));
+        assertTrue(engine.peers().contains(contacts.get(64).peer()));
+        directory.set(new AdminOnboarding.Page(userId, official, List.of(), null));
+        assertFalse(engine.onboarding().acceptIncoming(UUID.randomUUID(), UUID.randomUUID()));
+    }
+
+    @Test public void adminOnboardingRejectsAnAdminWithoutThePinnedPrivateIdentity() throws Exception {
+        SignalClient expected = new SignalClient(userId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(adminPin(userId, deviceId, expected));
+        var official = new ChatEngine.Contact(userId, deviceId, Base64.getEncoder().encodeToString(expected.publicIdentity()));
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId, official, List.of(), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        assertThrows(SecurityException.class, () -> engine.onboarding().refresh());
+        assertTrue(engine.peers().isEmpty());
+    }
+
+    @Test public void adminOnboardingAcceptsAnEnrolledFirstMessageButNeverReplacesItsPinnedIdentity() throws Exception {
+        SignalClient own = new SignalClient(userId, vault);
+        signedInFixture(adminPin(userId, deviceId, own));
+        var official = new ChatEngine.Contact(userId, deviceId, Base64.getEncoder().encodeToString(own.publicIdentity()));
+        SignalClient newcomer = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        var introduced = introduction(peerId, peerDevice, newcomer, "newcomer");
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId, official, List.of(introduced), null));
+        List<ChatEngine.Incoming> incoming = new ArrayList<>();
+        adminTransport(directory, incoming, new ArrayList<>(), null);
+        newcomer.verifyPeer(userId, own.publicIdentity());
+        newcomer.establish(userId, engine.groupSignal().generatePreKey(Instant.now()), Instant.now());
+        UUID id = UUID.randomUUID(); long now = System.currentTimeMillis(), deadline = now + 120_000;
+        ChatEnvelope envelope = new ChatEnvelope(1, id, peerId, peerDevice, userId, deviceId,
+            now, deadline, ChatEnvelope.Expiry.HOUR_1, "new-account-fixture", null);
+        byte[] encoded = RelayApi.JSON.toJson(envelope).getBytes(StandardCharsets.UTF_8);
+        SignalClient.Packet packet;
+        try { packet = newcomer.encrypt(userId, encoded, Instant.now()); }
+        finally { Arrays.fill(encoded, (byte) 0); }
+        incoming.add(new ChatEngine.Incoming(id, peerId, peerDevice, userId, deviceId,
+            ChatEnvelope.Expiry.HOUR_1, now, deadline, packet.type(), packet.ciphertext(), null));
+        engine.groupSignal().verifyPeer(peerId, newcomer.publicIdentity());
+        assertNull("A group-channel identity alone is not a saved direct contact", vault.get("contact/" + peerId));
+        engine.sync();
+        assertTrue(engine.entries(peerId).stream().anyMatch(entry -> entry.id().equals(id)));
+        assertTrue(engine.onboarding().automatic(peerId)); assertFalse(engine.independentlyVerified(peerId));
+        SignalClient changed = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        directory.set(new AdminOnboarding.Page(userId, official, List.of(introduction(peerId, peerDevice, changed, "newcomer")), null));
+        assertThrows(SecurityException.class, () -> engine.onboarding().acceptIncoming(peerId, peerDevice));
+        assertEquals(introduced.peer(), engine.peers().get(0));
+    }
+
+    @Test public void adminOnboardingDirectMessagesUseOfficialSignalWithoutGrantingOtherSendersTrust() throws Exception {
+        SignalClient admin = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(adminPin(peerId, peerDevice, admin));
+        var introduced = introduction(peerId, peerDevice, admin, "vanishr");
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(
+            userId, RemotePhotoSession.contact(introduced.peer()), List.of(introduced), null));
+        List<ChatEngine.Incoming> incoming = new ArrayList<>(); List<ChatEngine.Send> outgoing = new ArrayList<>();
+        adminTransport(directory, incoming, outgoing, admin.generatePreKey(Instant.now()));
+        engine.onboarding().refresh();
+        engine.send(introduced.peer(), "admin-onboarding-fixture", null, ChatEnvelope.Expiry.HOUR_1);
+        assertEquals(1, outgoing.size());
+        admin.verifyPeer(userId, engine.groupSignal().publicIdentity());
+        ChatEngine.Send sent = outgoing.get(0);
+        byte[] plaintext = admin.decrypt(userId, new SignalClient.Packet(sent.type(), sent.ciphertext()));
+        try { assertEquals("admin-onboarding-fixture", RelayApi.JSON.fromJson(new String(plaintext, StandardCharsets.UTF_8), ChatEnvelope.class).text()); }
+        finally { Arrays.fill(plaintext, (byte) 0); }
+        UUID id = UUID.randomUUID(); long now = System.currentTimeMillis(), deadline = now + 120_000;
+        ChatEnvelope reply = new ChatEnvelope(1, id, peerId, peerDevice, userId, deviceId, now, deadline, ChatEnvelope.Expiry.HOUR_1, "admin-reply", null);
+        SignalClient.Packet packet = admin.encrypt(userId, RelayApi.JSON.toJson(reply).getBytes(StandardCharsets.UTF_8), Instant.now());
+        incoming.add(new ChatEngine.Incoming(id, peerId, peerDevice, userId, deviceId, ChatEnvelope.Expiry.HOUR_1, now, deadline, packet.type(), packet.ciphertext(), null));
+        UUID stranger = UUID.randomUUID();
+        incoming.add(new ChatEngine.Incoming(UUID.randomUUID(), stranger, UUID.randomUUID(), userId, deviceId, ChatEnvelope.Expiry.HOUR_1, now, deadline, 2, new byte[32], null));
+        engine.sync();
+        assertTrue(engine.entries(peerId).stream().anyMatch(entry -> id.equals(entry.id()) && !entry.outgoing()));
+        assertFalse(engine.groupSignal().isVerified(stranger));
+        assertTrue(engine.unverifiedIncoming);
+        assertFalse(engine.independentlyVerified(peerId));
     }
 
     private void conversationsFixture() throws Exception {
@@ -262,6 +496,39 @@ public class ScreenFlowTest {
         });
     }
 
+    private void assertBrandLogo(MainActivity activity) {
+        ImageView logo = activity.findViewById(R.id.brand_logo);
+        assertNotNull("The app header must show the shared logo", logo);
+        assertNotNull(logo.getDrawable());
+        assertNull("The supplied logo must retain its colors", logo.getColorFilter());
+        assertEquals(View.IMPORTANT_FOR_ACCESSIBILITY_NO, logo.getImportantForAccessibility());
+    }
+
+    @Test public void launcherAndNotificationBrandingUseTheSharedLogo() {
+        assertEquals(R.mipmap.ic_launcher, context.getApplicationInfo().icon);
+        var drawable = context.getDrawable(R.mipmap.ic_launcher);
+        assertTrue(drawable instanceof android.graphics.drawable.AdaptiveIconDrawable);
+        var launcher = (android.graphics.drawable.AdaptiveIconDrawable) drawable;
+        assertNotNull(launcher.getForeground()); assertNotNull(launcher.getBackground());
+        if (Build.VERSION.SDK_INT >= 33) assertNotNull(launcher.getMonochrome());
+        Bitmap notificationIcon = BitmapFactory.decodeResource(context.getResources(), R.drawable.ic_stat_vanishr);
+        try {
+            assertEquals(0, Color.alpha(notificationIcon.getPixel(0, 0)));
+            boolean visible = false;
+            for (int y = 0; y < notificationIcon.getHeight(); y++) for (int x = 0; x < notificationIcon.getWidth(); x++) {
+                int pixel = notificationIcon.getPixel(x, y);
+                if (Color.alpha(pixel) == 0) continue;
+                visible = true;
+                assertEquals(255, Color.red(pixel)); assertEquals(255, Color.green(pixel)); assertEquals(255, Color.blue(pixel));
+            }
+            assertTrue("The notification logo cannot be empty", visible);
+        } finally { notificationIcon.recycle(); }
+        android.app.Notification notification = PushService.genericNotification(context);
+        assertEquals(R.drawable.ic_stat_vanishr, notification.getSmallIcon().getResId());
+        assertEquals(android.app.Notification.VISIBILITY_PRIVATE, notification.visibility);
+        assertTrue(notification.contentIntent.isImmutable());
+    }
+
     @Test public void compactClassicHomeUsesOneToolbarAnd116DpBeforeTheList() throws Exception {
         signedInFixture(); conversationsFixture();
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
@@ -269,6 +536,7 @@ public class ScreenFlowTest {
             InstrumentationRegistry.getInstrumentation().waitForIdleSync();
             snapshot(scenario, "50-compact-classic-home");
             scenario.onActivity(activity -> {
+                assertBrandLogo(activity);
                 View root = root(activity); View rows = (View) readField(activity, "contactRows");
                 int[] origin = new int[2]; int[] list = new int[2]; root.getLocationOnScreen(origin); rows.getLocationOnScreen(list);
                 float density = context.getResources().getDisplayMetrics().density;
@@ -647,6 +915,7 @@ public class ScreenFlowTest {
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             scenario.onActivity(this::inject);
             scenario.onActivity(activity -> {
+                assertBrandLogo(activity);
                 assertFalse(descendants(root(activity)).stream().anyMatch(view -> view instanceof TextView label
                     && ("Connection settings".contentEquals(label.getText()) || android.text.TextUtils.equals("Relay address", label.getHint()))));
                 assertFalse(descendants(root(activity)).stream().anyMatch(view -> view instanceof TextView label && "Replace previous device".contentEquals(label.getText())));
@@ -1512,6 +1781,7 @@ public class ScreenFlowTest {
             manager.createNotificationChannel(new android.app.NotificationChannel("messages", "Messages", android.app.NotificationManager.IMPORTANCE_DEFAULT));
             instrumentation.runOnMainSync(() -> monitor.addLifecycleCallback(injection));
             android.app.Notification notification = PushService.genericNotification(context, "a".repeat(43));
+            assertEquals(R.drawable.ic_stat_vanishr, notification.getSmallIcon().getResId());
             assertTrue(notification.contentIntent.isImmutable());
             manager.notify("vanishr-qa-tap", 900, notification);
             assertTrue(device.openNotification());
@@ -2067,6 +2337,8 @@ public class ScreenFlowTest {
             });
             snapshot(scenario,"42-group-invitation");
             vault.transaction(() -> { write("contact/"+peerId,new ChatEngine.Peer(peerId,peerDevice,key,"Owner","owner",null)); write("group-invitation/"+id,new GroupChat.Invitation("Private group",System.currentTimeMillis()+86_400_000)); return null; });
+            assertFalse("Contact metadata alone must not verify a group owner", engine.groups().ownerVerified(engine.groups().get(id)));
+            engine.groupSignal().verifyPeer(peerId, Base64.getDecoder().decode(key));
             scenario.onActivity(activity -> {
                 dialog(activity).dismiss(); invoke(activity,"groupInvitationDialog",new Class<?>[]{GroupChat.Conversation.class},engine.groups().get(id));
             });
@@ -2683,6 +2955,8 @@ public class ScreenFlowTest {
             assertTrue(notification.actions[0].actionIntent.isImmutable()); assertEquals("End access", notification.actions[0].title.toString());
             assertEquals(notification.actions[0].actionIntent, notification.deleteIntent);
             assertNotNull(notification.publicVersion);
+            assertEquals(R.drawable.ic_stat_vanishr, notification.getSmallIcon().getResId());
+            assertEquals(R.drawable.ic_stat_vanishr, notification.publicVersion.getSmallIcon().getResId());
             assertEquals("Vanishr is active", notification.publicVersion.extras.getString(android.app.Notification.EXTRA_TITLE));
             assertNull("Lock-screen notification must not disclose the contact", notification.publicVersion.extras.getString(android.app.Notification.EXTRA_TEXT));
             assertEquals(notification.actions[0].actionIntent, notification.publicVersion.actions[0].actionIntent);

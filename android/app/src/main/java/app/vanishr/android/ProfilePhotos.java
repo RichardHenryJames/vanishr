@@ -49,7 +49,7 @@ final class ProfilePhotos {
         return engine.peers().stream().filter(value -> value.userId().equals(userId)).findFirst().orElse(null);
     }
     private boolean matches(ChatEngine.Peer peer, UUID device, String identity) {
-        return peer != null && peer.deviceId().equals(device) && peer.identityKey().equals(identity) && signal().isVerified(peer.userId());
+        return peer != null && peer.deviceId().equals(device) && peer.identityKey().equals(identity) && engine.independentlyVerified(peer.userId());
     }
     long generation() { return generation; }
     byte[] own() {
@@ -156,7 +156,7 @@ final class ProfilePhotos {
                 || packet.expiresAt() > now + LIFETIME || packet.ciphertext() == null || packet.ciphertext().length > 65_536)
             throw new SecurityException("Invalid profile packet");
         ChatEngine.Peer sender = peer(packet.senderId());
-        if (packet.expiresAt() <= now || sender == null || !sender.deviceId().equals(packet.senderDeviceId()) || !signal().isVerified(sender.userId())) {
+        if (packet.expiresAt() <= now || sender == null || !sender.deviceId().equals(packet.senderDeviceId()) || !engine.independentlyVerified(sender.userId())) {
             acknowledge(packet.id()); return;
         }
         if (vault.get("profile-photo-seen/" + packet.id()) != null) { acknowledge(packet.id()); return; }
@@ -237,13 +237,13 @@ final class ProfilePhotos {
         if (packets == null || packets.length > 16) throw new SecurityException("Invalid profile inbox");
         for (Packet packet : packets) receive(packet);
         flush();
-        List<ChatEngine.Peer> peers = engine.peers();
+        List<ChatEngine.Peer> peers = engine.peers().stream().filter(peer -> engine.independentlyVerified(peer.userId())).toList();
         if (!peers.isEmpty()) {
             Own own = read("profile-photo", Own.class);
             try {
                 for (int index = 0; index < Math.min(2, peers.size()); index++) {
                     ChatEngine.Peer peer = peers.get((cursor + index) % peers.size());
-                    if (!signal().isVerified(peer.userId())) continue;
+                    if (!engine.independentlyVerified(peer.userId())) continue;
                     try {
                         Request request = read("profile-photo-request/" + peer.userId(), Request.class);
                         Grant grant = read("profile-photo-grant/" + peer.userId(), Grant.class);

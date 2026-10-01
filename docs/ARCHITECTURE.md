@@ -70,11 +70,37 @@ release files and no user database.
 `accounts.id` is immutable; changing `handle` preserves the ID. Previous handles
 are not retained as rename history and can be reused by another account. Roles
 are attached to the UUID: migration V5 defaults all accounts to `USER`, permits
-only `USER`/`ADMIN`, and does not automatically promote any username. Only the
-database operator can assign a role; the new authenticated `/account/type` read
-is self-only. The role permits initiating Remote Photos with separate owner
+only `USER`/`ADMIN`, and does not automatically promote any username. Migration V6
+adds a partial unique index allowing at most one admin and an immutable singleton
+`admin_identity` pin for the existing admin UUID. An ambiguous multi-admin upgrade
+fails rather than selecting an owner. Empty installations require an explicit
+database-operator pin; account creation never grants admin access.
+
+Only the pinned account can hold the role. Revocation does not release or transfer
+the pin, and deleting/changing that UUID or replacing/removing the pin is rejected.
+The authenticated `/account/type` read is self-only and validates the role against
+the pin in one query; Remote Photos uses that same fail-closed authorization.
+There is no client role-write, admin-transfer or automatic recovery flow.
+Database owners who can alter/drop constraints remain a trusted boundary.
+The role permits initiating Remote Photos with separate owner
 approval; it grants no group-owner authority, access to other chat content or
 encryption exception. Existing Android releases are unchanged.
+
+Migration V7 adds owner-scoped admin introductions for new registrations only.
+Both participants discover the same relationship, but clients do not assign roles.
+The signed Android app pins the official service origin, admin account/device
+and public fingerprint. Its default admin conversation needs no manual prompt;
+the admin side initially trusts relay enrollment for the new account's binding.
+Existing or changed peer identities are never silently replaced.
+
+The admin directory is displayed in pages of 64. Only an opened/incoming
+conversation allocates peer trust and Signal state on the admin device; the
+current page is cached in the account's encrypted vault. Contact removal leaves
+a local dismissal so refreshes cannot silently re-add it. Automatically pinned
+direct chats are distinct from independently verified contacts: private profile
+photos, presence, groups and owner-approved Remote Photos retain their original
+verification requirements. No email directory, AI service or plaintext-message
+access is added.
 
 Encrypted queued messages/media and bounded session/presence records are held
 in nonpersistent Redis, not in the account table. Private keys and retained chat

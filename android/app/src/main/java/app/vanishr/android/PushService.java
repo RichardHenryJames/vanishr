@@ -67,7 +67,7 @@ public final class PushService extends FirebaseMessagingService {
 
     static Notification genericNotification(Context context, String reference) {
         PendingIntent intent = PendingIntent.getActivity(context, 0, notificationIntent(context, reference), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        return new Notification.Builder(context, "messages").setSmallIcon(R.drawable.ic_lock_keyhole)
+        return new Notification.Builder(context, "messages").setSmallIcon(R.drawable.ic_stat_vanishr)
                 .setContentTitle("Vanishr").setContentText("New message").setVisibility(Notification.VISIBILITY_PRIVATE)
             .setTimeoutAfter(60_000).setOnlyAlertOnce(true).setContentIntent(intent).setAutoCancel(true).build();
     }

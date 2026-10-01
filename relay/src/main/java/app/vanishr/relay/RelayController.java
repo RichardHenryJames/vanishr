@@ -101,6 +101,18 @@ public class RelayController {
         return accounts.accountType(actor.userId());
     }
 
+    @GetMapping("/account/admin-contacts") public AccountDirectory.Introductions adminContacts(
+            @AuthenticationPrincipal Actor actor, @RequestParam(required = false) UUID after) {
+        rates.require("admin-contacts:" + actor.deviceId(), 30, 60);
+        return accounts.introductions(actor.userId(), after, null);
+    }
+
+    @GetMapping("/account/admin-contacts/{peerId}") public AccountDirectory.Introductions adminContact(
+            @AuthenticationPrincipal Actor actor, @PathVariable UUID peerId) {
+        rates.require("admin-contacts:" + actor.deviceId(), 30, 60);
+        return accounts.introductions(actor.userId(), null, peerId);
+    }
+
     @PatchMapping("/account/profile") public AccountDirectory.Profile updateProfile(@AuthenticationPrincipal Actor actor,
                                                                                   @Valid @RequestBody AccountDirectory.ProfileChange change) {
         rates.require("profile:" + actor.userId(), 10, 60);

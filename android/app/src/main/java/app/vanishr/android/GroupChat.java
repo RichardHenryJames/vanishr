@@ -125,7 +125,7 @@ final class GroupChat {
         List<GroupRoster.Member> allowed=new ArrayList<>(Arrays.asList(read("group-allowed/"+id,GroupRoster.Member[].class)));
         List<ChatEngine.Contact> contacts=new ArrayList<>();
         for (ChatEngine.Peer peer : peers) {
-            if (!engine.peers().contains(peer) || !signal().isVerified(peer.userId())) throw new SecurityException("Verify the invited contact first");
+            if (!engine.peers().contains(peer) || !engine.independentlyVerified(peer.userId())) throw new SecurityException("Verify the invited contact first");
             contacts.add(new ChatEngine.Contact(peer.userId(),peer.deviceId(),peer.identityKey()));
             allowed.removeIf(member -> member.userId().equals(peer.userId())); allowed.add(new GroupRoster.Member(peer.userId(),peer.deviceId(),peer.identityKey()));
         }
@@ -136,7 +136,7 @@ final class GroupChat {
 
     private ChatEngine.Peer verifiedOwner(Snapshot group) {
         Member owner=group.member(group.ownerId());
-        return engine.peers().stream().filter(peer -> peer.userId().equals(owner.userId()) && peer.deviceId().equals(owner.deviceId()) && peer.identityKey().equals(owner.identityKey()))
+        return engine.peers().stream().filter(peer -> engine.independentlyVerified(peer.userId()) && peer.userId().equals(owner.userId()) && peer.deviceId().equals(owner.deviceId()) && peer.identityKey().equals(owner.identityKey()))
                 .findFirst().orElseThrow(() -> new SecurityException("Verify the group owner first"));
     }
     boolean ownerVerified(Conversation group) { try { verifiedOwner(group.snapshot()); return true; } catch (SecurityException failure) { return false; } }
@@ -183,7 +183,7 @@ final class GroupChat {
         for (GroupRoster.Member member : roster.members()) if (!verified.contains(member)) throw new SecurityException("Unapproved member in group");
         for (Member member : group.members()) {
             if (member.userId().equals(user())) continue;
-            if (!verified.contains(member.identity()) || engine.peers().stream().noneMatch(peer -> peer.userId().equals(member.userId()) && peer.deviceId().equals(member.deviceId()) && peer.identityKey().equals(member.identityKey())))
+            if (!verified.contains(member.identity()) || engine.peers().stream().noneMatch(peer -> engine.independentlyVerified(peer.userId()) && peer.userId().equals(member.userId()) && peer.deviceId().equals(member.deviceId()) && peer.identityKey().equals(member.identityKey())))
                 throw new SecurityException("Group member verification changed");
         }
         String title=validName(read("group-title/"+group.id(),String.class));

@@ -23,6 +23,8 @@ public class AccountDirectory {
     public record ProfileChange(@NotBlank @Size(max = 40) String displayName) { }
     public enum UserType { USER, ADMIN }
     public record AccountType(UUID userId, UserType userType) { }
+    public record Introduction(UUID userId, UUID deviceId, String identityKey, String handle, String displayName) { }
+    public record Introductions(UUID userId, Contact admin, List<Introduction> contacts, UUID nextAfter) { }
     public record DeviceRequest(@NotNull UUID deviceId, @NotNull @Size(min = 33, max = 33) byte[] identityKey, boolean replaceExisting) { }
     public record PreKey(@Min(1) @Max(16380) int registrationId, @Positive int preKeyId,
                          @NotNull @Size(min = 33, max = 33) byte[] preKey, @Positive int signedPreKeyId,
@@ -79,9 +81,45 @@ public class AccountDirectory {
     }
 
     public AccountType accountType(UUID userId) {
-        return database.query("SELECT id, user_type FROM accounts WHERE id = ?",
-                (row, index) -> new AccountType(row.getObject("id", UUID.class), UserType.valueOf(row.getString("user_type"))), userId)
+        return database.query("""
+                SELECT a.id, a.user_type, admin.user_id AS admin_user_id
+                FROM accounts a LEFT JOIN admin_identity admin ON admin.user_id = a.id
+                WHERE a.id = ?
+                """, (row, index) -> {
+                    UserType type = UserType.valueOf(row.getString("user_type"));
+                    if (type == UserType.ADMIN && row.getObject("admin_user_id", UUID.class) == null)
+                        throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "admin_identity_unavailable");
+                    return new AccountType(row.getObject("id", UUID.class), type);
+                }, userId)
                 .stream().findFirst().orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "not_found"));
+    }
+
+    @Transactional(readOnly = true, isolation = org.springframework.transaction.annotation.Isolation.REPEATABLE_READ)
+    public Introductions introductions(UUID userId, UUID after, UUID peerId) {
+        UUID adminId = database.query("""
+                SELECT pin.user_id FROM admin_identity pin JOIN accounts a ON a.id = pin.user_id
+                WHERE a.user_type = 'ADMIN'
+                """, (row, index) -> row.getObject("user_id", UUID.class)).stream().findFirst().orElse(null);
+        if (adminId == null) return new Introductions(userId, null, List.of(), null);
+        if (!adminId.equals(userId) && !Boolean.TRUE.equals(database.queryForObject(
+                "SELECT EXISTS(SELECT 1 FROM admin_introductions WHERE user_id = ? AND admin_id = ?)",
+                Boolean.class, userId, adminId))) return new Introductions(userId, null, List.of(), null);
+        Contact admin = contact(adminId);
+        List<Introduction> contacts = database.query("""
+                SELECT a.id, d.id AS device_id, d.identity_key, a.handle, a.display_name
+                FROM admin_introductions link
+                JOIN accounts a ON a.id = CASE WHEN link.admin_id = ? THEN link.user_id ELSE link.admin_id END
+                JOIN devices d ON d.user_id = a.id
+                WHERE link.admin_id = ? AND (link.admin_id = ? OR link.user_id = ?)
+                  AND (?::uuid IS NULL OR a.id > ?)
+                  AND (?::uuid IS NULL OR a.id = ?)
+                ORDER BY a.id LIMIT 65
+                """, (row, index) -> new Introduction(row.getObject("id", UUID.class),
+                row.getObject("device_id", UUID.class), row.getString("identity_key"),
+                row.getString("handle"), row.getString("display_name")),
+                userId, adminId, userId, userId, after, after, peerId, peerId);
+        UUID next = contacts.size() > 64 ? contacts.get(63).userId() : null;
+        return new Introductions(userId, admin, List.copyOf(contacts.subList(0, Math.min(64, contacts.size()))), next);
     }
 
     public Profile updateProfile(UUID userId, ProfileChange change) {

@@ -1,5 +1,5 @@
 #requires -Version 7.4
-param([ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.4.4', [switch]$Refresh)
+param([ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.4.5', [switch]$Refresh)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $tools = Join-Path $root '.tools'
@@ -11,7 +11,7 @@ $public = Get-Content (Join-Path $tools "public-release-verification-$Version.js
 if ($audit.version -ne $Version -or $public.version -ne $Version -or -not $audit.secretsExcluded -or -not $public.signingIdentityMatches) { throw 'A verified, already-published application release is required.' }
 if ((Test-Path $stage) -and -not $Refresh) { throw 'Website stage already exists; use -Refresh explicitly for a revised website build.' }
 $null = New-Item -ItemType Directory -Path $stage -Force
-$artifacts = @('icon.png', 'LICENSE.txt', 'THIRD-PARTY-NOTICES.txt', 'libsignal-0.102.3-source.tar.gz', 'updates.json', "vanishr-$Version.apk", "vanishr-$Version-source.zip")
+$artifacts = @('LICENSE.txt', 'THIRD-PARTY-NOTICES.txt', 'libsignal-0.102.3-source.tar.gz', 'updates.json', "vanishr-$Version.apk", "vanishr-$Version-source.zip")
 foreach ($name in $artifacts) {
     $expected = @($audit.files | Where-Object name -eq $name)
     $file = Get-Item (Join-Path $release $name)

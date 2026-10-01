@@ -3,15 +3,20 @@ package app.vanishr.relay;
 import app.vanishr.crypto.*;
 import com.fasterxml.jackson.databind.*;
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.*;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.*;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.*;
@@ -51,6 +56,8 @@ class RelayIntegrationTest {
     @Autowired ObjectMapper json;
     @Autowired StringRedisTemplate redis;
     @Autowired JdbcTemplate database;
+    @Autowired PlatformTransactionManager transactions;
+    @Autowired AuthService authentication;
     @Autowired GroupDirectory groups;
     @Autowired GroupMessages groupMessages;
     @Autowired GenericNotifier notifications;
@@ -60,7 +67,10 @@ class RelayIntegrationTest {
 
     @BeforeEach void emptyEphemeralTestInfrastructure() {
         redis.getConnectionFactory().getConnection().serverCommands().flushDb();
-        database.update("DELETE FROM accounts");
+        // Only the disposable Testcontainers database resets its permanent admin pin.
+        database.execute("ALTER TABLE admin_identity DISABLE TRIGGER admin_identity_immutable");
+        try { database.execute("TRUNCATE TABLE accounts CASCADE"); }
+        finally { database.execute("ALTER TABLE admin_identity ENABLE TRIGGER admin_identity_immutable"); }
     }
 
     private ResultActions request(MockHttpServletRequestBuilder request, Device device) throws Exception {
@@ -86,6 +96,13 @@ class RelayIntegrationTest {
         Device device = new Device(token.userId(), deviceId, token.accessToken(), crypto);
         request(body(post("/keys"), Map.of("keys", List.of(crypto.generatePreKey(Instant.now())))), device).andExpect(status().isNoContent());
         return device;
+    }
+
+    private void assignAdmin(Device admin) {
+        new TransactionTemplate(transactions).executeWithoutResult(transaction -> {
+            assertEquals(1, database.update("INSERT INTO admin_identity (user_id) VALUES (?)", admin.userId()));
+            assertEquals(1, database.update("UPDATE accounts SET user_type = 'ADMIN' WHERE id = ?", admin.userId()));
+        });
     }
 
     private void verifyAndEstablish(Device sender, Device recipient) throws Exception {
@@ -766,7 +783,7 @@ class RelayIntegrationTest {
                 RemotePhotos.Request start = photoRequest(id, admin, owner);
                 request(body(post("/remote-photos"), start), null).andExpect(status().isUnauthorized());
                 request(body(post("/remote-photos"), start), admin).andExpect(status().isForbidden());
-                database.update("UPDATE accounts SET user_type='ADMIN' WHERE id=?", admin.userId());
+                assignAdmin(admin);
                 String encoded = request(body(post("/remote-photos"), start), admin).andExpect(status().isCreated())
                     .andExpect(jsonPath("$.accepted").value(false)).andReturn().getResponse().getContentAsString();
                 RemotePhotos.Session pending = json.readValue(encoded, RemotePhotos.Session.class);
@@ -790,7 +807,7 @@ class RelayIntegrationTest {
 
                     @Test void remotePhotosExchangeNeedsConsentAndNeverResurrectsAcknowledgedOrRevokedPhotos() throws Exception {
                     Device admin = device("photos_transfer_admin"), owner = device("photos_transfer_owner"), outsider = device("photos_transfer_outside");
-                    database.update("UPDATE accounts SET user_type='ADMIN' WHERE id=?", admin.userId());
+                    assignAdmin(admin);
                     foreground(admin); foreground(owner); foreground(outsider);
                     foreground(admin, true); foreground(owner, true);
                     UUID session = UUID.randomUUID();
@@ -829,7 +846,7 @@ class RelayIntegrationTest {
 
                     @Test void remotePhotosEndAfterDisconnectRoleRevocationAndIdentityReplacement() throws Exception {
                 Device admin = device("photo_live_admin"), owner = device("photo_live_owner");
-                database.update("UPDATE accounts SET user_type='ADMIN' WHERE id=?", admin.userId());
+                assignAdmin(admin);
                 foreground(admin);
                 foreground(admin, true);
                 request(body(post("/remote-photos"), photoRequest(UUID.randomUUID(), admin, owner)), admin)
@@ -858,7 +875,7 @@ class RelayIntegrationTest {
 
     @Test void remotePhotosRecheckRoleAndDeviceAfterOwnerApproval() throws Exception {
         Device admin = device("photo_role_admin"), owner = device("photo_role_owner");
-        database.update("UPDATE accounts SET user_type='ADMIN' WHERE id=?", admin.userId());
+        assignAdmin(admin);
         foreground(admin, true); foreground(owner); foreground(owner, true);
         UUID first = UUID.randomUUID();
         request(body(post("/remote-photos"), photoRequest(first, admin, owner)), admin).andExpect(status().isCreated());
@@ -876,7 +893,7 @@ class RelayIntegrationTest {
 
     @Test void remotePhotosExpiryCannotBeExtendedOrPrekeysSubstituted() throws Exception {
         Device admin = device("photo_expiry_admin"), owner = device("photo_expiry_owner");
-        database.update("UPDATE accounts SET user_type='ADMIN' WHERE id=?", admin.userId());
+        assignAdmin(admin);
         foreground(admin, true); foreground(owner); foreground(owner, true);
         RemotePhotos.Request wrongKey = photoRequest(UUID.randomUUID(), owner, owner);
         request(body(post("/remote-photos"), wrongKey), admin).andExpect(status().isConflict());
@@ -938,8 +955,7 @@ class RelayIntegrationTest {
         @Test void accountTypesStayWithUuidAcrossRenameWithoutGrantingOtherAccountAccess() throws Exception {
         Device owner = device("type_owner"), other = device("type_other");
         UUID originalVersion = database.queryForObject("SELECT auth_version FROM devices WHERE id = ?", UUID.class, owner.deviceId());
-        assertEquals(1, database.update("UPDATE accounts SET user_type = 'ADMIN' WHERE id = ? AND handle = ?",
-            owner.userId(), "type_owner"));
+        assignAdmin(owner);
         request(get("/account/type"), owner).andExpect(status().isOk()).andExpect(jsonPath("$.userType").value("ADMIN"));
         request(body(patch("/account/username"), Map.of("handle", "type_renamed")), owner).andExpect(status().isOk())
             .andExpect(jsonPath("$.userId").value(owner.userId().toString()));
@@ -949,15 +965,245 @@ class RelayIntegrationTest {
             .andExpect(jsonPath("$.userId").value(other.userId().toString())).andExpect(jsonPath("$.userType").value("USER"));
         request(get("/users/type_renamed"), other).andExpect(status().isOk()).andExpect(jsonPath("$.userType").doesNotExist());
         request(get("/users/id/" + owner.userId() + "/profile"), other).andExpect(status().isOk()).andExpect(jsonPath("$.userType").doesNotExist());
-        verifyAndEstablish(other, owner);
-        request(body(post("/messages"), encrypted(other, owner, "role-boundary-fixture".getBytes(StandardCharsets.UTF_8),
-            Expiry.HOUR_1, System.currentTimeMillis() + 120_000, null)), other).andExpect(status().isCreated());
-        assertEquals(1, database.update("UPDATE accounts SET user_type = 'ADMIN' WHERE id = ?", other.userId()));
-        request(get("/messages/pending"), other).andExpect(status().isOk()).andExpect(content().json("[]"));
+        request(body(patch("/account/username"), Map.of("handle", "type_owner")), other).andExpect(status().isOk());
+        request(get("/account/type"), other).andExpect(status().isOk()).andExpect(jsonPath("$.userType").value("USER"));
+        verifyAndEstablish(owner, other);
+        request(body(post("/messages"), encrypted(owner, other, "role-boundary-fixture".getBytes(StandardCharsets.UTF_8),
+            Expiry.HOUR_1, System.currentTimeMillis() + 120_000, null)), owner).andExpect(status().isCreated());
+        assertThrows(DataIntegrityViolationException.class,
+            () -> database.update("UPDATE accounts SET user_type = 'ADMIN' WHERE id = ?", other.userId()));
+        request(get("/messages/pending"), owner).andExpect(status().isOk()).andExpect(content().json("[]"));
         assertEquals(originalVersion, database.queryForObject("SELECT auth_version FROM devices WHERE id = ?", UUID.class, owner.deviceId()));
         assertEquals(1, database.update("UPDATE accounts SET user_type = 'USER' WHERE id = ?", owner.userId()));
         request(get("/account/type"), owner).andExpect(status().isOk()).andExpect(jsonPath("$.userType").value("USER"));
         }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 2})
+    void singleAdminMigrationPreservesIdentityOrRejectsAmbiguousAdmins(int adminCount) {
+        var configuration = org.flywaydb.core.Flyway.configure()
+            .dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
+            .schemas("single_admin_upgrade_fixture").defaultSchema("single_admin_upgrade_fixture")
+            .locations("classpath:db/migration");
+        try {
+            configuration.target("5").load().migrate();
+            UUID first = UUID.randomUUID(), second = UUID.randomUUID();
+            database.update("""
+                INSERT INTO single_admin_upgrade_fixture.accounts(id, handle, password_hash, display_name, user_type)
+                VALUES (?, 'existing_admin', 'synthetic-password-verifier', 'Existing Name', ?)
+                """, first, adminCount > 0 ? "ADMIN" : "USER");
+            database.update("""
+                INSERT INTO single_admin_upgrade_fixture.accounts(id, handle, google_subject, user_type)
+                VALUES (?, 'existing_google', 'synthetic-google-subject', ?)
+                """, second, adminCount > 1 ? "ADMIN" : "USER");
+            database.update("""
+                INSERT INTO single_admin_upgrade_fixture.devices(id, user_id, identity_key, auth_version)
+                VALUES (?, ?, ?, ?)
+                """, UUID.randomUUID(), first, Base64.getEncoder().encodeToString(new byte[33]), UUID.randomUUID());
+            var accountsBefore = database.queryForList("SELECT * FROM single_admin_upgrade_fixture.accounts ORDER BY id");
+            var devicesBefore = database.queryForList("SELECT * FROM single_admin_upgrade_fixture.devices ORDER BY id");
+            if (adminCount > 1) {
+                assertThrows(org.flywaydb.core.api.FlywayException.class, () -> configuration.target("6").load().migrate());
+                assertTrue(Boolean.TRUE.equals(database.queryForObject(
+                    "SELECT to_regclass('single_admin_upgrade_fixture.admin_identity') IS NULL", Boolean.class)));
+            } else {
+                assertEquals(1, configuration.target("6").load().migrate().migrationsExecuted);
+                assertEquals(adminCount, database.queryForObject("SELECT COUNT(*) FROM single_admin_upgrade_fixture.admin_identity", Integer.class));
+                if (adminCount == 1) {
+                    assertEquals(first, database.queryForObject("SELECT user_id FROM single_admin_upgrade_fixture.admin_identity", UUID.class));
+                    assertEquals(1, database.update("UPDATE single_admin_upgrade_fixture.accounts SET user_type = 'ADMIN' WHERE id = ?", first));
+                }
+                assertThrows(DataIntegrityViolationException.class,
+                    () -> database.update("UPDATE single_admin_upgrade_fixture.accounts SET user_type = 'ADMIN' WHERE id = ?", second));
+                assertEquals(0, configuration.load().migrate().migrationsExecuted);
+            }
+            assertEquals(accountsBefore, database.queryForList("SELECT * FROM single_admin_upgrade_fixture.accounts ORDER BY id"));
+            assertEquals(devicesBefore, database.queryForList("SELECT * FROM single_admin_upgrade_fixture.devices ORDER BY id"));
+        } finally { database.execute("DROP SCHEMA IF EXISTS single_admin_upgrade_fixture CASCADE"); }
+    }
+
+    @Test void adminIntroductionsAreAutomaticOnlyForNewAccountsAndVisibleOnlyToTheirParticipants() throws Exception {
+        Device admin = device("intro_admin"), existing = device("intro_existing");
+        assignAdmin(admin);
+        Device fresh = device("intro_fresh"), other = device("intro_other");
+        request(get("/account/admin-contacts"), null).andExpect(status().isUnauthorized());
+        request(get("/account/admin-contacts"), existing).andExpect(status().isOk())
+            .andExpect(jsonPath("$.contacts").isEmpty()).andExpect(jsonPath("$.admin").doesNotExist());
+        request(get("/account/admin-contacts").param("userId", admin.userId().toString()), fresh).andExpect(status().isOk())
+            .andExpect(header().string("Cache-Control", "no-store"))
+            .andExpect(jsonPath("$.userId").value(fresh.userId().toString()))
+            .andExpect(jsonPath("$.contacts.length()").value(1))
+            .andExpect(jsonPath("$.contacts[0].userId").value(admin.userId().toString()))
+            .andExpect(jsonPath("$.admin.deviceId").value(admin.deviceId().toString()));
+        request(get("/account/admin-contacts/" + other.userId()), fresh).andExpect(status().isOk())
+            .andExpect(jsonPath("$.contacts").isEmpty());
+        request(get("/account/admin-contacts/" + fresh.userId()), existing).andExpect(status().isOk())
+            .andExpect(jsonPath("$.contacts").isEmpty());
+        request(get("/account/admin-contacts"), admin).andExpect(status().isOk()).andExpect(jsonPath("$.contacts.length()").value(2));
+        request(body(patch("/account/username"), Map.of("handle", "intro_renamed")), admin).andExpect(status().isOk());
+        request(get("/account/admin-contacts"), fresh).andExpect(status().isOk())
+            .andExpect(jsonPath("$.contacts[0].userId").value(admin.userId().toString()))
+            .andExpect(jsonPath("$.contacts[0].handle").value("intro_renamed"));
+        request(body(post("/account/admin-contacts"), Map.of("adminId", other.userId())), fresh).andExpect(status().isMethodNotAllowed());
+        request(body(post("/auth/register"), Map.of("handle", "intro_injected", "password", "test-only-password-12345", "adminId", other.userId())), null)
+            .andExpect(status().isBadRequest());
+        assertThrows(DataIntegrityViolationException.class, () -> database.update(
+            "INSERT INTO admin_introductions(user_id, admin_id) VALUES (?, ?)", existing.userId(), other.userId()));
+        assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM accounts WHERE user_type = 'ADMIN'", Integer.class));
+        assertEquals("USER", database.queryForObject("SELECT user_type FROM accounts WHERE id = ?", String.class, fresh.userId()));
+        assertEquals(2, database.queryForObject("SELECT COUNT(*) FROM admin_introductions", Integer.class));
+    }
+
+    @Test void adminIntroductionsWaitForEnrollmentIncludeGoogleOnceAndPauseOnRoleRevocation() throws Exception {
+        Device admin = device("intro_google_admin");
+        assignAdmin(admin);
+        AccountDirectory directory = new AccountDirectory(database, json, Clock.systemUTC());
+        AccountDirectory.GoogleAccount google = directory.googleAccount("google-introduction-fixture");
+        assertEquals(google, directory.googleAccount("google-introduction-fixture"));
+        assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM admin_introductions", Integer.class));
+        request(get("/account/admin-contacts"), admin).andExpect(status().isOk()).andExpect(jsonPath("$.contacts").isEmpty());
+        AuthService.Token enrollment = authentication.issue(new Actor(google.userId(), null));
+        Device enrolling = new Device(google.userId(), UUID.randomUUID(), enrollment.accessToken(), new SignalClient(google.userId(), new TestVault()));
+        request(get("/account/admin-contacts"), enrolling).andExpect(status().isForbidden());
+        request(body(post("/devices"), new AccountDirectory.DeviceRequest(enrolling.deviceId(), enrolling.crypto().publicIdentity(), false)), enrolling)
+            .andExpect(status().isCreated());
+        request(get("/account/admin-contacts"), admin).andExpect(status().isOk())
+            .andExpect(jsonPath("$.contacts[0].userId").value(google.userId().toString()));
+        database.update("UPDATE accounts SET user_type = 'USER' WHERE id = ?", admin.userId());
+        Device deferred = device("intro_deferred");
+        request(get("/account/admin-contacts"), admin).andExpect(status().isOk()).andExpect(jsonPath("$.contacts").isEmpty());
+        request(get("/account/admin-contacts"), deferred).andExpect(status().isOk()).andExpect(jsonPath("$.contacts").isEmpty());
+        database.update("UPDATE accounts SET user_type = 'ADMIN' WHERE id = ?", admin.userId());
+        request(get("/account/admin-contacts"), admin).andExpect(status().isOk()).andExpect(jsonPath("$.contacts.length()").value(2));
+        request(get("/account/admin-contacts"), deferred).andExpect(status().isOk())
+            .andExpect(jsonPath("$.contacts[0].userId").value(admin.userId().toString()));
+    }
+
+    @Test void adminIntroductionsArePaginatedWithoutOmittingOrDuplicatingAccounts() throws Exception {
+        Device admin = device("intro_paging_admin");
+        assignAdmin(admin);
+        Set<UUID> expected = new HashSet<>();
+        for (int index = 0; index < 65; index++) {
+            UUID id = UUID.randomUUID();
+            expected.add(id);
+            database.update("INSERT INTO accounts(id, handle, password_hash) VALUES (?, ?, 'synthetic')", id, "intro_page_" + index);
+            database.update("INSERT INTO devices(id, user_id, identity_key, auth_version) VALUES (?, ?, ?, ?)",
+                UUID.randomUUID(), id, Base64.getEncoder().encodeToString(new byte[33]), UUID.randomUUID());
+        }
+        String firstJson = request(get("/account/admin-contacts"), admin).andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        AccountDirectory.Introductions first = json.readValue(firstJson, AccountDirectory.Introductions.class);
+        assertEquals(64, first.contacts().size()); assertNotNull(first.nextAfter());
+        assertEquals(first.contacts().getLast().userId(), first.nextAfter());
+        String lastJson = request(get("/account/admin-contacts").param("after", first.nextAfter().toString()), admin)
+            .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        AccountDirectory.Introductions last = json.readValue(lastJson, AccountDirectory.Introductions.class);
+        assertEquals(1, last.contacts().size()); assertNull(last.nextAfter());
+        Set<UUID> actual = first.contacts().stream().map(AccountDirectory.Introduction::userId).collect(Collectors.toSet());
+        assertTrue(actual.add(last.contacts().getFirst().userId()));
+        assertEquals(expected, actual);
+        request(get("/account/admin-contacts").param("after", "invalid"), admin).andExpect(status().isBadRequest());
+        request(get("/account/admin-contacts/" + last.contacts().getFirst().userId()), admin).andExpect(status().isOk())
+            .andExpect(jsonPath("$.contacts.length()").value(1));
+    }
+
+    @Test void adminIntroductionsMigrationDoesNotBackfillOrChangeExistingAccounts() {
+        var configuration = org.flywaydb.core.Flyway.configure()
+            .dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
+            .schemas("admin_introduction_upgrade_fixture").defaultSchema("admin_introduction_upgrade_fixture")
+            .locations("classpath:db/migration");
+        try {
+            configuration.target("5").load().migrate();
+            UUID admin = UUID.randomUUID(), existing = UUID.randomUUID(), fresh = UUID.randomUUID();
+            database.update("INSERT INTO admin_introduction_upgrade_fixture.accounts(id, handle, password_hash, user_type) VALUES (?, 'prior_admin', 'synthetic', 'ADMIN')", admin);
+            database.update("INSERT INTO admin_introduction_upgrade_fixture.accounts(id, handle, password_hash) VALUES (?, 'prior_user', 'synthetic')", existing);
+            configuration.target("6").load().migrate();
+            var before = database.queryForList("SELECT * FROM admin_introduction_upgrade_fixture.accounts ORDER BY id");
+            assertEquals(1, configuration.target("7").load().migrate().migrationsExecuted);
+            assertEquals(before, database.queryForList("SELECT * FROM admin_introduction_upgrade_fixture.accounts ORDER BY id"));
+            assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM admin_introduction_upgrade_fixture.admin_introductions", Integer.class));
+            database.update("INSERT INTO admin_introduction_upgrade_fixture.accounts(id, handle, password_hash) VALUES (?, 'new_user', 'synthetic')", fresh);
+            assertEquals(admin, database.queryForObject("SELECT admin_id FROM admin_introduction_upgrade_fixture.admin_introductions WHERE user_id = ?", UUID.class, fresh));
+            assertEquals(0, configuration.load().migrate().migrationsExecuted);
+        } finally { database.execute("DROP SCHEMA IF EXISTS admin_introduction_upgrade_fixture CASCADE"); }
+    }
+
+    @Test void singleAdminPinCannotBeReplacedEvenAfterRoleRevocation() throws Exception {
+        Device admin = device("permanent_admin"), other = device("permanent_other");
+        assertThrows(DataIntegrityViolationException.class,
+            () -> database.update("UPDATE accounts SET user_type = 'ADMIN' WHERE id = ?", other.userId()));
+        assertThrows(DataIntegrityViolationException.class,
+            () -> database.update("INSERT INTO accounts(id, handle, password_hash, user_type) VALUES (?, 'inserted_admin', 'synthetic', 'ADMIN')", UUID.randomUUID()));
+        assignAdmin(admin);
+        assertThrows(DataIntegrityViolationException.class,
+            () -> database.update("UPDATE accounts SET user_type = 'ADMIN' WHERE id = ?", other.userId()));
+        assertEquals(1, database.update("UPDATE accounts SET user_type = 'USER' WHERE id = ?", admin.userId()));
+        request(get("/account/type"), admin).andExpect(status().isOk()).andExpect(jsonPath("$.userType").value("USER"));
+        assertThrows(DataIntegrityViolationException.class,
+            () -> database.update("UPDATE accounts SET user_type = 'ADMIN' WHERE id = ?", other.userId()));
+        assertThrows(DataIntegrityViolationException.class,
+            () -> database.update("INSERT INTO admin_identity(user_id) VALUES (?)", other.userId()));
+        assertThrows(DataIntegrityViolationException.class,
+            () -> database.update("INSERT INTO admin_identity(singleton, user_id) VALUES (FALSE, ?)", other.userId()));
+        assertThrows(DataIntegrityViolationException.class,
+            () -> database.update("UPDATE admin_identity SET user_id = ?", other.userId()));
+        assertThrows(DataIntegrityViolationException.class, () -> database.update("DELETE FROM admin_identity"));
+        var restrictedTruncate = assertThrows(org.springframework.jdbc.UncategorizedSQLException.class,
+            () -> database.execute("TRUNCATE TABLE admin_identity"));
+        assertEquals("0A000", restrictedTruncate.getSQLException().getSQLState());
+        assertThrows(DataIntegrityViolationException.class, () -> database.execute("TRUNCATE TABLE admin_identity CASCADE"));
+        assertThrows(DataIntegrityViolationException.class, () -> database.execute("TRUNCATE TABLE accounts CASCADE"));
+        assertThrows(DataIntegrityViolationException.class,
+            () -> database.update("DELETE FROM accounts WHERE id = ?", admin.userId()));
+        assertThrows(DataIntegrityViolationException.class,
+            () -> database.update("UPDATE accounts SET id = ? WHERE id = ?", UUID.randomUUID(), admin.userId()));
+        assertEquals(admin.userId(), database.queryForObject("SELECT user_id FROM admin_identity", UUID.class));
+        assertEquals(1, database.update("UPDATE accounts SET user_type = 'ADMIN' WHERE id = ?", admin.userId()));
+        request(get("/account/type"), admin).andExpect(status().isOk()).andExpect(jsonPath("$.userType").value("ADMIN"));
+        request(get("/account/type"), other).andExpect(status().isOk()).andExpect(jsonPath("$.userType").value("USER"));
+        assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM accounts WHERE user_type = 'ADMIN'", Integer.class));
+    }
+
+    @Test void singleAdminConcurrentInitializationHasOnlyOneWinner() throws Exception {
+        List<Device> candidates = List.of(device("admin_candidate_one"), device("admin_candidate_two"));
+        var ready = new java.util.concurrent.CountDownLatch(2);
+        var start = new java.util.concurrent.CountDownLatch(1);
+        try (var executor = java.util.concurrent.Executors.newFixedThreadPool(2)) {
+            List<java.util.concurrent.Future<Boolean>> attempts = new ArrayList<>();
+            for (Device candidate : candidates) attempts.add(executor.submit(() -> {
+                ready.countDown();
+                if (!start.await(5, java.util.concurrent.TimeUnit.SECONDS)) throw new AssertionError("Concurrent admin fixture did not start");
+                try { assignAdmin(candidate); return true; }
+                catch (DataIntegrityViolationException rejected) { return false; }
+            }));
+            assertTrue(ready.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            start.countDown();
+            int succeeded = 0;
+            for (var attempt : attempts) if (attempt.get(10, java.util.concurrent.TimeUnit.SECONDS)) succeeded++;
+            assertEquals(1, succeeded);
+        }
+        assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM admin_identity", Integer.class));
+        assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM accounts WHERE user_type = 'ADMIN'", Integer.class));
+        UUID pinned = database.queryForObject("SELECT user_id FROM admin_identity", UUID.class);
+        for (Device candidate : candidates) request(get("/account/type"), candidate).andExpect(status().isOk())
+            .andExpect(jsonPath("$.userType").value(candidate.userId().equals(pinned) ? "ADMIN" : "USER"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void singleAdminAuthorizationRejectsUnpinnedRoleEvenIfDatabaseGuardWasBypassed(boolean pinExists) throws Exception {
+        Device owner = device("pinned_owner"), impostor = device("unpinned_impostor");
+        if (pinExists) database.update("INSERT INTO admin_identity(user_id) VALUES (?)", owner.userId());
+        database.execute("ALTER TABLE accounts DISABLE TRIGGER accounts_admin_identity");
+        try { database.update("UPDATE accounts SET user_type = 'ADMIN' WHERE id = ?", impostor.userId()); }
+        finally { database.execute("ALTER TABLE accounts ENABLE TRIGGER accounts_admin_identity"); }
+        request(get("/account/type"), impostor).andExpect(status().isServiceUnavailable())
+            .andExpect(jsonPath("$.error").value("admin_identity_unavailable"));
+        UUID session = UUID.randomUUID();
+        request(body(post("/remote-photos"), photoRequest(session, impostor, owner)), impostor)
+            .andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.error").value("admin_identity_unavailable"));
+        assertFalse(Boolean.TRUE.equals(redis.hasKey("rps:" + session)));
+        request(get("/account/type"), owner).andExpect(status().isOk()).andExpect(jsonPath("$.userType").value("USER"));
+    }
 
         @Test void accountTypesCannotBeAssignedThroughClientRequests() throws Exception {
         Device owner = device("type_unchanged");
@@ -967,8 +1213,20 @@ class RelayIntegrationTest {
             .andExpect(status().isBadRequest());
         request(body(patch("/account/username"), Map.of("handle", "type_changed", "userType", "ADMIN")), owner)
             .andExpect(status().isBadRequest());
+        request(body(post("/auth/login"), Map.of("handle", "type_unchanged", "password", "test-only-password-12345", "userType", "ADMIN")), null)
+            .andExpect(status().isBadRequest());
+        request(body(post("/devices"), Map.of("deviceId", owner.deviceId(), "identityKey", owner.crypto().publicIdentity(), "userType", "ADMIN")), owner)
+            .andExpect(status().isForbidden());
+        String signIn = request(body(post("/auth/login"), new AuthService.Login("type_unchanged", "test-only-password-12345", null)), null)
+            .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        AuthService.Token enrollment = json.readValue(signIn, AuthService.Token.class);
+        Device enrolling = new Device(enrollment.userId(), null, enrollment.accessToken(), null);
+        request(body(post("/devices"), Map.of("deviceId", owner.deviceId(), "identityKey", owner.crypto().publicIdentity(), "userType", "ADMIN")), enrolling)
+            .andExpect(status().isBadRequest());
         request(body(patch("/account/type"), Map.of("userType", "ADMIN")), owner).andExpect(status().isMethodNotAllowed());
         request(body(post("/account/type"), Map.of("userType", "ADMIN")), owner).andExpect(status().isMethodNotAllowed());
+        request(body(put("/account/type"), Map.of("userType", "ADMIN")), owner).andExpect(status().isMethodNotAllowed());
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM admin_identity", Integer.class));
         request(get("/account/type"), owner).andExpect(status().isOk()).andExpect(jsonPath("$.userType").value("USER"));
         }
 
@@ -1099,7 +1357,11 @@ class RelayIntegrationTest {
             }
         }
         List<String> tables = database.queryForList("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name", String.class);
-        assertEquals(List.of("accounts", "devices", "flyway_schema_history", "group_members", "prekeys", "private_groups"), tables);
+        assertEquals(List.of("accounts", "admin_identity", "admin_introductions", "devices", "flyway_schema_history", "group_members", "prekeys", "private_groups"), tables);
+        assertEquals(List.of("singleton", "user_id"), database.queryForList(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='admin_identity' ORDER BY ordinal_position", String.class));
+        assertEquals(List.of("user_id", "admin_id"), database.queryForList(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='admin_introductions' ORDER BY ordinal_position", String.class));
         assertEquals(List.of("id","owner_id","revision","epoch","closed_at"),database.queryForList(
             "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='private_groups' ORDER BY ordinal_position",String.class));
         assertEquals(List.of("group_id","user_id","device_id","identity_key","state","invited_until"),database.queryForList(
