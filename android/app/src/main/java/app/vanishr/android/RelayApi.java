@@ -29,9 +29,19 @@ final class RelayApi implements AutoCloseable {
             this.status = status;
                 this.code = Set.of("device_already_registered", "device_unavailable", "account_unavailable", "google_sign_in_unavailable", "prekeys_unavailable",
                     "group_full","group_capacity","group_changed","group_not_ready","group_identity_changed","group_owner_required","owner_must_close_group",
-                    "photo_peer_offline", "photo_session_ended", "photo_transfer_busy", "photo_identity_changed", "admin_required").contains(code) ? code : "";
+                    "photo_peer_offline", "photo_session_ended", "photo_transfer_busy", "photo_identity_changed", "admin_required",
+                    "block_capacity", "safety_queue_full", "safety_review_unavailable", "safety_operation_in_progress",
+                    "legacy_media_pending", "connection_cleanup_failed", "account_cleanup_failed", "admin_identity_unavailable").contains(code) ? code : "";
         }
         String userMessage() {
+            if (code.equals("block_capacity")) return "You have reached the 512-account block limit. Unblock an account before adding another.";
+            if (code.equals("safety_queue_full")) return "The safety review queue is full. Try again later or contact support.";
+            if (code.equals("safety_review_unavailable")) return "Safety reporting is temporarily unavailable. Contact " + PlayPolicy.SUPPORT + ".";
+            if (code.equals("safety_operation_in_progress")) return "Another account safety operation is running. Wait a moment, then retry.";
+            if (code.equals("legacy_media_pending")) return "Deletion is pending expiry of an older encrypted upload. Wait up to five minutes, then retry deletion cleanup.";
+            if (code.equals("connection_cleanup_failed") || code.equals("account_cleanup_failed"))
+                return "Deletion cleanup did not finish. Keep the app installed and retry deletion cleanup.";
+            if (code.equals("admin_identity_unavailable")) return "The admin identity could not be verified. Try again later.";
             if (code.equals("photo_peer_offline")) return "The other phone is offline. Ask them to open Vanishr.";
             if (code.equals("photo_session_ended")) return "Photo access ended. A new approval is required.";
             if (code.equals("photo_identity_changed")) return "This contact's identity changed. Verify it again.";

@@ -14,7 +14,10 @@ end
 redis.call('ZREMRANGEBYSCORE', KEYS[3], 0, ARGV[4])
 if redis.call('ZCARD', KEYS[3]) >= (tonumber(ARGV[8]) or 512) then return 'FULL' end
 redis.call('SET', KEYS[1], ARGV[2], 'PXAT', ARGV[5])
-redis.call('SET', KEYS[2], cjson.encode({digest=ARGV[3],recipient=ARGV[7]}), 'PXAT', ARGV[5])
+local packet = cjson.decode(ARGV[2])
+redis.call('SET', KEYS[2], cjson.encode({digest=ARGV[3],recipient=ARGV[7],
+    senderId=packet.senderId,recipientId=packet.recipientId,
+    senderDeviceId=packet.senderDeviceId,recipientDeviceId=packet.recipientDeviceId}), 'PXAT', ARGV[5])
 redis.call('ZADD', KEYS[3], ARGV[5], ARGV[6])
 redis.call('PEXPIRE', KEYS[3], 86400000)
 return 'OK'

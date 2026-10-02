@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Delete Your Vanishr Account | In-App and Email Requests</title>
+  <meta name="description" content="Request deletion of your Vanishr account by email without reinstalling the app. Learn what to include, how ownership is verified, what is deleted and retention limits.">
+  <meta name="robots" content="index, follow, max-image-preview:large"><meta name="referrer" content="no-referrer"><meta name="theme-color" content="#146c58">
+  <link rel="canonical" href="https://vanishr-download.vercel.app/delete-account/">
+  <meta property="og:type" content="website"><meta property="og:site_name" content="Vanishr"><meta property="og:title" content="Delete your Vanishr account"><meta property="og:description" content="An email request path even without the app, ownership verification, deletion scope and retention limits."><meta property="og:url" content="https://vanishr-download.vercel.app/delete-account/"><meta property="og:image" content="https://vanishr-download.vercel.app/assets/social.jpg"><meta name="twitter:card" content="summary_large_image">
+  <meta name="ga4-measurement-id" content="__GA4_ID__">__SEARCH_VERIFICATION__
+  <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="icon" href="/icon.png" type="image/png" sizes="192x192">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180"><link rel="stylesheet" href="/site.css"><script defer src="/assets/lucide.min.js"></script><script defer src="/site.js"></script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","name":"Delete your Vanishr account","url":"https://vanishr-download.vercel.app/delete-account/","isPartOf":{"@id":"https://vanishr-download.vercel.app/#website"},"about":{"@id":"https://vanishr-download.vercel.app/#app"},"inLanguage":"en"}</script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header"><div class="wrap nav-wrap"><a class="brand" href="/" aria-label="Vanishr home"><img src="/icon.png" width="32" height="32" alt=""><span>vanishr</span></a><nav class="desktop-nav" aria-label="Main"><a href="/#inside">The app</a><a href="/security/">Security</a><a href="/privacy/">Privacy</a><a href="/terms/">Terms</a><a href="/delete-account/" aria-current="page">Delete account</a><a class="nav-download" href="/android/">Get Android <i data-lucide="arrow-down-to-line" aria-hidden="true"></i></a></nav><details class="mobile-nav"><summary aria-label="Navigation menu"><i data-lucide="menu" aria-hidden="true"></i><span>Menu</span></summary><nav aria-label="Mobile"><a href="/#inside">The app</a><a href="/security/">Security</a><a href="/android/">Download Android</a><a href="/privacy/">Privacy</a><a href="/terms/">Terms</a><a href="/delete-account/" aria-current="page">Delete account</a></nav></details></div></header>
+  <main id="main"><header class="page-heading"><div class="wrap"><p class="breadcrumb"><a href="/">Vanishr</a> / Delete account</p><p class="eyebrow">UPDATED 2 OCTOBER 2026</p><h1>Delete your Vanishr account.</h1><p>You can request deletion of your account and associated data by email even if you have uninstalled the app. This static page does not collect passwords or authenticate an account.</p></div></header>
+    <div class="article-grid wrap"><article class="article-body">
+      <section id="request"><h2>Request deletion by email</h2>
+        <p><a class="button primary" href="mailto:richardhenryjames64@gmail.com?subject=Vanishr%20account%20deletion%20request">Email an account deletion request <i data-lucide="mail" aria-hidden="true"></i></a></p>
+        <p>If the button does not open an email app, compose an email to <a href="mailto:richardhenryjames64@gmail.com">richardhenryjames64@gmail.com</a> with the subject <strong>Vanishr account deletion request</strong>.</p>
+        <ol>
+          <li>Say that you want your Vanishr account and associated data deleted. Include <strong>only your current Vanishr username and your account UUID, if you know it</strong>. If either is unknown, say so; you can still start the request without reinstalling.</li>
+          <li>The operator will need to verify that you own the account using sign-in or Google-provider proof before deleting it. The reply should explain the verification step and any difficulty locating the account. A username, account UUID or email address alone is not ownership proof; usernames may have changed or been reused, and Vanishr does not retain your Google email.</li>
+          <li>Follow the operator's verified ownership process and ask for confirmation when deletion is complete. Requesting deletion is not itself confirmation of completion. If ownership cannot be established safely, the operator cannot delete someone else's account on your assertion.</li>
+        </ol>
+        <div class="notice"><strong>Never send a password, sign-in token, Google ID token, deletion proof, private key, recovery code, identity document, chat transcript or photo.</strong><p>There is no login or upload form on this page. Ownership checks must use a safe authentication process, not emailed credentials. Do not open a public GitHub issue containing account or personal information.</p></div>
+        <p>Email is handled by a person, not an automated deletion API or a continuously monitored support desk. No fixed response or completion time is promised. You can follow up in the same email thread. A mailto link drafts an email; it does not send it until you choose Send in your mail app.</p>
+      </section>
+      <section id="in-app"><h2>Deletion from the app</h2>
+        <div class="notice"><strong>Check your installed version.</strong><p>__ACCOUNT_CONTROLS_NOTE__</p></div>
+        <p>The 0.4.6 candidate flow is <strong>Chats &gt; My profile &gt; Delete account</strong>. Read the consequences, type <strong>DELETE</strong>, and reauthenticate with the account password or Google sign-in. The relay derives the account from fresh account-only authentication, not an account ID typed into a public form. The initial enrollment authorization lasts at most five minutes; a remembered chat session alone is not enough. Google reauthentication must match the saved account's original UUID rather than creating a new account.</p>
+        <p>Before the initial deletion request, the app must save a random deletion proof and the original account UUID in encrypted local storage. Keep the app open and connected until it reports completion. It removes only that account's encrypted local partition and keys after receiving an explicit <code>DELETED</code> confirmation matching the original UUID. Other locally remembered accounts must not be removed. A lost response or an arbitrary 401/404 error is not confirmation.</p>
+        <p><strong>If deletion does not finish:</strong> cleanup can leave the account in <code>DELETING</code> state, with previous credentials already revoked and normal account use blocked. The app's saved proof lets it check status or retry the already-started deletion without a bearer sign-in token, even if the original completion response was lost. The proof cannot start deleting an active or different account, and retries do not extend its 24-hour deadline. Do not uninstall or clear app data while local cleanup is pending. If the proof is missing, expired or rejected, retain local data and use the email contact above; do not assume the account was deleted or try signing up again to confirm it.</p>
+        <p>If you no longer have the app, <strong>reinstallation is not required to submit an email request</strong>. It also will not recover keys lost on uninstall. The operator must still establish account ownership before completing a request.</p>
+      </section>
+      <section id="deleted"><h2>What a completed deletion removes</h2>
+        <ul>
+          <li>The account's username, shared display name, password verifier or Google subject mapping.</li>
+          <li>Registered device/public-key material and durable account associations, including membership and onboarding records.</li>
+          <li>In-app safety reports submitted by <strong>or targeting</strong> the account. There is no post-deletion safety-report retention exception. Deleting the pinned admin also clears the entire undeliverable report queue.</li>
+          <li>Account access to relay sessions and future delivery. Ephemeral queued records are cleaned up or denied under the existing bounded lifetimes described below.</li>
+          <li>That account's encrypted local data and keys after the app receives an explicit <code>DELETED</code> confirmation for the original UUID. An email request cannot remotely wipe an offline phone; clear local app data yourself only if you also intend to erase all locally stored accounts.</li>
+        </ul>
+        <p>Deletion does not delete your Google account or photos in your Android photo library. There is no server backup of client private keys that can restore your old chats.</p>
+      </section>
+      <section id="retained"><h2>What may remain, and for how long</h2>
+        <ul>
+          <li><strong>Deletion confirmation receipt:</strong> only a SHA-256 digest of the deletion proof, the original random account UUID, <code>PENDING</code>/<code>DELETED</code> state and creation/expiry times remain in the database for a fixed 24-hour confirmation window from receipt creation. The receipt survives account deletion and a temporary-store reset, but contains no plaintext proof, name, login credential, Google subject or content. Status checks/retries do not extend the deadline. Access expires immediately at the deadline; expired rows are removed by a scheduled purge every minute while the service runs. An interruption can delay physical removal, not extend authorization.</li>
+          <li><strong>Queued encrypted payloads:</strong> cleanup and read denial follow their existing absolute deadlines, at most 24 hours from original relay acceptance. Account deletion does not restart those lifetimes. It is not a promise to erase every shared ciphertext byte immediately.</li>
+          <li><strong>Already delivered copies:</strong> other people's trusted clients follow the original view-once or timed expiry. A malicious recipient, modified client or external camera can keep a copy indefinitely; neither account deletion nor End access can erase it.</li>
+          <li><strong>The sole admin reservation:</strong> if the pinned admin account is deleted, its immutable random UUID reservation may survive without a fixed expiry to prevent another account taking that admin identity. It is not a retained profile, password, Google subject or private key.</li>
+          <li><strong>Request correspondence and provider records:</strong> email is outside Vanishr's encrypted messaging and has no automatic app-enforced expiry. Hosting, Google sign-in and FCM have their own operational processing. Ask the operator about necessary verification/correspondence handling; the relay's message TTL is not a promise about those providers' records.</li>
+        </ul>
+        <p>Read the <a href="/privacy/#retention">privacy policy's retention section</a> and <a href="/privacy/#providers">provider disclosures</a>. These are logical deletion and access-control rules, not a guarantee of physical erasure from every device, memory chip or provider system.</p>
+      </section>
+      <section id="other-actions"><h2>Sign-out, clear chat and uninstall are different</h2>
+        <p><strong>Sign out</strong> ends the local session while retaining an encrypted account partition for that account's return. <strong>Clear chat</strong> removes local conversation content without deleting the contact or server account. <strong>Uninstall / clear app data</strong> destroys local keys but does not request server account deletion. None of these removes another person's already received copies.</p>
+        <p>For harassment or child-safety concerns, use the <a href="/terms/#reporting">reporting and escalation instructions</a>. A safety report and an account deletion request are separate actions.</p>
+      </section>
+    </article><aside class="page-toc"><p>ON THIS PAGE</p><nav aria-label="On this page"><a href="#request">Email deletion request</a><a href="#in-app">In-app deletion</a><a href="#deleted">Data removed</a><a href="#retained">Retention and exceptions</a><a href="#other-actions">Other account actions</a></nav></aside></div>
+  </main>
+  <footer class="site-footer"><div class="wrap"><a class="brand" href="/"><img src="/icon.png" width="32" height="32" alt=""><span>vanishr</span></a><nav aria-label="Footer"><a href="/android/">Download</a><a href="/security/">Security</a><a href="/privacy/">Privacy</a><a href="/terms/">Terms</a><a href="/delete-account/" aria-current="page">Delete account</a><a href="https://github.com/RichardHenryJames/vanishr">Source project</a><button type="button" data-consent-open>Cookie settings</button></nav><p>Open-source development software. No warranty. No advertising.</p></div></footer>
+  __CONSENT_PANEL__
+</body>
+</html>

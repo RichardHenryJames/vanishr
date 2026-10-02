@@ -13,6 +13,8 @@ if message.mediaId ~= cjson.null then
     if not uploaded then return 'NOT_FOUND' end
     local media = cjson.decode(uploaded)
     if media.senderDeviceId ~= message.senderDeviceId or media.recipientDeviceId ~= message.recipientDeviceId then return 'FORBIDDEN' end
+    if (media.senderId and media.senderId ~= cjson.null and media.senderId ~= message.senderId)
+        or (media.recipientId and media.recipientId ~= cjson.null and media.recipientId ~= message.recipientId) then return 'FORBIDDEN' end
     if media.messageId ~= cjson.null or media.expiresAt ~= message.expiresAt then return 'CONFLICT' end
     media.messageId = message.id
     redis.call('SET', KEYS[5], cjson.encode(media), 'PXAT', message.expiresAt)

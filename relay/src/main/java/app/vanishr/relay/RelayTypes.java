@@ -34,5 +34,6 @@ public final class RelayTypes {
     }
 
     public record Media(UUID id, UUID senderDeviceId, UUID recipientDeviceId,
-                        long expiresAt, UUID messageId, byte[] ciphertext, String digest) { }
+                        long expiresAt, UUID messageId, byte[] ciphertext, String digest,
+                        UUID senderId, UUID recipientId) { }
 }

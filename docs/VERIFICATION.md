@@ -1,7 +1,127 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-10-01. This is a development foundation,
+Evidence refreshed on Windows, 2026-10-02. This is a development foundation,
 not a production security assessment or independent audit.
+
+## Release 0.4.7 / bilateral administrator onboarding
+
+- Version 0.4.7/code 28 makes the server-authorized official-administrator
+  relationship visible on both sides before either participant sends a message.
+  The client now persists validated introductions for the administrator as well
+  as ordinary users. Background refresh always starts with the newest page, and
+  previously validated pages remain in the protected local contact store.
+- V10 timestamps administrator introductions and orders the administrator's
+  bounded directory newest-first. The existing V6 single-admin database
+  constraints and pinned Android administrator identity remain unchanged.
+  Clients still cannot choose an administrator, promote an account or replace a
+  previously pinned identity.
+- Two targeted relay integration tests passed with no failures, errors or skips.
+  Two Android onboarding regressions passed on the isolated secured QA emulator,
+  including a 65-contact paged directory and visibility before messaging.
+  Android compilation, update-parser unit tests and signed-release lint passed.
+  The final full Maven reactor run passed 83 tests with no failures or errors
+  and one environment-gated skip.
+- The schema-10 relay artifact was published only to the approved
+  `vanishr-dev-rg` deployment. Temporary transfer storage was removed and the
+  public HTTPS health endpoint returned `{"status":"up"}` after installation.
+- Final direct APK: 44,421,641 bytes, SHA-256
+  `f9547ef492a98c172ec5792e4daf78973ee6e76e9ac9acdd2d03ff912ed28cec`.
+  APK Signature Scheme v2 verification passed with the existing release
+  certificate.
+- Final Play AAB: 45,734,605 bytes, SHA-256
+  `96157d0c7e5da80be34a93a55c1cb1383f39c389bbf5e4ffee52318954bf55c8`.
+  JAR signature verification and official bundletool validation passed;
+  bundletool reported version code 28 and version name 0.4.7.
+- The static 0.4.7 candidate contains 31 files / 59,602,665 bytes. Both the
+  staged files and 469-entry source archive were checked for secret, signing-key
+  and deployment-state paths with no matches. Vercel publication is **pending**:
+  the Vercel CLI and a direct request to the public Vercel origin both hung from
+  this workstation, so no successful deployment or public-file verification is
+  claimed.
+- No Android Firebase client configuration was available locally. The artifacts
+  were therefore built without configured FCM/Google sign-in client values;
+  those provider features are not claimed ready in this release.
+
+## Release 0.4.6 / Play candidate
+
+- Version 0.4.6/code 27 implements fresh-authentication account deletion,
+  owner-only blocked accounts, server-enforced direct-contact blocking,
+  metadata-only user/message reports, pinned-admin review, explicit Terms
+  acknowledgement and in-app privacy/deletion/support links. Account deletion
+  removes only the current local account partition; other remembered accounts
+  and their protected keys are preserved.
+- V8 adds deletion state/block relationships and guards that preserve only the
+  erased admin's permanent UUID reservation. V9 adds digest-only, bounded
+  24-hour deletion receipts so a lost response or Redis reset cannot turn an
+  arbitrary 401/404 into success. Dedicated proof status/retry never logs in,
+  reenrolls, chooses another account or extends its deadline. Saved Google
+  reauthentication is bound to the expected existing UUID rather than creating
+  a replacement account after erasure.
+- The relay was deployed to the existing approved host before client publication.
+  Read-only postflight confirmed schema 9, the same sole admin and public-key
+  fingerprint, exact packaged JAR, healthy services, unchanged PostgreSQL/Redis/
+  HTTPS containers and authenticated-only safety endpoints. The original 75
+  hosted accounts were unchanged by deployment.
+- The final targeted relay matrix passed **42 tests**, no failures/errors/skips,
+  including 31 integration checks and 11 Google/auth/notifier/policy checks.
+  A broader 68-test relay regression run also passed earlier in implementation;
+  counts overlap and must not be added. Final native verification passed **54
+  tests** in 240.35 seconds on the isolated Android 12 fixture (37 safety-core
+  cases plus 17 UI/crypto/permission-boundary regressions), with no skips.
+  Six update-parser unit tests, QA lint and signed-release lint passed.
+- A live smoke test created two synthetic accounts, verified new-admin discovery,
+  DEVICE-token deletion rejection, block/unblock enforcement against the other
+  client, metadata-only report submission with admin-only review, fresh-ENROLL
+  deletion, old-token/login rejection, and original-deadline proof confirmation
+  and retry. Both synthetic accounts were deleted. Two earlier attempts were
+  cleaned up too; they exposed a 108-millisecond clock-skew validation issue,
+  corrected with a 30-second client validation allowance without changing any
+  server TTL. Group-only reports no longer falsely require a message ID.
+- The Play bundle is built with `-Bundle -PlayStore` (Gradle
+  `-PplayStore=true`), which disables the external APK update check/prompt and
+  uses the Google Play listing instead. The ordinary direct-download APK retains
+  its existing update path. Same package and signing identity are retained.
+  Final Play AAB: 45,733,371 bytes, SHA-256
+  `18366ae3135c520307a53835affbdb9524ee436264925c265911b4ed30ef44e0`.
+  Official bundletool validation, version/package/target-36 checks and original
+  signing-certificate verification passed. The bundle requests 16 KiB native
+  packaging; its 64-bit libraries match the previously inspected 16 KiB-aligned
+  binaries. No new 16 KiB runtime test was performed.
+- Public-policy templates cover app/website privacy, account deletion by email
+  without reinstalling, Terms/child-safety standards, and the supplied support
+  inbox. The six-page stage passed link/CSP checks and 24 viewport checks without
+  changing consent-only website analytics. Publication state is recorded below
+  after the immutable distribution is uploaded and checked.
+- **Not Play-approved / not certified production-ready:** Remote Photos automatic
+  acceptance was explicitly retained. Independent verification, Android photo
+  permission, a Terms screen and a notification are not substitutes for Google's
+  prominent-consent, broad-photo and foreground-service eligibility review.
+  This task did not certify moderation operations, age/audience declarations,
+  ownership-verification of email requests, mailbox-retention practices, account
+  testing eligibility, Play App Signing configuration or Google/Firebase signer
+  registration. See [Play submission checklist](PLAY-STORE.md).
+- Evidence: `.tools/play-safety-0.4.6-verified-native.txt`,
+  `.tools/play-safety-host-after.json`, `.tools/play-safety-relay-artifact.json`,
+  `.tools/play-store-0.4.6/validation.json`, current Surefire reports, and the
+  sanitized live smoke/website evidence in the session workspace. No full
+  Android suite, physical-phone acceptance or independent security audit is
+  claimed.
+- Public direct-download deployment `dpl_BJM7xauBekngSTAqHKxFNT38xDQR` is READY
+  on the existing Vanishr Hobby static project. The audited bundle contains 31
+  files (59,617,431 bytes) and 217 matching workspace source files. The APK is
+  44,438,029 bytes, SHA-256
+  `3882f5acaa868cbda703c58209ddfe929107254c833f8d4ed5c99b0067b451a0`.
+  Anonymous verification matched all 30 public files, original APK signer,
+  code-27 no-store update feed, six crawlable pages, eleven canonical redirects
+  and nine private/missing-path 404s. Privacy, Terms and deletion-request pages
+  are publicly accessible without app installation or login. Initial alias
+  propagation briefly returned the old home page; the complete retry passed.
+  This is website/APK publication, not a Google Play upload or approval.
+  Evidence: `.tools/distribution-audit-0.4.6.json`,
+  `.tools/public-release-verification-0.4.6.json` and
+  `.tools/public-website-verification-0.4.6.json`.
+  Publication-status documentation updates postdate the immutable source ZIP;
+  the signed binaries and archived source were not silently repackaged.
 
 ## Release 0.4.5
 

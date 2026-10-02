@@ -18,7 +18,8 @@ public class RealtimeHub extends TextWebSocketHandler implements WebSocketConfig
     private final Map<UUID, WebSocketSession> sessions = new ConcurrentHashMap<>();
     private final Map<UUID, WebSocketSession> photoSessions = new ConcurrentHashMap<>();
     private final AuthService auth;
-    public RealtimeHub(AuthService auth) { this.auth = auth; }
+    private final SafetyGate gate;
+    public RealtimeHub(AuthService auth, SafetyGate gate) { this.auth = auth; this.gate = gate; }
 
     @Override public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         registry.addHandler(this, "/events", "/photo-events").addInterceptors(new HandshakeInterceptor() {
@@ -40,6 +41,14 @@ public class RealtimeHub extends TextWebSocketHandler implements WebSocketConfig
     }
 
     @Override public void afterConnectionEstablished(WebSocketSession session) throws Exception {
+        gate.request(false, () -> establish(session));
+    }
+
+    private void establish(WebSocketSession session) throws java.io.IOException {
+        if (!auth.activeSession((String) session.getAttributes().get("sessionKey"), actor(session))) {
+            session.close(CloseStatus.POLICY_VIOLATION);
+            return;
+        }
         session.setTextMessageSizeLimit(64);
         session.setBinaryMessageSizeLimit(64);
         WebSocketSession previous = channel(session).put(actor(session).deviceId(), session);
@@ -66,6 +75,19 @@ public class RealtimeHub extends TextWebSocketHandler implements WebSocketConfig
     }
 
     public void wakePhotos(UUID deviceId) { wake(deviceId, photoSessions); }
+
+    public void disconnectAccount(UUID userId) {
+        for (Map<UUID, WebSocketSession> channel : List.of(sessions, photoSessions)) {
+            for (WebSocketSession session : List.copyOf(channel.values())) {
+                if (!userId.equals(actor(session).userId())) continue;
+                try { session.close(CloseStatus.POLICY_VIOLATION); }
+                catch (java.io.IOException failure) {
+                    throw new ApiException(org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE, "connection_cleanup_failed");
+                }
+                channel.remove(actor(session).deviceId(), session);
+            }
+        }
+    }
 
     private void wake(UUID deviceId, Map<UUID, WebSocketSession> channel) {
         WebSocketSession session = channel.get(deviceId);

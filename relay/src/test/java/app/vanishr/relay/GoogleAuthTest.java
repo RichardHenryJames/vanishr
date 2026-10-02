@@ -71,6 +71,18 @@ class GoogleAuthTest {
         assertThrows(ApiException.class, () -> google.signIn(new GoogleAuth.SignIn(challenge.id(), "test-token")));
         verify(verifier, times(1)).verify("test-token", challenge.nonce());
         verify(auth).issue(new RelayTypes.Actor(user, null));
+        when(accounts.existingGoogleAccount("subject", user)).thenReturn(new AccountDirectory.GoogleAccount(user, "g_test"));
+        GoogleAuth.Challenge existing = google.challenge(new GoogleAuth.Start(null, user));
+        assertTrue(pending.get(GoogleAuth.key(existing.id())).contains(user.toString()));
+        assertEquals("g_test", google.signIn(new GoogleAuth.SignIn(existing.id(), "test-token")).handle());
+        verify(accounts).existingGoogleAccount("subject", user);
+        UUID erased = UUID.randomUUID();
+        when(accounts.existingGoogleAccount("subject", erased)).thenThrow(
+                new ApiException(org.springframework.http.HttpStatus.UNAUTHORIZED, "authentication_failed"));
+        GoogleAuth.Challenge deleted = google.challenge(new GoogleAuth.Start(null, erased));
+        assertThrows(ApiException.class, () -> google.signIn(new GoogleAuth.SignIn(deleted.id(), "test-token")));
+        verify(accounts, times(1)).googleAccount("subject");
+        verify(auth, never()).issue(new RelayTypes.Actor(erased, null));
     }
 
     @Test void absentConfigurationNeverEnablesGoogleOrTouchesStorage() {

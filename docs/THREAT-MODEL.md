@@ -100,9 +100,11 @@ With no existing admin, nobody is promoted; a trusted operator must explicitly
 pin an inspected account and enable it in a bounded transaction.
 
 Triggers reject a different account becoming admin and reject changing, deleting
-or truncating the singleton pin. A restrictive foreign key prevents changing or
-deleting the pinned account UUID. Revocation leaves the pin intact: no replacement
-account becomes eligible, and only the original account may be re-enabled.
+or truncating the singleton pin. From V8, guarded account erasure can remove the
+admin's account data while leaving only the permanent random UUID reservation.
+That UUID cannot be moved, reinserted or reassigned after erasure. Revocation
+without erasure leaves the original account eligible for re-enablement, but
+deleting it does not make anyone else eligible.
 The server reads role and pin together and fails closed on a mismatched admin,
 even if a role-only database guard was bypassed. There is no client promotion,
 transfer or automatic admin-recovery endpoint. Live release tests must not create
@@ -131,7 +133,10 @@ account, not an AI bot.
 
 The signed app pins the official relay origin, admin account/device UUIDs and
 SHA-256 public-identity fingerprint. The relay cannot replace that trust root.
-Only this explicit onboarding path avoids the manual verification prompt.
+Only this explicit onboarding path avoids the manual verification prompt. Both
+participants persist the relay-authorized introduction during background sync;
+message delivery is not required to make the relationship visible. The admin
+directory returns newest enrollments first and remains bounded and paginated.
 The admin's client must also possess the pinned local identity before it can
 automatically establish these new conversations. On the admin side, the initial
 new-user binding trusts authenticated relay enrollment, not independent proof
@@ -149,7 +154,7 @@ not a username rule, remote configuration update or verification bypass.
 Automatic direct-chat trust is kept separate from independent verification.
 It does not automatically authorize group ownership/invitations, private profile
 photos, presence/last-seen sharing, Remote Photos, Android permissions or the
-owner's Auto-allow setting. Those existing independent-verification and consent
+Remote Photos eligibility. Independent verification and Android permission
 checks remain in place. Users can remove an automatic contact; an encrypted
 local dismissal prevents refreshes or incoming packets from silently restoring it.
 
@@ -161,6 +166,47 @@ account/contact settings, not message payloads; they remain subject to the
 existing protected-vault capacity and account-isolation boundaries. The relay
 rechecks the current admin role for discovery, and pauses discovery when it is
 revoked without transferring the permanent pin.
+
+## Account erasure, blocks and safety reports
+
+Account erasure requires a fresh account-only password/Google sign-in, never a
+remembered device session. The account is marked DELETING before cleanup; failed
+cleanup disables normal use and remains retryable. A saved Google account's
+challenge includes its expected immutable UUID, preventing reauthentication
+from silently registering a replacement after erasure.
+
+The client commits a separate random 256-bit proof before sending deletion.
+V9 stores only its digest, original UUID, state and a fixed <=24-hour deadline
+in PostgreSQL. The receipt and account erasure commit together; responses are
+held until database commit. Proof status/retry survive Redis reset and cannot
+log in, choose another account or extend their lifetime. Unknown/expired proof
+is not confirmation. On a confirmed result the client erases only that owner's
+vault partition/content keys; interruption retains a cleanup marker and blocks
+ordinary chat/sign-in until resolved. The minimal admin UUID reservation
+survives erasure to prohibit admin replacement.
+
+Blocks are durable account-scoped UUID relationships. The relay checks either
+direction for direct messages/media/keys, profiles, presence, Remote Photos,
+introductions and new group invitations/controls. New clients also hide blocked
+group-sender content, without downloading it as a photo. Existing shared-group
+membership and other recipients' copies are not erased by blocking.
+Unblocking restores neither pinned direct-contact trust nor consumed retries.
+
+Reports are explicit metadata-only submissions: reason, reporter/target UUIDs
+and optional accessible group/message IDs. No plaintext, images or free-text
+evidence is copied from an encrypted conversation. The current pinned admin
+can review up to 50 records at a time; submission is bounded to five per user
+per day and a 10,000-record queue, with atomic <=30-day expiry. Account deletion
+removes reports made by or targeting the deleted user; deleting the admin
+clears the undeliverable queue. Report submission is not proof that effective
+human moderation has occurred.
+
+Other recipients' group payloads and consumed replay/receipt metadata can
+remain until their original <=24-hour deadline. Unknown legacy detached
+uploads can delay deletion until their original <=5-minute expiry rather than
+deleting unrelated data. Cleanup failures never imply successful deletion.
+The static email request resource does not collect passwords or tokens;
+operator ownership checks and mailbox handling remain human responsibilities.
 
 Private contact nicknames stay in the owner's encrypted local account partition
 and are never sent to the relay or the contact. A shared profile refresh may update
@@ -219,29 +265,30 @@ Online/Typing contract and do not publish last seen; both people must update for
 the new feature. A malicious peer can misreport activity or retain previously
 received metadata; status is not identity-verification or message-delivery proof.
 
-## Owner-approved Remote Photos
+## Remote Photos and automatic access
 
 Only an enrolled account whose current database role is `ADMIN` may request this
 feature; both clients require an independently verified saved direct contact.
 
-The owner explicitly controls whether Remote Photos requests require an in-app
-approval prompt. By default, a request presents an Allow/Don't allow prompt
-naming the contact and explaining background and locked-phone access to photos
-Android permits this app to read, including originals. The owner may instead
-enable a local, owner-controlled Auto-allow setting. When enabled, subsequent
-eligible verified requests can proceed without displaying the in-app approval
-dialog. This setting is stored locally on the owner's device and is never
-controlled by the remote requester or server.
+The current client automatically accepts eligible requests. There is no active
+per-session Allow/Don't allow gate or owner-controlled Auto-allow toggle.
+Earlier descriptions of such a default prompt/setting were inaccurate. The
+developer explicitly requested retaining automatic access for the Play candidate.
+Independent identity verification is not equivalent to specific consent to
+share a gallery. This remains a prominent-disclosure/consent and broad-photo-
+permission review concern, not a demonstrated Play-policy-compliance claim.
 
-Auto-allow does not bypass Android permissions. Android photo and notification
+Automatic acceptance does not bypass Android permissions. Android photo and notification
 permission prompts still apply, and sharing cannot begin unless the required
-Android permissions and local service requirements are satisfied. Auto-allow is
+Android permissions and local service requirements are satisfied. Automatic acceptance is
 not an Android permission grant and does not silently grant gallery access.
 
-Approval, including an auto-allowed session, and service startup still require
-an unlocked phone. Partial photo access is respected. No remote account,
-server role, or requester can independently enable Auto-allow, change Android
-permissions, or bypass the owner's device security boundary.
+Service startup still requires an unlocked phone. Partial photo access is
+respected. No remote account, server role, or requester can change Android
+permissions or bypass the owner's device security boundary. Users can revoke
+photo permission, remove/block a contact, or end an active session through its
+notification. The new policy screen describes automatic access; it is not a
+replacement for Google's review or a per-session owner approval.
 
 An accepted session runs in a non-exported Android data-sync foreground service
 with a persistent private notification and an immutable End access action.
@@ -303,9 +350,9 @@ source files remain untouched.
 
 Like any authorized sharing, an admin can retain received photos using another
 camera or modified client; revocation cannot erase copies already received.
-Auto-allow therefore does not provide DRM or prevent an authorized requester
-from retaining a copy. The owner's local Auto-allow setting is a convenience
-for explicitly trusted contacts, not a server-side authorization bypass.
+Automatic acceptance therefore does not provide DRM or prevent a requester
+from retaining a copy. The mandatory independently verified identity checks
+still apply, but do not by themselves demonstrate permission for photo access.
 
 ## Private profile photos
 
@@ -533,8 +580,8 @@ Network/provider failure does not weaken identity checks or extend content TTLs.
 ## Architecture chosen before implementation
 
 - Java Spring Boot HTTPS relay; PostgreSQL holds accounts, editable username/display
-  metadata, password verifiers, device identifiers, public prekeys and group
-  membership metadata only. No payload tables, private nicknames, group names,
+  metadata, password verifiers, device identifiers, public prekeys, group
+  membership, deletion state and block/intro metadata only. No payload tables, private nicknames, group names,
   or content-decryption keys.
 - Official Signal libsignal on the client, not a hand-written key-agreement or ratchet.
 - Random per-image authenticated-encryption keys are transported inside Signal messages.
@@ -566,7 +613,7 @@ Network/provider failure does not weaken identity checks or extend content TTLs.
 | Stolen locked phone | Android Keystore-wrapped private state, phone-unlocked access checks, encrypted local records, disabled backups | No separate app lock on an already-unlocked phone; OS exploits, weak screen lock, rooted device and forensic recovery are not defeated |
 | Stolen session credential | One-hour access, single-use rotating 30-day renewal, hash-only server storage, current-device checks, logout/replacement revocation | A stolen renewal handle can extend unauthorized relay access while valid; neither token decrypts ciphertext or creates valid peer content |
 | Malicious recipient | Local expiry and screenshot flags reduce accidental retention | Recipient can modify client, copy plaintext, screenshot on unsupported devices or photograph a screen; disappearing content is not DRM |
-| Remote photo abuse | Current ADMIN role, independently verified contact, owner-controlled approval/Auto-allow, Android photo permissions, authenticated photo sessions, bounded TTLs and End access | An owner who enables Auto-allow has intentionally reduced per-request friction; a malicious/modified requester can retain photos they legitimately receive; Android/OEM behavior can affect background transfer |
+| Remote photo abuse | Current ADMIN role, independently verified contact, Android photo permissions, authenticated photo sessions, bounded TTLs and End access | Eligible requests are automatically accepted, without a per-session consent gate or owner toggle; independent verification is not photo-sharing consent. A requester can retain received photos. Play-policy review and Android/OEM behavior remain unresolved risks |
 | Foreground-service notification | Persistent Android foreground-service notification with generic `Vanishr is active` title and End access action | Notification visibility does not prevent screenshots/cameras or a modified client from retaining received photos; Android/OEM notification behavior may vary |
 | Replay/tampering | Signal ratchet replay detection and authentication, authenticated envelope IDs and deadlines, idempotent relay IDs | A server may still replay opaque delivery metadata; client rejects expired/duplicate envelopes |
 | Identity substitution / MITM | Mandatory independent verification; pinned public identities; explicit reset on replacement | No key transparency service; verifying over this same relay is not verification |

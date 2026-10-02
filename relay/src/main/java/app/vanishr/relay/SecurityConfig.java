@@ -14,6 +14,7 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.web.filter.OncePerRequestFilter;
+import org.springframework.web.util.ContentCachingResponseWrapper;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -22,7 +23,7 @@ import java.util.List;
 @Configuration
 public class SecurityConfig {
     @Bean
-    SecurityFilterChain security(HttpSecurity http, AuthService auth, RateLimiter limiter) throws Exception {
+    SecurityFilterChain security(HttpSecurity http, AuthService auth, RateLimiter limiter, SafetyGate gate) throws Exception {
         http.csrf(config -> config.disable()).cors(config -> config.disable())
                 .formLogin(config -> config.disable()).httpBasic(config -> config.disable()).logout(config -> config.disable())
                 .sessionManagement(config -> config.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
@@ -33,13 +34,15 @@ public class SecurityConfig {
                 .authorizeHttpRequests(requests -> requests
                         .requestMatchers(HttpMethod.GET, "/health").permitAll()
                         .requestMatchers(HttpMethod.POST, "/auth/register", "/auth/login", "/auth/google", "/auth/google/challenge", "/auth/refresh").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/account/deletion/status", "/account/deletion/retry").permitAll()
                         .requestMatchers(HttpMethod.POST, "/devices").hasAuthority("ENROLL")
+                        .requestMatchers(HttpMethod.DELETE, "/account").hasAuthority("ENROLL")
                         .requestMatchers("/auth/me", "/auth/logout").authenticated()
                         .anyRequest().hasAuthority("DEVICE"))
                 .exceptionHandling(errors -> errors
                         .authenticationEntryPoint((request, response, failure) -> error(response, 401, "authentication_required"))
                         .accessDeniedHandler((request, response, failure) -> error(response, 403, "forbidden")))
-                .addFilterBefore(new BoundaryFilter(auth, limiter), UsernamePasswordAuthenticationFilter.class);
+                .addFilterBefore(new BoundaryFilter(auth, limiter, gate), UsernamePasswordAuthenticationFilter.class);
         return http.build();
     }
 
@@ -53,9 +56,30 @@ public class SecurityConfig {
     static final class BoundaryFilter extends OncePerRequestFilter {
         private final AuthService auth;
         private final RateLimiter limiter;
-        BoundaryFilter(AuthService auth, RateLimiter limiter) { this.auth = auth; this.limiter = limiter; }
+        private final SafetyGate gate;
+        BoundaryFilter(AuthService auth, RateLimiter limiter, SafetyGate gate) { this.auth = auth; this.limiter = limiter; this.gate = gate; }
 
         @Override protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain) throws ServletException, IOException {
+            boolean websocket = request.getRequestURI().equals("/events") || request.getRequestURI().equals("/photo-events");
+            ContentCachingResponseWrapper buffered = websocket ? null : new ContentCachingResponseWrapper(response);
+            HttpServletResponse output = buffered == null ? response : buffered;
+            boolean deleting = request.getMethod().equals("DELETE") && request.getRequestURI().equals("/account");
+            boolean blocking = List.of("PUT", "DELETE").contains(request.getMethod()) && request.getRequestURI().startsWith("/account/blocks/");
+            try {
+                gate.request(deleting || blocking, () -> filter(request, output, chain, deleting));
+            } catch (ApiException failure) {
+                output.resetBuffer(); error(output, failure.status.value(), failure.getMessage());
+            } catch (org.springframework.transaction.UnexpectedRollbackException failure) {
+                if (output.getStatus() < 400) { output.resetBuffer(); error(output, 503, "service_unavailable"); }
+            } catch (org.springframework.dao.DataAccessException | org.springframework.transaction.TransactionException failure) {
+                output.resetBuffer(); error(output, 503, "service_unavailable");
+            } finally {
+                SecurityContextHolder.clearContext();
+                if (buffered != null) buffered.copyBodyToResponse();
+            }
+        }
+
+        private void filter(HttpServletRequest request, HttpServletResponse response, FilterChain chain, boolean deleting) throws ServletException, IOException {
             if (!request.isSecure()) { error(response, 426, "tls_required"); return; }
             response.setHeader("Cache-Control", "no-store");
             response.setHeader("Pragma", "no-cache");
@@ -74,7 +98,7 @@ public class SecurityConfig {
                 if (header != null) {
                     if (!header.startsWith("Bearer ") || header.length() != 50) { error(response, 401, "authentication_required"); return; }
                     String token = header.substring(7);
-                    RelayTypes.Actor actor = auth.authenticate(token);
+                    RelayTypes.Actor actor = auth.authenticate(token, deleting);
                     request.setAttribute("sessionKey", AuthService.tokenKey(token));
                     SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(actor, null,
                             List.of(new SimpleGrantedAuthority(actor.deviceId() == null ? "ENROLL" : "DEVICE"))));

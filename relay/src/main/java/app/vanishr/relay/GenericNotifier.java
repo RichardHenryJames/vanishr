@@ -26,18 +26,22 @@ public class GenericNotifier {
     private final StringRedisTemplate redis;
     private final ObjectMapper json;
     private final RealtimeHub realtime;
+    private final AccountDirectory accounts;
+    private final SafetyGate gate;
     private final String projectId;
     private final GoogleCredentials credentials;
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).followRedirects(HttpClient.Redirect.NEVER).build();
     private final ExecutorService executor = new ThreadPoolExecutor(1, 2, 30, TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(64), runnable -> { Thread thread = new Thread(runnable, "generic-push"); thread.setDaemon(true); return thread; });
 
-    public GenericNotifier(StringRedisTemplate redis, ObjectMapper json, RealtimeHub realtime,
+    public GenericNotifier(StringRedisTemplate redis, ObjectMapper json, RealtimeHub realtime, AccountDirectory accounts, SafetyGate gate,
                            @Value("${vanishr.push.enabled:false}") boolean enabled,
                            @Value("${vanishr.push.project-id:}") String projectId) {
         this.redis = redis;
         this.json = json;
         this.realtime = realtime;
+        this.accounts = accounts;
+        this.gate = gate;
         this.projectId = projectId;
         if (enabled && !projectId.matches("[a-z][a-z0-9-]{4,62}")) throw new IllegalStateException("A valid FCM project is required");
         try { credentials = enabled ? GoogleCredentials.getApplicationDefault().createScoped("https://www.googleapis.com/auth/firebase.messaging") : null; }
@@ -53,9 +57,13 @@ public class GenericNotifier {
     public void unregister(UUID deviceId) { redis.delete("push:" + deviceId); redis.delete("notification:" + deviceId); }
 
     String reference(Destination destination) {
+        return gate.shared(() -> createReference(destination));
+    }
+
+    private String createReference(Destination destination) {
         long now = System.currentTimeMillis();
         if (destination == null || destination.userId() == null || destination.deviceId() == null || destination.conversationId() == null
-                || destination.messageId() == null || destination.expiresAt() <= now) return null;
+                || destination.messageId() == null || destination.expiresAt() <= now || !accounts.routeAllowed(destination)) return null;
         byte[] entropy = new byte[32]; new SecureRandom().nextBytes(entropy);
         String reference = Base64.getUrlEncoder().withoutPadding().encodeToString(entropy);
         Arrays.fill(entropy, (byte) 0);
@@ -76,7 +84,8 @@ public class GenericNotifier {
         catch (Exception failure) { throw new ApiException(org.springframework.http.HttpStatus.NOT_FOUND, "not_found"); }
         if (route == null || route.destination() == null || !actor.userId().equals(route.destination().userId())
                 || !actor.deviceId().equals(route.destination().deviceId()) || route.destination().expiresAt() <= System.currentTimeMillis()
-                || !RedisRelay.digest(reference.getBytes(StandardCharsets.US_ASCII)).equals(route.digest()))
+                || !RedisRelay.digest(reference.getBytes(StandardCharsets.US_ASCII)).equals(route.digest())
+                || !accounts.routeAllowed(route.destination()))
             throw new ApiException(org.springframework.http.HttpStatus.NOT_FOUND, "not_found");
         return route.destination();
     }
@@ -109,7 +118,14 @@ public class GenericNotifier {
     }
 
     private void send(UUID deviceId, Destination destination) {
+        gate.shared(() -> { sendAuthorized(deviceId, destination); return null; });
+    }
+
+    private void sendAuthorized(UUID deviceId, Destination destination) {
         try {
+            // A queued wake must not recreate routing or notify after a block/erasure completed.
+            if (accounts.deviceOwner(deviceId).filter(owner -> accounts.active(owner, deviceId)).isEmpty()
+                    || destination != null && !accounts.routeAllowed(destination)) return;
             String token = redis.opsForValue().get("push:" + deviceId);
             if (token == null) return;
             boolean routeHints = false;

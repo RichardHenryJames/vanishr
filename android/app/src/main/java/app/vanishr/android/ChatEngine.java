@@ -66,6 +66,7 @@ final class ChatEngine implements AutoCloseable {
     private final ProfilePhotos photos;
     private final ContactPresence presence;
     private final AdminOnboarding onboarding;
+    private final AccountSafety safety;
     private Account account;
     private RelayApi api;
     private SignalClient signal;
@@ -85,17 +86,32 @@ final class ChatEngine implements AutoCloseable {
     }
 
     ChatEngine(AndroidVault vault, AdminOnboarding.Pin adminPin) throws Exception {
+        this(vault, adminPin, AccountSafety::new);
+    }
+
+    ChatEngine(AndroidVault vault, AdminOnboarding.Pin adminPin,
+               java.util.function.BiFunction<ChatEngine, AndroidVault, AccountSafety> safetyFactory) throws Exception {
         this.vault = vault;
         groups = new GroupChat(this,vault);
         photos = new ProfilePhotos(this,vault);
         presence = new ContactPresence(this);
         onboarding = new AdminOnboarding(this, vault, adminPin);
+        safety = Objects.requireNonNull(safetyFactory.apply(this, vault));
+        if (safety.deletionPending()) {
+            try { safety.retryPendingDeletion(); }
+            catch (AccountSafety.DeletionPendingException pending) {
+                // The retry UI needs an engine, but account sessions and Signal must remain unopened.
+                safety.retainPendingFailure(pending);
+                return;
+            }
+        }
+        if (safety.deletionCompleted()) return;
         account = read("account", Account.class);
         if (account != null) {
             api = new RelayApi(account.origin(), account.accessToken());
             if (!authenticated() && account.accessToken() != null && !account.accessToken().isEmpty()) invalidateToken();
             if (account.enrolled()) api.sessionRefresh(this::refreshSession);
-            signal = new SignalClient(account.userId(), vault);
+            signal = new SignalClient(account.userId(), vault.accountVault(account));
         }
         purge();
         Map<String, String> protectedRecords = new LinkedHashMap<>();
@@ -113,15 +129,17 @@ final class ChatEngine implements AutoCloseable {
     ProfilePhotos photos() { return photos; }
     ContactPresence presence() { return presence; }
     AdminOnboarding onboarding() { return onboarding; }
+    AccountSafety safety() { return safety; }
     boolean independentlyVerified(UUID userId) {
-        return signal != null && signal.isVerified(userId) && vault.get("contact/" + userId) != null && !onboarding.automatic(userId);
+        return signal != null && !safety.deletionPending() && !safety.isBlocked(userId) && signal.isVerified(userId)
+                && vault.get("contact/" + userId) != null && !onboarding.automatic(userId);
     }
-    void prepareConversation(Peer peer) throws Exception { onboarding.prepare(peer); }
+    void prepareConversation(Peer peer) throws Exception { safety.requireAllowed(peer.userId()); onboarding.prepare(peer); }
     boolean realtimeReady() { return realtimeReady; }
     RelayApi groupApi() { return api; }
     SignalClient groupSignal() { return signal; }
-    private boolean accessReady() { return account != null && account.enrolled() && account.accessToken() != null && !account.accessToken().isEmpty() && account.expiresAt() > System.currentTimeMillis() + 5000; }
-    private boolean remembered() { return account != null && account.enrolled() && account.refreshToken() != null && account.refreshToken().matches("[A-Za-z0-9_-]{43}") && account.refreshExpiresAt() > System.currentTimeMillis() + 5000; }
+    private boolean accessReady() { return !safety.deletionPending() && account != null && account.enrolled() && account.accessToken() != null && !account.accessToken().isEmpty() && account.expiresAt() > System.currentTimeMillis() + 5000; }
+    private boolean remembered() { return !safety.deletionPending() && account != null && account.enrolled() && account.refreshToken() != null && account.refreshToken().matches("[A-Za-z0-9_-]{43}") && account.refreshExpiresAt() > System.currentTimeMillis() + 5000; }
     boolean authenticated() { return accessReady() || remembered(); }
     boolean usesGoogle() { return account != null && vault.get("google-account") != null; }
     UUID activeDeviceId() { return account != null && account.enrolled() ? account.deviceId() : null; }
@@ -228,9 +246,14 @@ final class ChatEngine implements AutoCloseable {
         byte[] value = vault.get(key);
         return value == null ? null : JSON.fromJson(new String(value, StandardCharsets.UTF_8), type);
     }
-    private void write(String key, Object value) { vault.put(key, bytes(value)); }
+    private void write(String key, Object value) {
+        if (safety != null && (safety.deletionPending() || safety.deletionCompleted()))
+            throw new SecurityException("Account deletion prevents further writes");
+        vault.put(key, bytes(value));
+    }
 
     void login(String origin, String handle, String password, boolean register, boolean replaceExisting) throws Exception {
+        safety.requireNotDeleting();
         purge();
         if (usesGoogle()) throw new SecurityException("Use Google sign-in for this account");
         if (account != null && !account.origin().equals(okhttp3.HttpUrl.get(origin).toString()))
@@ -251,6 +274,7 @@ final class ChatEngine implements AutoCloseable {
     }
 
     void loginGoogle(String origin, GoogleSignIn.Challenge challenge, String idToken, boolean replaceExisting) throws Exception {
+        safety.requireNotDeleting();
         purge();
         if (account != null && !usesGoogle()) throw new SecurityException("Account linking is not enabled");
         if (challenge.expiresAt() <= System.currentTimeMillis() || !BuildConfig.GOOGLE_WEB_CLIENT_ID.equals(challenge.clientId()))
@@ -270,6 +294,7 @@ final class ChatEngine implements AutoCloseable {
     }
 
     private void finishLogin(Token token, String handle, UUID existingDevice, boolean replaceExisting, boolean google) throws Exception {
+        safety.requireNotDeleting();
         if (token == null || token.userId() == null || token.accessToken() == null || token.expiresAt() <= System.currentTimeMillis())
             throw new SecurityException("Invalid authenticated session");
         if (account == null) {
@@ -298,7 +323,7 @@ final class ChatEngine implements AutoCloseable {
             return null;
         });
         account = signedIn;
-        signal = new SignalClient(account.userId(), vault);
+        signal = new SignalClient(account.userId(), vault.accountVault(account));
         api.token(token.accessToken());
         if (token.deviceId() == null) {
             Token registered = api.call("POST", "/devices", new DeviceRegistration(deviceId, signal.publicIdentity(), replaceExisting), Token.class);
@@ -310,6 +335,7 @@ final class ChatEngine implements AutoCloseable {
             vault.transaction(() -> { write("account", account); return null; });
         }
         api.sessionRefresh(this::refreshSession);
+        safety.authenticatedAccount();
         replenishKeys();
         online = true;
     }
@@ -333,8 +359,8 @@ final class ChatEngine implements AutoCloseable {
 
     List<Peer> peers() {
         Map<UUID, Peer> combined = new LinkedHashMap<>();
-        for (Peer peer : savedPeers()) combined.put(peer.userId(), peer);
-        for (Peer peer : onboarding.peers()) combined.putIfAbsent(peer.userId(), peer);
+        for (Peer peer : savedPeers()) if (!safety.isBlocked(peer.userId())) combined.put(peer.userId(), peer);
+        for (Peer peer : onboarding.peers()) if (!safety.isBlocked(peer.userId())) combined.putIfAbsent(peer.userId(), peer);
         List<Peer> result = new ArrayList<>(combined.values());
         result.sort(Comparator.comparing(Peer::name));
         return result;
@@ -354,6 +380,7 @@ final class ChatEngine implements AutoCloseable {
         if (contact == null || contact.userId() == null || contact.deviceId() == null || contact.identityKey() == null)
             throw new SecurityException("Invalid contact response");
         if (contact.userId().equals(account.userId())) throw new IllegalArgumentException("Choose another account");
+        safety.requireAllowed(contact.userId());
         safetyNumber(contact.userId(), contact.identityKey());
         Profile profile = api.call("GET", "/users/id/" + contact.userId() + "/profile", null, Profile.class);
         validateProfile(profile, contact.userId());
@@ -361,6 +388,8 @@ final class ChatEngine implements AutoCloseable {
     }
 
     void addPeer(Peer independentlyVerified) throws Exception {
+        safety.refresh();
+        safety.requireAllowed(independentlyVerified.userId());
         Peer current = findPeer(independentlyVerified.username());
         if (!current.userId().equals(independentlyVerified.userId()) || !current.deviceId().equals(independentlyVerified.deviceId())
                 || !current.identityKey().equals(independentlyVerified.identityKey())) throw new SecurityException("Contact identity changed; verify it again");
@@ -395,6 +424,36 @@ final class ChatEngine implements AutoCloseable {
         });
     }
 
+    void discardBlockedContact(UUID peerId) throws Exception {
+        if (account == null || !safety.isBlocked(peerId)) throw new SecurityException("A blocked account is required");
+        PhotoSharingService.endFor(account.userId(), peerId);
+        presence.disconnected();
+        for (String name : vault.names("entry/")) {
+            Entry entry = read(name, Entry.class);
+            if (entry.groupEpoch() == null && peerId.equals(entry.peerId())
+                    || entry.groupEpoch() != null && !entry.outgoing() && peerId.equals(entry.senderId()))
+                erase(entry, entry.outgoing() ? null : "delete");
+        }
+        Peer saved = read("contact/" + peerId, Peer.class);
+        vault.transaction(() -> {
+            for (String name : vault.names("outbox/"))
+                if (peerId.equals(read(name, Outbox.class).message().recipientId())) vault.remove(name);
+            if (saved != null) photos.forget(saved);
+            else {
+                for (String prefix : List.of("profile-photo-cache/", "profile-photo-request/", "profile-photo-grant/"))
+                    vault.remove(prefix + peerId);
+                for (String name : vault.names("profile-photo-out/"))
+                    if (peerId.equals(read(name, ProfilePhotos.Queued.class).packet().recipientId())) vault.remove(name);
+            }
+            vault.remove("contact/" + peerId);
+            vault.remove("contact-name/" + peerId);
+            onboarding.dismiss(peerId);
+            groups.discardBlockedControls(peerId);
+            return null;
+        });
+        // Shared-group controls still need the pinned Signal ratchet, never direct-contact permission.
+    }
+
     private void replenishKeys() throws Exception {
         signal.prunePreKeys(Instant.now().minusSeconds(172800));
         byte[] pending = vault.get("public-upload");
@@ -421,6 +480,9 @@ final class ChatEngine implements AutoCloseable {
     }
 
     void send(Peer peer, String text, byte[] image, ChatEnvelope.Expiry expiry, UUID id, long createdAt, Runnable stored) throws Exception {
+        safety.requireAllowed(peer.userId());
+        safety.refresh();
+        safety.requireAllowed(peer.userId());
         long expiresAt = Math.addExact(createdAt, expiry.milliseconds);
         if (expiresAt <= System.currentTimeMillis()) throw new IllegalArgumentException("Message expired");
         purge();
@@ -450,6 +512,7 @@ final class ChatEngine implements AutoCloseable {
         Entry entry = new Entry(id, peer.userId(), expiresAt, expiry, true, image != null, "PENDING", account.userId());
         try {
             vault.transaction(() -> {
+                safety.requireAllowed(peer.userId());
                 SignalClient.Packet encrypted = signal.encrypt(peer.userId(), bytes(envelope), now);
                 Send request = new Send(id, peer.userId(), peer.deviceId(), expiry, expiresAt, encrypted.type(), encrypted.ciphertext(), mediaId);
                 write("outbox/" + id, new Outbox(request, encryptedImage == null ? null : encryptedImage.ciphertext()));
@@ -468,6 +531,7 @@ final class ChatEngine implements AutoCloseable {
     }
 
     void storeContent(Entry entry, Content content) throws Exception {
+        safety.requireNotDeleting();
         byte[] plaintext = bytes(content);
         try { vault.put("body/" + entry.id(), vault.seal(contentKey(entry), plaintext)); }
         finally { Arrays.fill(plaintext, (byte) 0); }
@@ -483,13 +547,15 @@ final class ChatEngine implements AutoCloseable {
         List<Entry> result = new ArrayList<>();
         for (String name : vault.names("entry/")) {
             Entry entry = read(name, Entry.class);
-            if (entry.expiresAt() > System.currentTimeMillis() && (peerId == null || peerId.equals(entry.peerId()))) result.add(entry);
+            if (entry.expiresAt() > System.currentTimeMillis() && (peerId == null || peerId.equals(entry.peerId()))
+                    && !safety.isBlocked(entry.groupEpoch() == null ? entry.peerId() : entry.senderId())) result.add(entry);
         }
         result.sort(Comparator.comparingLong(entry -> entry.expiresAt() - entry.expiry().milliseconds));
         return result;
     }
 
     Content content(Entry entry, boolean consume) throws Exception {
+        safety.requireAllowed(entry.groupEpoch() == null ? entry.peerId() : entry.senderId());
         if (entry.expiresAt() <= System.currentTimeMillis()) { erase(entry, null); throw new SecurityException("Message expired"); }
         if (entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE && !consume) throw new SecurityException("Explicit viewing is required");
         byte[] plaintext = vault.unseal(contentKey(entry), vault.get("body/" + entry.id()));
@@ -512,7 +578,7 @@ final class ChatEngine implements AutoCloseable {
 
     void erase(Entry entry, String acknowledgement) throws Exception {
         contentKey(entry);
-        AndroidVault.deleteContentKey(entry.expiresAt(), entry.id(), entry.keyOwner());
+        vault.deleteOwnedContentKey(entry, account.userId());
         vault.transaction(() -> {
             vault.remove("body/" + entry.id());
             vault.remove("entry/" + entry.id());
@@ -527,6 +593,7 @@ final class ChatEngine implements AutoCloseable {
     }
 
     void purge() throws Exception {
+        safety.requireNotDeleting();
         long now = System.currentTimeMillis();
         AndroidVault.expireContentKeys(now);
         vault.transaction(() -> {
@@ -568,13 +635,31 @@ final class ChatEngine implements AutoCloseable {
     }
 
     private void flushOutgoing() throws Exception {
+        safety.requireNotDeleting();
+        if (!vault.names("outbox/").isEmpty()) safety.refresh();
         for (String name : vault.names("outbox/")) {
             Outbox outbox = read(name, Outbox.class);
+            if (outbox == null) continue;
             Send message = outbox.message();
+            if (safety.isBlocked(message.recipientId())) { discardBlockedContact(message.recipientId()); continue; }
             if (message.expiresAt() <= System.currentTimeMillis()) continue;
-            if (message.mediaId() != null) api.upload(message.mediaId(), message.recipientId(), message.recipientDeviceId(), message.expiresAt(), outbox.media());
-            Status status = api.call("POST", "/messages", message, Status.class);
+            Status status;
+            try {
+                if (message.mediaId() != null) api.upload(message.mediaId(), message.recipientId(), message.recipientDeviceId(), message.expiresAt(), outbox.media());
+                status = api.call("POST", "/messages", message, Status.class);
+            } catch (RelayApi.ApiFailure failure) {
+                if (failure.status != 403 && failure.status != 404) throw failure;
+                vault.transaction(() -> {
+                    Entry entry = read("entry/" + message.id(), Entry.class);
+                    if (entry != null) write("entry/" + entry.id(), entry.withState("Not sent: contact unavailable"));
+                    vault.remove(name);
+                    return null;
+                });
+                continue;
+            }
+            if (safety.isBlocked(message.recipientId())) { discardBlockedContact(message.recipientId()); continue; }
             Entry previous = read("entry/" + message.id(), Entry.class);
+            if (previous == null) { vault.transaction(() -> { vault.remove(name); return null; }); continue; }
             vault.transaction(() -> {
                 write("entry/" + message.id(), previous.withState(status.state()));
                 vault.remove(name);
@@ -593,13 +678,31 @@ final class ChatEngine implements AutoCloseable {
             try {
                 api.call(acknowledgement.action().equals("delete") ? "DELETE" : "POST", "/messages/" + acknowledgement.id()
                         + (acknowledgement.action().equals("delete") ? "" : "/" + acknowledgement.action()), null, Void.class);
-            } catch (RelayApi.ApiFailure failure) { if (failure.status != 404 && failure.status != 410) throw failure; }
+            } catch (RelayApi.ApiFailure failure) {
+                if (failure.status != 404 && failure.status != 410
+                        && !(failure.status == 403 && acknowledgement.action().equals("delete"))) throw failure;
+            }
             vault.transaction(() -> { vault.remove(name); return null; });
         }
     }
 
     private void receive(Incoming message) throws Exception {
         if (message.expiresAt() <= System.currentTimeMillis()) return;
+        if (safety.isBlocked(message.senderId())) {
+            if (message.id() == null || !account.userId().equals(message.recipientId())
+                    || !account.deviceId().equals(message.recipientDeviceId())
+                    || message.expiresAt() > System.currentTimeMillis() + 86_400_000L)
+                throw new SecurityException("Invalid blocked message routing");
+            vault.transaction(() -> {
+                byte[] seen = vault.get("seen/" + message.id());
+                long deadline = seen == null ? message.expiresAt()
+                        : Math.min(message.expiresAt(), Long.parseLong(new String(seen, StandardCharsets.US_ASCII)));
+                write("ack/" + message.id(), new Ack(message.id(), deadline, "delete"));
+                vault.put("seen/" + message.id(), Long.toString(deadline).getBytes(StandardCharsets.US_ASCII));
+                return null;
+            });
+            return;
+        }
         if (!signal.isVerified(message.senderId()) || read("contact/" + message.senderId(), Peer.class) == null)
             onboarding.acceptIncoming(message.senderId(), message.senderDeviceId());
         onboarding.requireSaved(message.senderId());
@@ -610,6 +713,7 @@ final class ChatEngine implements AutoCloseable {
         byte[] imageCiphertext = message.mediaId() == null ? null : api.download(message.mediaId());
         try {
             vault.transaction(() -> {
+                safety.requireNotDeleting();
                 byte[] plaintext = signal.decrypt(message.senderId(), new SignalClient.Packet(message.type(), message.ciphertext()));
                 try {
                     ChatEnvelope envelope = JSON.fromJson(new String(plaintext, StandardCharsets.UTF_8), ChatEnvelope.class);
@@ -630,12 +734,14 @@ final class ChatEngine implements AutoCloseable {
     }
 
     void sync() throws Exception {
+        safety.requireNotDeleting();
         purge();
         if (!authenticated()) {
             if (account != null && account.accessToken() != null && !account.accessToken().isEmpty()) invalidateToken();
             return;
         }
         try {
+            safety.refresh();
             flushAcks();
             flushOutgoing();
             unverifiedIncoming = false;
@@ -707,6 +813,7 @@ final class ChatEngine implements AutoCloseable {
         Entry entry = read("entry/" + destination.messageId(), Entry.class);
         if (entry == null || entry.outgoing() || !entry.peerId().equals(destination.conversationId()) || entry.expiresAt() <= System.currentTimeMillis()
             || !entry.state().equals("DELIVERED") || entry.keyOwner() != null && !account.userId().equals(entry.keyOwner())
+            || safety.isBlocked(entry.groupEpoch() == null ? entry.peerId() : entry.senderId())
             || !vault.names("body/").contains("body/" + entry.id())) return null;
         if (entry.groupEpoch() != null) {
             GroupChat.Conversation group = groups.get(entry.peerId());
@@ -737,6 +844,7 @@ final class ChatEngine implements AutoCloseable {
     }
 
     private void refreshSession(boolean rejected) throws Exception {
+        safety.requireNotDeleting();
         if (!rejected && accessReady()) return;
         if (!remembered()) { invalidateToken(); throw new RelayApi.ApiFailure(401); }
         Account previous = account;
@@ -777,6 +885,7 @@ final class ChatEngine implements AutoCloseable {
     }
 
     void invalidateToken() throws Exception {
+        safety.requireNotDeleting();
         if (account == null) return;
         PhotoSharingService.endFor(account.userId(), null);
         connectionGeneration++; realtimeReady = false;
@@ -790,6 +899,7 @@ final class ChatEngine implements AutoCloseable {
     }
 
     void logout() throws Exception {
+        safety.requireNotDeleting();
         if (account != null) PhotoSharingService.endFor(account.userId(), null);
         try {
             try { if (authenticated()) flushAcks(); }
@@ -805,6 +915,25 @@ final class ChatEngine implements AutoCloseable {
                 }
             } finally { online = false; close(); }
         }
+    }
+
+    void pauseForAccountDeletion() {
+        if (account != null) PhotoSharingService.endFor(account.userId(), null);
+        connectionGeneration++; realtimeReady = false;
+        presence.disconnected();
+        if (socket != null) socket.cancel();
+        socket = null;
+        online = false;
+    }
+
+    void finishAccountDeletion() {
+        pauseForAccountDeletion();
+        presence.foreground(false);
+        if (api != null) api.close();
+        api = null;
+        signal = null;
+        account = null;
+        wake = null;
     }
 
     @Override public void close() {

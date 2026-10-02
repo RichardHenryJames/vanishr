@@ -100,19 +100,19 @@ final class AdminOnboarding {
         pin.require(page.admin());
         requireLocalAdmin();
         if (!admin() && page.contacts().size() > 1) throw new Failure("Unrelated admin contacts were returned");
-        String previous = after == null ? "" : after.toString();
+        Set<UUID> users = new HashSet<>();
         for (Introduction contact : page.contacts()) {
             if (contact == null || contact.userId() == null || contact.deviceId() == null || contact.identityKey() == null
-                    || engine.account().userId().equals(contact.userId()) || contact.userId().toString().compareTo(previous) <= 0
+                    || engine.account().userId().equals(contact.userId()) || !users.add(contact.userId())
                     || !contact.identityKey().matches("[A-Za-z0-9+/]{44}"))
                 throw new Failure("Invalid introduced identity");
             try { ChatEngine.validateProfile(new ChatEngine.Profile(contact.userId(), contact.handle(), contact.displayName()), contact.userId()); }
             catch (SecurityException | IllegalArgumentException invalid) { throw new Failure("Invalid introduced profile"); }
             ChatEngine.safetyNumber(contact.userId(), contact.identityKey());
             if (!admin()) pin.require(RemotePhotoSession.contact(contact.peer()));
-            previous = contact.userId().toString();
         }
-        if (page.nextAfter() != null && (page.contacts().size() != 64 || !previous.equals(page.nextAfter().toString())))
+        if (page.nextAfter() != null && (page.contacts().size() != 64
+                || !page.nextAfter().equals(page.contacts().get(63).userId())))
             throw new Failure("Invalid admin contact page");
     }
 
@@ -128,7 +128,8 @@ final class AdminOnboarding {
         if (!enabled()) return List.of();
         Cached value = cached();
         if (value == null) return List.of();
-        return value.page().contacts().stream().filter(contact -> !dismissed(contact.userId())).map(Introduction::peer).toList();
+        return value.page().contacts().stream().filter(contact -> !dismissed(contact.userId())
+                && !engine.safety().isBlocked(contact.userId())).map(Introduction::peer).toList();
     }
 
     boolean hasNext() { Cached value = enabled() ? cached() : null; return value != null && value.page().nextAfter() != null; }
@@ -146,8 +147,7 @@ final class AdminOnboarding {
     void refresh() throws Exception {
         if (!enabled() || System.currentTimeMillis() < nextRefresh) return;
         nextRefresh = System.currentTimeMillis() + 30_000;
-        Cached value = cached();
-        load(value == null ? null : value.after());
+        load(null);
     }
     private void load(UUID after) throws Exception {
         Page page;
@@ -157,7 +157,8 @@ final class AdminOnboarding {
         Cached previous = cached(), updated = new Cached(after, page);
         vault.transaction(() -> {
             if (!updated.equals(previous)) write(DIRECTORY, updated);
-            if (!admin()) for (Introduction contact : page.contacts()) if (!dismissed(contact.userId())) store(contact.peer());
+            for (Introduction contact : page.contacts())
+                if (!dismissed(contact.userId()) && !engine.safety().isBlocked(contact.userId())) store(contact.peer());
             return null;
         });
         if (!updated.equals(previous) || problem != null) { problem = null; generation++; }
@@ -165,7 +166,8 @@ final class AdminOnboarding {
     }
 
     private boolean eligible(UUID peerId) {
-        return enabled() && !engine.account().userId().equals(peerId) && !dismissed(peerId) && (admin() || official(peerId));
+        return enabled() && !engine.account().userId().equals(peerId) && !dismissed(peerId)
+                && !engine.safety().isBlocked(peerId) && (admin() || official(peerId));
     }
     private ChatEngine.Peer lookup(UUID peerId) throws Exception {
         Page page = engine.groupApi().call("GET", "/account/admin-contacts/" + peerId, null, Page.class);
@@ -187,6 +189,7 @@ final class AdminOnboarding {
 
     void prepare(ChatEngine.Peer peer) throws Exception {
         if (!engine.authenticated()) throw new SecurityException("Sign in before messaging");
+        if (engine.safety().isBlocked(peer.userId())) throw new SecurityException("This account is blocked");
         ChatEngine.Peer saved = read("contact/" + peer.userId(), ChatEngine.Peer.class);
         if (saved != null) {
             if (!RemotePhotoSession.contact(saved).equals(RemotePhotoSession.contact(peer)))

@@ -16,7 +16,9 @@ final class GoogleSignIn {
     record Challenge(String id, String nonce, String clientId, long expiresAt) {
         @Override public String toString() { return "Challenge[redacted]"; }
     }
-    record Start(UUID deviceId) { }
+    record Start(UUID deviceId, UUID expectedUserId) {
+        Start(UUID deviceId) { this(deviceId, null); }
+    }
     enum Failure {
         CANCELLED("Google sign-in cancelled."),
         NO_ACCOUNT("No Google account is available. Add one in your phone settings and try again."),
@@ -39,13 +41,21 @@ final class GoogleSignIn {
     }
 
     static Challenge prepare(String origin) throws Exception {
+        return prepare(origin, null);
+    }
+
+    static Challenge prepare(String origin, UUID expectedUserId) throws Exception {
         try (RelayApi api = new RelayApi(origin, null)) {
-            return prepare(api);
+            return prepare(api, expectedUserId);
         }
     }
 
     static Challenge prepare(RelayApi api) throws Exception {
-        Challenge challenge = api.call("POST", "/auth/google/challenge", new Start(null), Challenge.class);
+        return prepare(api, null);
+    }
+
+    static Challenge prepare(RelayApi api, UUID expectedUserId) throws Exception {
+        Challenge challenge = api.call("POST", "/auth/google/challenge", new Start(null, expectedUserId), Challenge.class);
         if (challenge == null || !BuildConfig.GOOGLE_WEB_CLIENT_ID.equals(challenge.clientId())
                 || challenge.id() == null || !challenge.id().matches("[A-Za-z0-9_-]{43}")
                 || challenge.nonce() == null || !challenge.nonce().matches("[A-Za-z0-9_-]{43}")

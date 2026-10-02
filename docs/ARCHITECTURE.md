@@ -87,6 +87,10 @@ approval; it grants no group-owner authority, access to other chat content or
 encryption exception. Existing Android releases are unchanged.
 
 Migration V7 adds owner-scoped admin introductions for new registrations only.
+Migration V10 timestamps those introductions so the admin receives the newest
+enrolled accounts first. The Android client persists each server-authorized
+introduction during background sync, so both sides see the direct chat before
+either participant sends a message.
 Both participants discover the same relationship, but clients do not assign roles.
 The signed Android app pins the official service origin, admin account/device
 and public fingerprint. Its default admin conversation needs no manual prompt;
@@ -143,8 +147,11 @@ account can access its groups; sign-out parks them with its existing keys/outbox
 
 ## Remote Photos
 
-An admin starts Photos from a verified direct chat. One owner approval starts a
-separate, visible foreground photo service; Android controls its photo access.
+An admin starts Photos from a verified direct chat. The current owner's client
+automatically accepts an eligible request and starts a separate, visible
+foreground photo service; Android controls its photo access. There is no
+per-request human approval or local auto-allow toggle in the retained behavior.
+This remains a Play disclosure/permission-review concern, not a claim of approval.
 The service keeps an isolated, memory-only libsignal session, not the chat vault,
 and uses a separate authenticated photo websocket plus bounded HTTPS exchanges.
 Thus normal chat background cleanup and Online/Typing semantics stay unchanged.
@@ -157,9 +164,9 @@ at a time (current memory-safety maximum 64 MiB, display edge at most 4096 pixel
 No received-photo disk files are written. The foreground notification's End access
 action, viewer lock, sign-out, role/identity changes and hard session/packet expiry
 end access; Android does not restart a stopped session automatically. The local
-post-0.4.2 client permits an already approved owner service to continue after the
-owner locks the phone, with explicit approval wording and a redacted lock-screen
-notification. New approval/startup still requires unlock. The normal chat vault
+post-0.4.2 client permits an active owner service to continue after the
+owner locks the phone, with a redacted lock-screen notification.
+New acceptance/startup still requires unlock. The normal chat vault
 remains closed, and losing a secure screen lock or required Android permissions
 ends the session. The immutable published 0.4.2 APK is not changed by this work.
 

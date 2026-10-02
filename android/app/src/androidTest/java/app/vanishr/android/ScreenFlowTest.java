@@ -137,6 +137,7 @@ public class ScreenFlowTest {
             return null;
         });
         engine = new ChatEngine(vault, pin); engine.online = true;
+        engine.safety().acceptTerms(PlayPolicy.VERSION);
     }
 
     private AdminOnboarding.Pin adminPin(UUID id, UUID device, SignalClient signal) throws Exception {
@@ -267,7 +268,7 @@ public class ScreenFlowTest {
         assertEquals(1, engine.peers().size());
     }
 
-    @Test public void adminOnboardingDirectoryIsPagedAndNewAccountsArePinnedOnlyWhenUsed() throws Exception {
+    @Test public void adminOnboardingDirectoryIsPagedAndNewAccountsAppearBeforeMessaging() throws Exception {
         SignalClient own = new SignalClient(userId, vault);
         signedInFixture(adminPin(userId, deviceId, own));
         ChatEngine.Contact official = new ChatEngine.Contact(userId, deviceId, Base64.getEncoder().encodeToString(own.publicIdentity()));
@@ -285,16 +286,17 @@ public class ScreenFlowTest {
         assertEquals(firstPage, engine.peers());
         assertTrue(engine.onboarding().generation() > generation);
         assertTrue(engine.onboarding().hasNext());
-        assertTrue(vault.names("contact/").isEmpty()); assertTrue(vault.names("peer/").isEmpty());
+        assertEquals(64, vault.names("contact/").size()); assertEquals(64, vault.names("peer/").size());
         ChatEngine.Peer chosen = contacts.get(0).peer();
         engine.prepareConversation(chosen);
-        assertEquals(1, vault.names("contact/").size());
+        assertEquals(64, vault.names("contact/").size());
         assertTrue(engine.groupSignal().isVerified(chosen.userId())); assertFalse(engine.independentlyVerified(chosen.userId()));
         directory.set(new AdminOnboarding.Page(userId, official, List.of(contacts.get(64)), null));
         engine.onboarding().next();
-        assertEquals(2, engine.peers().size()); assertFalse(engine.onboarding().hasNext()); assertTrue(engine.onboarding().hasPrevious());
+        assertEquals(65, engine.peers().size()); assertFalse(engine.onboarding().hasNext()); assertTrue(engine.onboarding().hasPrevious());
         assertTrue(engine.peers().contains(chosen));
         assertTrue(engine.peers().contains(contacts.get(64).peer()));
+        assertEquals(65, vault.names("contact/").size());
         directory.set(new AdminOnboarding.Page(userId, official, List.of(), null));
         assertFalse(engine.onboarding().acceptIncoming(UUID.randomUUID(), UUID.randomUUID()));
     }
@@ -502,6 +504,91 @@ public class ScreenFlowTest {
         assertNotNull(logo.getDrawable());
         assertNull("The supplied logo must retain its colors", logo.getColorFilter());
         assertEquals(View.IMPORTANT_FOR_ACCESSIBILITY_NO, logo.getImportantForAccessibility());
+    }
+
+    @Test public void policiesRequireAnUncheckedAffirmativeChoiceBeforeFirstUse() throws Exception {
+        var continued = new java.util.concurrent.atomic.AtomicBoolean();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                inject(activity);
+                invoke(activity, "ensurePolicies", new Class<?>[]{Runnable.class}, (Runnable) () -> continued.set(true));
+            });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                SecureSheet sheet = dialog(activity);
+                assertNotNull(text(sheet.getWindow().getDecorView(), "Privacy policy"));
+                assertNotNull(text(sheet.getWindow().getDecorView(), "Terms & safety"));
+                MaterialCheckBox consent = descendants(sheet.getWindow().getDecorView()).stream()
+                    .filter(MaterialCheckBox.class::isInstance).map(MaterialCheckBox.class::cast).findFirst().orElseThrow();
+                assertFalse(consent.isChecked());
+                assertFalse(sheet.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled());
+                assertFalse(continued.get());
+                consent.setChecked(true);
+                assertTrue(sheet.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled());
+                sheet.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+                assertTrue(continued.get());
+            });
+        }
+    }
+
+    @Test public void accountDeletionRequiresTypedConfirmationAndReauthentication() throws Exception {
+        signedInFixture();
+        String before = engine.identityCode();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                inject(activity);
+                invoke(activity, "deleteAccountDialog");
+            });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                SecureSheet sheet = dialog(activity);
+                assertNotNull(text(sheet.getWindow().getDecorView(), "Deletion policy and help"));
+                assertFalse(descendants(sheet.getWindow().getDecorView()).stream().filter(EditText.class::isInstance)
+                    .map(EditText.class::cast).anyMatch(input -> input.length() > 0));
+                sheet.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+                assertTrue(descendants(sheet.getWindow().getDecorView()).stream()
+                    .filter(com.google.android.material.textfield.TextInputLayout.class::isInstance)
+                    .map(com.google.android.material.textfield.TextInputLayout.class::cast)
+                    .anyMatch(field -> "Type DELETE exactly".contentEquals(field.getError())));
+                assertEquals(before, engine.identityCode());
+                assertTrue(engine.authenticated());
+                assertTrue((sheet.getWindow().getAttributes().flags & WindowManager.LayoutParams.FLAG_SECURE) != 0);
+            });
+        }
+    }
+
+    @Test public void safetyActionsAndPoliciesAreReachableWithoutSendingPlaintext() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                inject(activity); invoke(activity, "accountDialog");
+            });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                View panel = dialog(activity).getWindow().getDecorView();
+                assertNotNull(text(panel, "Blocked accounts"));
+                assertNotNull(text(panel, "Privacy policy"));
+                assertNotNull(text(panel, "Terms & safety"));
+                assertNotNull(text(panel, "Support"));
+                assertNotNull(text(panel, "Delete account"));
+                dialog(activity).dismiss();
+                invoke(activity, "reportUserDialog", new Class<?>[]{UUID.class, ChatEngine.Entry.class}, peerId, once);
+            });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                SecureSheet sheet = dialog(activity);
+                assertEquals(7, sheet.getListView().getAdapter().getCount());
+                assertEquals("Child safety", sheet.getListView().getAdapter().getItem(3));
+                sheet.getListView().performItemClick(null, 3, 3);
+            });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                SecureSheet sheet = dialog(activity);
+                assertTrue(((TextView) sheet.findViewById(android.R.id.message)).getText().toString().contains("No chat text or photos"));
+                assertFalse(descendants(sheet.getWindow().getDecorView()).stream().anyMatch(EditText.class::isInstance));
+                assertTrue((sheet.getWindow().getAttributes().flags & WindowManager.LayoutParams.FLAG_SECURE) != 0);
+            });
+        }
     }
 
     @Test public void launcherAndNotificationBrandingUseTheSharedLogo() {
@@ -718,7 +805,7 @@ public class ScreenFlowTest {
             snapshot(scenario,"53-compact-my-profile");
             scenario.onActivity(activity -> {
                 View decor=dialog(activity).getWindow().getDecorView();
-                for (String action : List.of("Share username","Verify identity","Check for updates","Licenses & source","Sign out")) assertNotNull(text(decor,action));
+                for (String action : List.of("Share username","Verify identity",BuildConfig.PLAY_STORE ? "Open Google Play" : "Check for updates","Licenses & source","Sign out")) assertNotNull(text(decor,action));
                 assertTrue(descendants(decor).stream().anyMatch(view -> "Save name".equals(view.getContentDescription())));
                 assertTrue(descendants(decor).stream().anyMatch(view -> "Save username".equals(view.getContentDescription())));
                 assertNotNull(dialog(activity).findViewById(com.google.android.material.R.id.design_bottom_sheet));
@@ -1661,7 +1748,11 @@ public class ScreenFlowTest {
 
     private RelayApi syntheticApi(okhttp3.Interceptor interceptor) {
         RelayApi api = new RelayApi("https://127.0.0.1:1/", null);
-        okhttp3.OkHttpClient transport = ((okhttp3.OkHttpClient) readField(api, "client")).newBuilder().addInterceptor(interceptor).build();
+        okhttp3.OkHttpClient transport = ((okhttp3.OkHttpClient) readField(api, "client")).newBuilder().addInterceptor(chain -> {
+            if (chain.request().method().equals("GET") && chain.request().url().encodedPath().equals("/account/blocks"))
+                return syntheticResponse(chain.request(), 200, List.of());
+            return interceptor.intercept(chain);
+        }).build();
         setField(api, "client", transport);
         return api;
     }
@@ -1960,11 +2051,12 @@ public class ScreenFlowTest {
             GoogleSignIn.Start start = RelayApi.JSON.fromJson(buffer.readUtf8(), GoogleSignIn.Start.class);
             assertNull("The stale device must be checked after fresh Google authentication, not bound into its nonce", start.deviceId());
             int attempt = count.incrementAndGet();
+            assertEquals(attempt == 1 ? null : userId, start.expectedUserId());
             return syntheticResponse(request, 200, new GoogleSignIn.Challenge((attempt == 1 ? "a" : "b").repeat(43),
                 (attempt == 1 ? "c" : "d").repeat(43), BuildConfig.GOOGLE_WEB_CLIENT_ID, System.currentTimeMillis() + 300_000));
         })) {
             GoogleSignIn.Challenge first = GoogleSignIn.prepare(api);
-            GoogleSignIn.Challenge second = GoogleSignIn.prepare(api);
+            GoogleSignIn.Challenge second = GoogleSignIn.prepare(api, userId);
             assertNotEquals(first.id(), second.id()); assertNotEquals(first.nonce(), second.nonce());
             assertEquals(2, count.get());
         }
@@ -3620,6 +3712,21 @@ public class ScreenFlowTest {
         signedInFixture();
         AppUpdates.Release release = new AppUpdates.Release(BuildConfig.VERSION_CODE + 1, "0.2.7", AppUpdates.ORIGIN + "/vanishr-0.2.7.apk");
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            if (BuildConfig.PLAY_STORE) {
+                scenario.onActivity(activity -> {
+                    inject(activity); invoke(activity, "accountDialog");
+                    assertNotNull(text(dialog(activity).getWindow().getDecorView(), "Open Google Play"));
+                    setField(activity, "availableUpdate", release);
+                    invoke(activity, "dismissContent");
+                    invoke(activity, "maybePromptUpdate", new Class<?>[]{boolean.class}, false);
+                    assertTrue(dialog(activity) == null || !dialog(activity).isShowing());
+                    invoke(activity, "maybePromptUpdate", new Class<?>[]{boolean.class}, true);
+                    assertTrue(dialog(activity) == null || !dialog(activity).isShowing());
+                    invoke(activity, "checkForUpdates", new Class<?>[]{boolean.class}, false);
+                    assertFalse((boolean) readField(activity, "checkingUpdates"));
+                });
+                return;
+            }
             scenario.onActivity(activity -> {
                 inject(activity);
                 invoke(activity, "accountDialog");

@@ -37,6 +37,9 @@ independent of login attempts. No access bearer is required or sent on renewal.
 | `POST /auth/google` | Public, IP rate limit; Google token verification | `{challengeId,idToken}` -> `{session,handle}` | Consumes challenge on the first attempt; normal enrollment/device token TTL |
 | `GET /auth/me` | ENROLL or DEVICE | `{userId,deviceId}` | None added |
 | `POST /auth/logout` | ENROLL or DEVICE | Empty -> 204 | Atomically deletes current access/renewal pair, then removes device presence/last-seen and push records; preserves registered device and queued ciphertext |
+| `DELETE /account` | Fresh ENROLL owner only; DEVICE rejected | `{confirmation:"DELETE",deletionProof?:43-char random handle}` -> 204 | Permanently erases the authenticated account after scoped cleanup; retryable failures never report completion |
+| `POST /account/deletion/status` | Scoped deletion proof, not an ordinary bearer | `{deletionProof}` -> `{userId,state,expiresAt}` | `PENDING` or `DELETED`; fixed proof lifetime <=24h; status reads do not renew it |
+| `POST /account/deletion/retry` | Scoped deletion proof | Same request/status response | May only retry the already-authorized deletion, never log in, enroll or select another account |
 | `POST /devices` | ENROLL, account owner | `{deviceId,identityKey,replaceExisting}` -> device token, 201 | Same device/key with `replaceExisting:false` resumes without changing generation/prekeys; a different device/key needs explicit replacement; consumes enrollment token |
 | `POST /devices/push` | DEVICE owner | `{token,routeHints?}` -> 204 | Provider token and routing capability in Redis, atomic 24h TTL; omitted/false capability retains legacy event-only pushes |
 | `DELETE /devices/push` | DEVICE owner | Empty -> 204 | Removes push token and current routing reference immediately |
@@ -50,6 +53,12 @@ independent of login attempts. No access bearer is required or sent on renewal.
 | `GET /account/admin-contacts?after=UUID` | DEVICE owner | `{userId,admin,contacts,nextAfter}` | Official-admin introductions for this account only; at most 64 enrolled contacts per page |
 | `GET /account/admin-contacts/{peerId}` | DEVICE owner | Same page shape, at most one contact | Resolve one authorized introduction before establishing an automatic direct chat |
 | `PATCH /account/profile` | DEVICE owner; 10/min/account | `{displayName}` -> profile | Updates only authenticated account; 1-40 characters, not unique |
+| `GET /account/blocks` | DEVICE owner | UUID array, at most 512 | Owner's durable block preferences only |
+| `PUT /account/blocks/{peerId}` | DEVICE owner | Empty -> 204 | Blocks direct interaction in either direction, revokes affected queues/photo access; does not remove shared-group history |
+| `DELETE /account/blocks/{peerId}` | DEVICE owner | Empty -> 204 | Removes only caller's block; never restores payloads or identity trust |
+| `POST /safety/reports` | DEVICE reporter | `{targetId,reason,messageId?,groupId?}` -> `{id,expiresAt}`, 201 | Metadata only; five reports per account per 24h; atomic TTL <=30 days |
+| `GET /safety/reports` | Current ADMIN and permanent pin | At most 50 report records | Earliest expiry first; reads do not renew retention |
+| `DELETE /safety/reports/{reportId}` | Current ADMIN and permanent pin | Empty -> 204 | Removes a reviewed report idempotently |
 | `GET /users/id/{userId}/profile` | DEVICE | `{userId,handle,displayName}` | Shared account metadata; private nicknames are never returned |
 | `POST /keys` | DEVICE owner | `{keys:[PublicBundle,...]}` -> 204 | 1-32 per request, at most 256 available; 24h public-key TTL; cleanup every minute |
 | `GET /keys` | DEVICE owner | `{remaining}` | None added |
@@ -86,8 +95,11 @@ With no existing admin, the pin stays empty and nobody can acquire the role unti
 a trusted database operator explicitly pins an inspected existing UUID and enables
 that account in one bounded transaction. Registration never initializes the pin.
 Once pinned, it cannot be changed, deleted or truncated through normal SQL.
-The pinned account cannot be deleted or have its UUID changed. An operator may
+The pinned UUID cannot be changed. An operator may
 revoke its role, but the pin remains and only that same account can be re-enabled.
+From migration V8, authenticated account erasure may delete the admin's account
+data while preserving the UUID-only reservation. That UUID cannot be reinserted
+or reassigned, so erasure does not create a replacement-admin opportunity.
 
 `GET /account/type` reads the current database role and permanent pin together for
 the authenticated enrolled account. An `ADMIN` row without a matching pin fails
@@ -97,9 +109,68 @@ No profile, registration, login or username payload can set a role. Contact look
 does not expose it. There is no promotion, replacement-admin or role-transfer API.
 Reusing the admin's old username does not confer any privilege.
 No permission bypass is enabled by this metadata alone. Remote Photos additionally
-requires the addressed owner's approval for each bounded session.
+requires the addressed owner's authenticated client to accept each bounded session.
+The current client does so automatically for eligible requests; this is not a
+per-request human approval and remains a Play consent/permission review concern.
+
+## Account erasure and safety
+
+Deletion requires account-only password or Google reauthentication, producing
+a new five-minute ENROLL token. A remembered/device session cannot authorize
+deletion, and the body cannot select an account. Before sending, the trusted
+client commits a separate 256-bit deletion proof to the account's encrypted
+vault. The relay retains only its digest and scoped receipt with a fixed
+24-hour deadline. Its status/retry endpoints permit confirmation or completion
+of that operation only; possession grants no chat, profile or enrollment access.
+An unknown/expired proof is not evidence that deletion succeeded.
+
+An independently committed `DELETING` state disables ordinary account use
+before cleanup. Cleanup failures return an error and preserve a retry path,
+never a successful partial deletion. A fresh account-only login may authorize
+retry for a still-existing DELETING account. The client instead prefers its
+saved proof after an interrupted response so Google sign-in cannot silently
+recreate an erased account. Confirmed server deletion precedes owner-specific
+local key/partition erasure; other saved accounts remain intact. Pending local
+cleanup is retried while unlocked without claiming that an arbitrary 401/404
+means success.
+
+Cleanup removes the account's profile/auth mapping, devices, public prekeys,
+block relationships and introductions, direct queued payloads and attributable
+media, auth/renewal credentials, push/presence/routing records and membership.
+Owned groups close; other groups rotate membership state. Other recipients'
+already delivered/shared copies and consumed replay markers retain their
+original bounded deadlines; this is not remote erasure of recipients' devices.
+An unattributable legacy detached upload can return `503 legacy_media_pending`
+until its original <=5-minute upload deadline, rather than deleting another
+account's data. The immutable admin UUID reservation and short-lived deletion
+receipt are distinct from retained account profile/auth data.
+
+Reports accept only `SPAM`, `HARASSMENT`, `SEXUAL_CONTENT`, `CHILD_SAFETY`,
+`IMPERSONATION`, `THREATS` or `OTHER`, never free text/images. Each record contains
+`id,reporterId,targetId,reason,messageId,groupId,createdAt,expiresAt`. Optional
+context must be accessible to the reporter; a group-only report can identify
+current participants without claiming expired message evidence. Submission and
+review require a currently enabled pinned admin, otherwise `503
+safety_review_unavailable` is returned. The queue holds at most 10,000 reports.
+Account erasure removes reports authored by or targeting that account; erasing
+the admin clears the undeliverable queue. Human moderation remains an operator
+duty; the queue and review button alone are not a completed safety process.
+
+Blocking is enforced at the relay for old/modified clients too, including direct
+message/media/key/profile/presence/photo routes, introductions and new group
+invitations/controls. It does not erase existing shared-group copies. The trusted
+client hides blocked senders' group content without downloading their photos.
+Unblocking restores neither consumed ciphertext nor pinned direct-contact trust.
+PostgreSQL coordination serializes cleanup with other relay requests; concurrent
+operations can return `503 safety_operation_in_progress` and require retry.
 
 ## Official-admin introductions
+
+The relationship is bilateral. After device enrollment, the new user receives
+the pinned official administrator and the administrator receives the new user
+on the next background directory sync, without requiring a message. Results are
+newest-first and paginated; clients persist validated introductions so older
+pages remain in the chat list.
 
 Migration V7 atomically links newly inserted accounts to the permanent admin pin;
 it does not backfill existing accounts or change account roles. Password and
@@ -155,11 +226,11 @@ identical retries do not redeliver acknowledged packets. There is no gallery-cou
 limit or full-gallery upload. A separate 600/min/device, 1200/min/IP exchange
 budget prevents photo chunks from consuming normal chat request counters.
 
-Normal chat may disconnect while the owner-approved foreground service maintains
+Normal chat may disconnect while the owner's foreground service maintains
 its photo channel. Role, device generation, authentication and both photo
 connections are rechecked, not cached as a permanent approval flag. Owner Android
 photo/notification permissions, a configured secure screen lock and End access
-remain mandatory. In the local post-0.4.2 client, approval/startup require an
+remain mandatory. In the current client, automatic acceptance/startup require an
 unlocked phone, but an already accepted owner session can continue while that
 phone is locked. Viewer lock or owner lock before acceptance still ends access.
 Normal chat vault access remains unlock-only; server authorization is unchanged.
@@ -317,7 +388,15 @@ HTTPS port refuses actual cleartext at the TLS layer; 426 is defense in depth.
 
 `accounts(id UUID PK, handle VARCHAR(32) UNIQUE, password_hash VARCHAR(100), google_subject VARCHAR(255) UNIQUE, display_name VARCHAR(40), user_type VARCHAR(16) NOT NULL DEFAULT 'USER' CHECK (user_type IN ('USER','ADMIN')))`
 
-`admin_identity(singleton BOOLEAN PK DEFAULT TRUE CHECK (singleton), user_id UUID UNIQUE FK accounts(id))`
+V8 adds `accounts.deletion_state` constrained to `ACTIVE` or `DELETING`.
+
+`admin_identity(singleton BOOLEAN PK DEFAULT TRUE CHECK (singleton), user_id UUID UNIQUE)`
+
+V8 replaces the account foreign key with guards that allow verified erasure,
+require an existing active account at initial pin creation, and forbid reuse or
+reassignment of an erased reserved UUID.
+
+`account_blocks(blocker_id UUID FK accounts(id) ON DELETE CASCADE, blocked_id UUID FK accounts(id) ON DELETE CASCADE, PK(blocker_id,blocked_id), CHECK (blocker_id <> blocked_id))`
 
 `admin_introductions(user_id UUID PK FK accounts(id) ON DELETE CASCADE, admin_id UUID FK admin_identity(user_id), CHECK (user_id <> admin_id))`
 
@@ -346,8 +425,8 @@ authenticated profile edit; it is not imported from Google's token.
 No message-content, attachment, media-key, private-key, profile, contact,
 search, content-index or permanent receipt tables. The bounded display-name field
 lives on `accounts`; no private contact-name mapping is stored. Deleting/replacing a device
-cascades its public prekeys. Account erasure/recovery administration is not yet
-an exposed product workflow; do not add a content-recovery API.
+cascades its public prekeys. Account erasure is owner-only with fresh
+authentication. No content-recovery API is provided.
 
 ## Ephemeral Redis keys
 

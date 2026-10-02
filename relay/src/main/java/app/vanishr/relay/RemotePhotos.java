@@ -80,8 +80,9 @@ public class RemotePhotos {
             throw new ApiException(HttpStatus.FORBIDDEN, "admin_required");
     }
     private void remove(Stored stored, String expected) {
-        redis.execute(sessions, keys(stored.session()), "DELETE", expected, "", Long.toString(clock.millis()),
+        String result = redis.execute(sessions, keys(stored.session()), "DELETE", expected, "", Long.toString(clock.millis()),
                 Long.toString(stored.session().expiresAt()), stored.session().id().toString());
+        if (!"OK".equals(result) && !"EXPIRED".equals(result)) throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "relay_unavailable");
     }
     private Stored checked(Actor caller, UUID id, boolean requireAccepted) {
         String value = redis.opsForValue().get("rps:" + id);
@@ -94,6 +95,7 @@ public class RemotePhotos {
                 && (session.accepted() || remaining > LIFETIME - REQUEST_LIFETIME)
                 && accounts.active(actor(session.requester()), stored.requesterVersion())
                 && accounts.active(actor(session.owner()), stored.ownerVersion())
+                && accounts.canInteract(session.requester().userId(), session.owner().userId())
                 && accounts.accountType(session.requester().userId()).userType() == AccountDirectory.UserType.ADMIN
                 && Objects.equals(stored.requesterConnection(), realtime.photoConnection(actor(session.requester())))
                 && (!session.accepted() || Objects.equals(stored.ownerConnection(), realtime.photoConnection(actor(session.owner()))));
@@ -105,6 +107,7 @@ public class RemotePhotos {
     public Session request(Actor caller, Request request) {
         admin(caller.userId());
         if (caller.userId().equals(request.owner().userId())) throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_request");
+        accounts.requireInteraction(caller.userId(), request.owner().userId());
         Presence.Peer requester = peer(caller.userId());
         if (!caller.deviceId().equals(requester.deviceId()) || !peer(request.owner().userId()).equals(request.owner()))
             throw new ApiException(HttpStatus.CONFLICT, "photo_identity_changed");

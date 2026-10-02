@@ -15,7 +15,9 @@ import java.util.*;
 
 @RestController
 public class GoogleAuth {
-    public record Start(UUID deviceId) { }
+    public record Start(UUID deviceId, UUID expectedUserId) {
+        public Start(UUID deviceId) { this(deviceId, null); }
+    }
     public record Challenge(String id, String nonce, String clientId, long expiresAt) {
         @Override public String toString() { return "Challenge[redacted]"; }
     }
@@ -26,7 +28,7 @@ public class GoogleAuth {
     public record SignedIn(AuthService.Token session, String handle) {
         @Override public String toString() { return "SignedIn[redacted]"; }
     }
-    private record Pending(UUID deviceId, String nonce, long expiresAt) { }
+    private record Pending(UUID deviceId, String nonce, long expiresAt, UUID expectedUserId) { }
     private final GoogleIdentityVerifier verifier;
     private final AccountDirectory accounts;
     private final AuthService auth;
@@ -55,7 +57,7 @@ public class GoogleAuth {
         String id = randomValue();
         String nonce = randomValue();
         long deadline = clock.instant().plusSeconds(300).toEpochMilli();
-        try { redis.opsForValue().set(key(id), json.writeValueAsString(new Pending(request.deviceId(), nonce, deadline)), Duration.ofMinutes(5)); }
+        try { redis.opsForValue().set(key(id), json.writeValueAsString(new Pending(request.deviceId(), nonce, deadline, request.expectedUserId())), Duration.ofMinutes(5)); }
         catch (com.fasterxml.jackson.core.JsonProcessingException failure) { throw new IllegalStateException("Challenge serialization failed"); }
         return new Challenge(id, nonce, verifier.clientId(), deadline);
     }
@@ -70,7 +72,8 @@ public class GoogleAuth {
         catch (Exception failure) { throw new ApiException(HttpStatus.UNAUTHORIZED, "authentication_failed"); }
         if (pending.expiresAt() <= clock.millis()) throw new ApiException(HttpStatus.UNAUTHORIZED, "authentication_failed");
         String subject = verifier.verify(request.idToken(), pending.nonce());
-        AccountDirectory.GoogleAccount account = accounts.googleAccount(subject);
+        AccountDirectory.GoogleAccount account = pending.expectedUserId() == null ? accounts.googleAccount(subject)
+                : accounts.existingGoogleAccount(subject, pending.expectedUserId());
         if (pending.deviceId() != null && !accounts.active(account.userId(), pending.deviceId()))
             throw new ApiException(HttpStatus.UNAUTHORIZED, "authentication_failed");
         return new SignedIn(auth.issue(new RelayTypes.Actor(account.userId(), pending.deviceId())), account.handle());

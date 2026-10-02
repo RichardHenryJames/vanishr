@@ -32,11 +32,14 @@ public class GroupMessages {
     private final StringRedisTemplate redis;
     private final ObjectMapper json;
     private final Clock clock;
+    private final AccountDirectory accounts;
     private final DefaultRedisScript<String> send = script("group-send");
     private final DefaultRedisScript<String> ack = script("group-ack");
     private final DefaultRedisScript<String> control = script("group-control");
 
-    public GroupMessages(StringRedisTemplate redis, ObjectMapper json, Clock clock) { this.redis=redis; this.json=json; this.clock=clock; }
+    public GroupMessages(StringRedisTemplate redis, ObjectMapper json, Clock clock, AccountDirectory accounts) {
+        this.redis=redis; this.json=json; this.clock=clock; this.accounts=accounts;
+    }
 
     private static DefaultRedisScript<String> script(String name) {
         DefaultRedisScript<String> script = new DefaultRedisScript<>();
@@ -112,10 +115,14 @@ public class GroupMessages {
     }
 
     public List<Status> statuses(Actor actor, UUID group) {
-        return receipts(group).stream().filter(receipt -> receipt.senderDeviceId().equals(actor.deviceId())).map(this::status).toList();
+        return receipts(group).stream().filter(receipt -> receipt.senderId().equals(actor.userId())
+                && receipt.senderDeviceId().equals(actor.deviceId())).map(this::status).toList();
     }
 
     public Status acknowledge(Actor actor, UUID group, UUID id, String action) {
+        Receipt receipt = decode(redis.opsForValue().get(key("gr", group, id)), Receipt.class);
+        if (actor.deviceId().equals(receipt.senderDeviceId()) && !actor.userId().equals(receipt.senderId()))
+            throw new ApiException(HttpStatus.NOT_FOUND, "not_found");
         return status(decode(checked(redis.execute(ack,List.of(key("gm",group,id),key("gr",group,id),key("gb",group,id)),
                 actor.deviceId().toString(),action,Long.toString(clock.millis()))),Receipt.class));
     }
@@ -131,6 +138,7 @@ public class GroupMessages {
     }
 
     public void control(Actor actor, GroupDirectory.Snapshot group, ControlSend request) {
+        accounts.requireInteraction(actor.userId(), request.recipientId());
         RelayPolicy.deadline(Expiry.HOURS_24,request.expiresAt(),clock.instant());
         if (!group.epoch().equals(request.epoch()) || group.revision()!=request.revision()) throw new ApiException(HttpStatus.CONFLICT,"group_changed");
         GroupDirectory.Member recipient=group.member(request.recipientId());
@@ -153,7 +161,19 @@ public class GroupMessages {
         List<String> values=redis.opsForValue().multiGet(ids.stream().map(id -> "gc:"+group+":"+id).toList());
         if (values==null) return List.of();
         return values.stream().filter(Objects::nonNull).map(value -> decode(value,Control.class))
-                .filter(value -> value.recipientDeviceId().equals(actor.deviceId())).toList();
+                .filter(value -> value.recipientDeviceId().equals(actor.deviceId())
+                        && accounts.canInteract(actor.userId(), value.senderId())).toList();
+    }
+
+    public boolean reportable(Actor actor, UUID target, UUID group, UUID id) {
+        String stored = redis.opsForValue().get(key("gm", group, id));
+        String delivered = redis.opsForValue().get(key("gr", group, id));
+        if (stored == null || delivered == null) return false;
+        Message message = decode(stored, Message.class);
+        Receipt receipt = decode(delivered, Receipt.class);
+        String state = receipt.recipients().get(actor.deviceId().toString());
+        return target.equals(message.senderId()) && message.expiresAt() > clock.millis()
+                && ("QUEUED".equals(state) || receipt.expiry() == Expiry.VIEW_ONCE && "DELIVERED".equals(state));
     }
 
     public void acknowledgeControl(Actor actor, UUID group, UUID id) {

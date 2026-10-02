@@ -1,5 +1,5 @@
 #requires -Version 7.4
-param([switch]$PrepareNoticesOnly, [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.4.5')
+param([switch]$PrepareNoticesOnly, [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.4.7')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $tools = Join-Path $root '.tools'
@@ -65,14 +65,15 @@ $sourcePaths = @('LICENSE', 'NOTICE.md', 'README.md', 'pom.xml', '.gitignore', '
     'Vanishr Icon.png', 'scripts/prepare-brand-assets.ps1',
     'android/build.gradle', 'android/settings.gradle', 'android/gradle.properties', 'android/app/build.gradle', 'android/app/proguard-rules.pro',
     'android/app/src', 'client-core/pom.xml', 'client-core/build.gradle', 'client-core/src', 'relay/pom.xml', 'relay/src',
-    'docs/API.md', 'docs/ARCHITECTURE.md', 'docs/ENCRYPTION.md', 'docs/THREAT-MODEL.md', 'docs/VERIFICATION.md', 'docs/GOOGLE-SETUP.md',
+    'docs/API.md', 'docs/ARCHITECTURE.md', 'docs/ENCRYPTION.md', 'docs/THREAT-MODEL.md', 'docs/VERIFICATION.md', 'docs/GOOGLE-SETUP.md', 'docs/PLAY-STORE.md',
     'infra/Dockerfile', 'infra/compose.yml', 'infra/compose.low-memory.yml', 'infra/pg_hba.conf', 'infra/postgres-entrypoint.sh',
     'scripts/build-android.ps1', 'scripts/new-local-config.ps1', 'scripts/package-apk.ps1', 'scripts/start-local.ps1', 'scripts/test-android.ps1',
     'scripts/test-release.ps1', 'scripts/prepare-ui-assets.ps1', 'scripts/verify.ps1', 'scripts/read-google-config.ps1', 'scripts/prepare-download.ps1',
     'scripts/render-website.ps1', 'scripts/prepare-website.ps1', 'scripts/prepare-site-assets.ps1',
     'download/index.html', 'download/icon.png', 'download/favicon.ico', 'download/apple-touch-icon.png',
     'download/site.css', 'download/site.js', 'download/site-settings.json', 'download/vercel.json',
-    'download/android', 'download/security', 'download/privacy', 'download/assets', 'download/robots.txt', 'download/sitemap.xml', 'download/llms.txt')
+    'download/android', 'download/security', 'download/privacy', 'download/terms', 'download/delete-account',
+    'download/assets', 'download/robots.txt', 'download/sitemap.xml', 'download/llms.txt')
 foreach ($relative in $sourcePaths) {
     $destination = Join-Path $source $relative
     New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null

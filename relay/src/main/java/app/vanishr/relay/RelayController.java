@@ -80,8 +80,15 @@ public class RelayController {
     @DeleteMapping("/devices/push") @ResponseStatus(HttpStatus.NO_CONTENT)
     public void disablePush(@AuthenticationPrincipal Actor actor) { notifications.unregister(actor.deviceId()); }
 
-    @GetMapping("/users/{handle}") public AccountDirectory.Contact contact(@PathVariable String handle) { return accounts.contact(handle); }
-    @GetMapping("/users/id/{userId}") public AccountDirectory.Contact contact(@PathVariable UUID userId) { return accounts.contact(userId); }
+    @GetMapping("/users/{handle}") public AccountDirectory.Contact contact(@AuthenticationPrincipal Actor actor, @PathVariable String handle) {
+        AccountDirectory.Contact contact = accounts.contact(handle);
+        accounts.requireInteraction(actor.userId(), contact.userId());
+        return contact;
+    }
+    @GetMapping("/users/id/{userId}") public AccountDirectory.Contact contact(@AuthenticationPrincipal Actor actor, @PathVariable UUID userId) {
+        accounts.requireInteraction(actor.userId(), userId);
+        return accounts.contact(userId);
+    }
 
     @GetMapping("/account/username") public AccountDirectory.Username username(@AuthenticationPrincipal Actor actor) {
         return accounts.username(actor.userId());
@@ -119,7 +126,8 @@ public class RelayController {
         return accounts.updateProfile(actor.userId(), change);
     }
 
-    @GetMapping("/users/id/{userId}/profile") public AccountDirectory.Profile profile(@PathVariable UUID userId) {
+    @GetMapping("/users/id/{userId}/profile") public AccountDirectory.Profile profile(@AuthenticationPrincipal Actor actor, @PathVariable UUID userId) {
+        accounts.requireInteraction(actor.userId(), userId);
         return accounts.profile(userId);
     }
 
@@ -132,6 +140,7 @@ public class RelayController {
 
     @PostMapping("/keys/{userId}/claim") public AccountDirectory.PreKey claim(@AuthenticationPrincipal Actor actor, @PathVariable UUID userId) {
         rates.require("claims:" + actor.deviceId(), 20, 60);
+        accounts.requireInteraction(actor.userId(), userId);
         return accounts.claim(userId);
     }
 
@@ -161,7 +170,7 @@ public class RelayController {
                                     @RequestParam UUID recipientDeviceId, @RequestParam long expiresAt, @RequestBody byte[] ciphertext) {
         rates.require("media:" + actor.deviceId(), 6, 60);
         recipient(recipientId, recipientDeviceId);
-        relay.upload(actor, id, recipientDeviceId, expiresAt, ciphertext);
+        relay.upload(actor, id, recipientId, recipientDeviceId, expiresAt, ciphertext);
         return Map.of("id", id);
     }
 

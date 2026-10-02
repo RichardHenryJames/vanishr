@@ -6,7 +6,7 @@
   "trailingSlash": true,
   "redirects": [
     {"source": "/index.html", "destination": "/", "permanent": true},
-    {"source": "/:section(android|security|privacy)/index.html", "destination": "/:section/", "permanent": true}
+    {"source": "/:section(android|security|privacy|delete-account|terms)/index.html", "destination": "/:section/", "permanent": true}
   ],
   "headers": [
     {

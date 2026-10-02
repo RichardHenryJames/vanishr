@@ -30,6 +30,7 @@ $consentPanel = @'
 '@
 $verification = if ($settings.googleSiteVerification) { '<meta name="google-site-verification" content="' + [System.Net.WebUtility]::HtmlEncode($settings.googleSiteVerification) + '">' } else { '' }
 $analyticsStatus = if ($settings.ga4MeasurementId) { 'Optional Google Analytics is available on this website. It is disabled until you give consent.' } else { 'Google Analytics is not configured on this website yet. No Google Analytics requests are sent.' }
+$accountControlsNote = if ($feed.versionCode -lt 27) { "The download offered here is $version. In-app account deletion, blocking and reporting are being prepared for 0.4.6 (code 27); those controls are not in 0.4.5. Use the email routes on these pages if the controls are unavailable." } else { 'In-app account deletion, blocking and reporting require version 0.4.6 (code 27) or later and the matching updated relay. Use the email routes on these pages if the controls are unavailable.' }
 $replacements = [ordered]@{
     '__VERSION__' = $version
     '__VERSION_CODE__' = [string]$feed.versionCode
@@ -40,13 +41,17 @@ $replacements = [ordered]@{
     '__SEARCH_VERIFICATION__' = $verification
     '__CONSENT_PANEL__' = $consentPanel
     '__ANALYTICS_STATUS__' = $analyticsStatus
+    '__ACCOUNT_CONTROLS_NOTE__' = $accountControlsNote
 }
-$pages = @('index.html', 'android/index.html', 'security/index.html', 'privacy/index.html')
+$pages = @('index.html', 'android/index.html', 'security/index.html', 'privacy/index.html', 'delete-account/index.html', 'terms/index.html')
 $schemaHashes = [System.Collections.Generic.HashSet[string]]::new()
 foreach ($relative in $pages) {
     $html = Get-Content (Join-Path $source $relative) -Raw
     foreach ($replacement in $replacements.GetEnumerator()) { $html = $html.Replace($replacement.Key, $replacement.Value) }
     if ($html -match '__[A-Z_]+__') { throw "Unresolved website placeholder: $relative" }
+    $canonical = [regex]::Matches($html, '<link\s+rel="canonical"\s+href="([^"]+)"\s*/?>')
+    $canonicalUrl = "$($settings.origin)/$($relative -creplace 'index\.html$', '')"
+    if ($canonical.Count -ne 1 -or $canonical[0].Groups[1].Value -cne $canonicalUrl) { throw "Unexpected website canonical URL: $relative" }
     foreach ($schema in [regex]::Matches($html, '(?s)<script type="application/ld\+json">(.*?)</script>')) {
         $null = $schema.Groups[1].Value | ConvertFrom-Json
         $hash = [Convert]::ToBase64String([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($schema.Groups[1].Value)))
@@ -57,15 +62,18 @@ foreach ($relative in $pages) {
     [IO.File]::WriteAllText($target, $html, [Text.UTF8Encoding]::new($false))
 }
   [xml]$sitemap = Get-Content (Join-Path $source 'sitemap.xml') -Raw
+  $sitemapPages = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
   foreach ($entry in $sitemap.urlset.url) {
     $uri = [uri]$entry.loc
     if ($uri.GetLeftPart([UriPartial]::Authority) -cne $settings.origin) { throw 'Sitemap contains a different website origin.' }
     $relative = $uri.AbsolutePath.TrimStart('/') + 'index.html'
     if ($relative -notin $pages) { throw 'Sitemap contains an unpublished page.' }
+    if (-not $sitemapPages.Add($relative)) { throw 'Sitemap contains a duplicate page.' }
     $modified = @((Get-Item (Join-Path $source $relative)).LastWriteTimeUtc, (Get-Item (Join-Path $source 'site-settings.json')).LastWriteTimeUtc)
     if ($relative -in @('index.html', 'android/index.html')) { $modified += $apk.LastWriteTimeUtc }
     $entry.lastmod = ($modified | Sort-Object -Descending | Select-Object -First 1).ToString('yyyy-MM-dd')
   }
+  if ($sitemapPages.Count -ne $pages.Count) { throw 'Sitemap must include every published page.' }
   $sitemap.Save((Join-Path $Stage 'sitemap.xml'))
 $config = Get-Content (Join-Path $source 'vercel.json') -Raw | ConvertFrom-Json
 $policy = "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'; style-src 'self'; font-src 'self'; img-src 'self' https://www.google-analytics.com https://region1.google-analytics.com; script-src 'self' https://www.googletagmanager.com $($schemaHashes -join ' '); connect-src 'self' https://www.google-analytics.com https://region1.google-analytics.com https://analytics.google.com; upgrade-insecure-requests"

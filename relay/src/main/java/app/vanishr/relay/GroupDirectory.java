@@ -100,6 +100,7 @@ public class GroupDirectory {
                 members.add(invitee.userId());
             }
             if (members.size() > MAX_MEMBERS) throw new ApiException(HttpStatus.CONFLICT, "group_full");
+            accounts.requireUnblockedGroup(members);
             for (AccountDirectory.Contact invitee : invitees.stream().sorted(Comparator.comparing(AccountDirectory.Contact::userId)).toList()) {
                 if (group.members().stream().anyMatch(member -> member.userId().equals(invitee.userId()))) continue;
                 capacity(invitee.userId());
@@ -118,6 +119,7 @@ public class GroupDirectory {
             if (!active.deviceId().equals(member.deviceId()) || !active.identityKey().equals(member.identityKey()))
                 throw new ApiException(HttpStatus.CONFLICT, "group_identity_changed");
             if (member.state().equals("INVITED")) {
+                accounts.requireUnblockedGroup(group.members().stream().map(Member::userId).collect(java.util.stream.Collectors.toSet()));
                 database.update("UPDATE group_members SET state='ACTIVE',invited_until=0 WHERE group_id=? AND user_id=?", id, actor.userId());
                 rotate(id);
             }
@@ -151,7 +153,7 @@ public class GroupDirectory {
     }
 
     public void requireCurrentDevices(Snapshot group) {
-        Integer count=database.queryForObject("SELECT count(*) FROM group_members m JOIN devices d ON d.id=m.device_id AND d.user_id=m.user_id AND d.identity_key=m.identity_key WHERE m.group_id=? AND m.state='ACTIVE'",Integer.class,group.id());
+        Integer count=database.queryForObject("SELECT count(*) FROM group_members m JOIN devices d ON d.id=m.device_id AND d.user_id=m.user_id AND d.identity_key=m.identity_key JOIN accounts a ON a.id=m.user_id AND a.deletion_state='ACTIVE' WHERE m.group_id=? AND m.state='ACTIVE'",Integer.class,group.id());
         if (count==null || count!=group.active().size()) throw new ApiException(HttpStatus.CONFLICT,"group_identity_changed");
     }
 

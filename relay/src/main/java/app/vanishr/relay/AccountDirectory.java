@@ -60,6 +60,19 @@ public class AccountDirectory {
                 (row, index) -> new Credentials(row.getObject("id", UUID.class), row.getString("password_hash")), handle).stream().findFirst();
     }
 
+    public boolean exists(UUID userId) {
+        return Boolean.TRUE.equals(database.queryForObject("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ?)", Boolean.class, userId));
+    }
+
+    public boolean available(UUID userId) {
+        return Boolean.TRUE.equals(database.queryForObject(
+                "SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ? AND deletion_state = 'ACTIVE')", Boolean.class, userId));
+    }
+
+    public void requireAvailable(UUID userId) {
+        if (!available(userId)) throw new ApiException(HttpStatus.NOT_FOUND, "not_found");
+    }
+
     public Username username(UUID userId) {
         return database.query("SELECT id, handle FROM accounts WHERE id = ?",
                 (row, index) -> new Username(row.getObject("id", UUID.class), row.getString("handle")), userId)
@@ -75,7 +88,7 @@ public class AccountDirectory {
     }
 
     public Profile profile(UUID userId) {
-        return database.query("SELECT id, handle, display_name FROM accounts WHERE id = ?",
+        return database.query("SELECT id, handle, display_name FROM accounts WHERE id = ? AND deletion_state = 'ACTIVE'",
                 (row, index) -> new Profile(row.getObject("id", UUID.class), row.getString("handle"), row.getString("display_name")), userId)
                 .stream().findFirst().orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "not_found"));
     }
@@ -84,7 +97,7 @@ public class AccountDirectory {
         return database.query("""
                 SELECT a.id, a.user_type, admin.user_id AS admin_user_id
                 FROM accounts a LEFT JOIN admin_identity admin ON admin.user_id = a.id
-                WHERE a.id = ?
+                WHERE a.id = ? AND a.deletion_state = 'ACTIVE'
                 """, (row, index) -> {
                     UserType type = UserType.valueOf(row.getString("user_type"));
                     if (type == UserType.ADMIN && row.getObject("admin_user_id", UUID.class) == null)
@@ -98,9 +111,10 @@ public class AccountDirectory {
     public Introductions introductions(UUID userId, UUID after, UUID peerId) {
         UUID adminId = database.query("""
                 SELECT pin.user_id FROM admin_identity pin JOIN accounts a ON a.id = pin.user_id
-                WHERE a.user_type = 'ADMIN'
+                WHERE a.user_type = 'ADMIN' AND a.deletion_state = 'ACTIVE'
                 """, (row, index) -> row.getObject("user_id", UUID.class)).stream().findFirst().orElse(null);
         if (adminId == null) return new Introductions(userId, null, List.of(), null);
+        if (blocked(userId, adminId)) return new Introductions(userId, null, List.of(), null);
         if (!adminId.equals(userId) && !Boolean.TRUE.equals(database.queryForObject(
                 "SELECT EXISTS(SELECT 1 FROM admin_introductions WHERE user_id = ? AND admin_id = ?)",
                 Boolean.class, userId, adminId))) return new Introductions(userId, null, List.of(), null);
@@ -111,13 +125,19 @@ public class AccountDirectory {
                 JOIN accounts a ON a.id = CASE WHEN link.admin_id = ? THEN link.user_id ELSE link.admin_id END
                 JOIN devices d ON d.user_id = a.id
                 WHERE link.admin_id = ? AND (link.admin_id = ? OR link.user_id = ?)
-                  AND (?::uuid IS NULL OR a.id > ?)
+                  AND a.deletion_state = 'ACTIVE'
+                  AND NOT EXISTS (SELECT 1 FROM account_blocks b
+                      WHERE (b.blocker_id = ? AND b.blocked_id = a.id) OR (b.blocked_id = ? AND b.blocker_id = a.id))
+                  AND (?::uuid IS NULL OR (link.introduced_at, link.user_id) < (
+                      SELECT cursor.introduced_at, cursor.user_id
+                      FROM admin_introductions cursor
+                      WHERE cursor.admin_id = ? AND cursor.user_id = ?))
                   AND (?::uuid IS NULL OR a.id = ?)
-                ORDER BY a.id LIMIT 65
+                ORDER BY link.introduced_at DESC, link.user_id DESC LIMIT 65
                 """, (row, index) -> new Introduction(row.getObject("id", UUID.class),
                 row.getObject("device_id", UUID.class), row.getString("identity_key"),
                 row.getString("handle"), row.getString("display_name")),
-                userId, adminId, userId, userId, after, after, peerId, peerId);
+                userId, adminId, userId, userId, userId, userId, after, adminId, after, peerId, peerId);
         UUID next = contacts.size() > 64 ? contacts.get(63).userId() : null;
         return new Introductions(userId, admin, List.copyOf(contacts.subList(0, Math.min(64, contacts.size()))), next);
     }
@@ -133,8 +153,7 @@ public class AccountDirectory {
 
     @Transactional
     public GoogleAccount googleAccount(String subject) {
-        if (subject == null || !subject.matches("[A-Za-z0-9_-]{1,255}"))
-            throw new ApiException(HttpStatus.UNAUTHORIZED, "authentication_failed");
+        validateGoogleSubject(subject);
         UUID userId = UUID.randomUUID();
         String handle = "g_" + userId.toString().replace("-", "").substring(0, 28);
         database.update("INSERT INTO accounts(id, handle, google_subject) VALUES (?, ?, ?) ON CONFLICT (google_subject) DO NOTHING",
@@ -143,8 +162,23 @@ public class AccountDirectory {
                 (row, index) -> new GoogleAccount(row.getObject("id", UUID.class), row.getString("handle")), subject);
     }
 
+    public GoogleAccount existingGoogleAccount(String subject, UUID expectedUserId) {
+        validateGoogleSubject(subject);
+        return database.query("SELECT id, handle FROM accounts WHERE google_subject = ? AND id = ?",
+                (row, index) -> new GoogleAccount(row.getObject("id", UUID.class), row.getString("handle")), subject, expectedUserId)
+                .stream().findFirst().orElseThrow(() -> new ApiException(HttpStatus.UNAUTHORIZED, "authentication_failed"));
+    }
+
+    private void validateGoogleSubject(String subject) {
+        if (subject == null || !subject.matches("[A-Za-z0-9_-]{1,255}"))
+            throw new ApiException(HttpStatus.UNAUTHORIZED, "authentication_failed");
+    }
+
     public boolean active(UUID userId, UUID deviceId) {
-        return Boolean.TRUE.equals(database.queryForObject("SELECT EXISTS(SELECT 1 FROM devices WHERE user_id = ? AND id = ?)", Boolean.class, userId, deviceId));
+        return Boolean.TRUE.equals(database.queryForObject("""
+                SELECT EXISTS(SELECT 1 FROM devices d JOIN accounts a ON a.id = d.user_id
+                WHERE d.user_id = ? AND d.id = ? AND a.deletion_state = 'ACTIVE')
+                """, Boolean.class, userId, deviceId));
     }
 
     public UUID version(UUID deviceId) {
@@ -152,13 +186,55 @@ public class AccountDirectory {
     }
 
     public boolean active(RelayTypes.Actor actor, UUID version) {
-        return Boolean.TRUE.equals(database.queryForObject("SELECT EXISTS(SELECT 1 FROM devices WHERE user_id = ? AND id = ? AND auth_version = ?)",
+        return Boolean.TRUE.equals(database.queryForObject("""
+                SELECT EXISTS(SELECT 1 FROM devices d JOIN accounts a ON a.id = d.user_id
+                WHERE d.user_id = ? AND d.id = ? AND d.auth_version = ? AND a.deletion_state = 'ACTIVE')
+                """,
                 Boolean.class, actor.userId(), actor.deviceId(), version));
+    }
+
+    public boolean blocked(UUID first, UUID second) {
+        return Boolean.TRUE.equals(database.queryForObject("""
+                SELECT EXISTS(SELECT 1 FROM account_blocks WHERE
+                    (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?))
+                """, Boolean.class, first, second, second, first));
+    }
+
+    public boolean canInteract(UUID first, UUID second) {
+        return available(first) && available(second) && !blocked(first, second);
+    }
+
+    public void requireInteraction(UUID first, UUID second) {
+        if (!canInteract(first, second)) throw new ApiException(HttpStatus.NOT_FOUND, "not_found");
+    }
+
+    public void requireUnblockedGroup(Set<UUID> users) {
+        String placeholders = String.join(",", Collections.nCopies(users.size(), "?"));
+        List<UUID> parameters = new ArrayList<>(users);
+        parameters.addAll(users);
+        if (Boolean.TRUE.equals(database.queryForObject("SELECT EXISTS(SELECT 1 FROM account_blocks WHERE blocker_id IN ("
+                + placeholders + ") AND blocked_id IN (" + placeholders + "))", Boolean.class, parameters.toArray())))
+            throw new ApiException(HttpStatus.NOT_FOUND, "not_found");
+    }
+
+    public Optional<UUID> deviceOwner(UUID deviceId) {
+        return database.query("SELECT user_id FROM devices WHERE id = ?",
+                (row, index) -> row.getObject(1, UUID.class), deviceId).stream().findFirst();
+    }
+
+    public boolean routeAllowed(GenericNotifier.Destination destination) {
+        if (!active(destination.userId(), destination.deviceId())) return false;
+        if (exists(destination.conversationId())) return canInteract(destination.userId(), destination.conversationId());
+        return Boolean.TRUE.equals(database.queryForObject("""
+                SELECT EXISTS(SELECT 1 FROM group_members m JOIN private_groups g ON g.id = m.group_id
+                    WHERE m.group_id = ? AND m.user_id = ? AND m.device_id = ? AND m.state = 'ACTIVE' AND g.closed_at IS NULL)
+                """, Boolean.class, destination.conversationId(), destination.userId(), destination.deviceId()));
     }
 
     @Transactional
     public void registerDevice(UUID userId, DeviceRequest request) {
         database.queryForObject("SELECT id FROM accounts WHERE id = ? FOR UPDATE", UUID.class, userId);
+        requireAvailable(userId);
         Integer count = database.queryForObject("SELECT COUNT(*) FROM devices WHERE user_id = ?", Integer.class, userId);
         if (count != null && count > 0 && !request.replaceExisting()) {
             Contact registered = contact(userId);
@@ -174,11 +250,12 @@ public class AccountDirectory {
     }
 
     public Contact contact(UUID userId) {
+        requireAvailable(userId);
         return findContact("SELECT user_id, id, identity_key FROM devices WHERE user_id = ?", userId);
     }
 
     public Contact contact(String handle) {
-        return findContact("SELECT devices.user_id, devices.id, devices.identity_key FROM devices JOIN accounts ON accounts.id = devices.user_id WHERE accounts.handle = ?", handle);
+        return findContact("SELECT devices.user_id, devices.id, devices.identity_key FROM devices JOIN accounts ON accounts.id = devices.user_id WHERE accounts.handle = ? AND accounts.deletion_state = 'ACTIVE'", handle);
     }
 
     private Contact findContact(String query, Object parameter) {

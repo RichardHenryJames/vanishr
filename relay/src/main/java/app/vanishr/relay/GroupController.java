@@ -58,6 +58,7 @@ public class GroupController {
         return groups.withGroup(actor,id,request.revision(),false,group -> {
             List<Claimed> result=new ArrayList<>();
             for (UUID user : new LinkedHashSet<>(request.users())) {
+                accounts.requireInteraction(actor.userId(), user);
                 GroupDirectory.Member member=group.member(user);
                 if (!member.state().equals("ACTIVE") && !group.ownerId().equals(actor.userId())) throw new ApiException(HttpStatus.FORBIDDEN,"forbidden");
                 AccountDirectory.Contact current=accounts.contact(user);

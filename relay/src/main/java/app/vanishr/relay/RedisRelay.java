@@ -19,15 +19,17 @@ public class RedisRelay {
     private final StringRedisTemplate redis;
     private final ObjectMapper json;
     private final Clock clock;
+    private final AccountDirectory accounts;
     private final DefaultRedisScript<String> enqueue = script("enqueue");
     private final DefaultRedisScript<String> acknowledge = script("acknowledge");
     private final DefaultRedisScript<String> upload = script("upload");
     private final DefaultRedisScript<String> removeMedia = script("remove-media");
 
-    public RedisRelay(StringRedisTemplate redis, ObjectMapper json, Clock clock) {
+    public RedisRelay(StringRedisTemplate redis, ObjectMapper json, Clock clock, AccountDirectory accounts) {
         this.redis = redis;
         this.json = json;
         this.clock = clock;
+        this.accounts = accounts;
     }
 
     private static DefaultRedisScript<String> script(String name) {
@@ -65,6 +67,7 @@ public class RedisRelay {
     }
 
     public Status send(Actor actor, SendRequest request) {
+        accounts.requireInteraction(actor.userId(), request.recipientId());
         RelayPolicy.message(request, actor, clock.instant());
         Message message = new Message(request.id(), actor.userId(), actor.deviceId(), request.recipientId(),
                 request.recipientDeviceId(), request.expiry(), clock.millis(), request.expiresAt(),
@@ -80,12 +83,14 @@ public class RedisRelay {
 
     public List<Message> pending(Actor actor) {
         return indexed("inbox:" + actor.deviceId(), "m:", Message.class).stream()
-                .filter(message -> message.recipientDeviceId().equals(actor.deviceId()) && message.expiresAt() > clock.millis()).toList();
+                .filter(message -> message.recipientId().equals(actor.userId()) && message.recipientDeviceId().equals(actor.deviceId())
+                        && message.expiresAt() > clock.millis() && accounts.canInteract(message.senderId(), message.recipientId())).toList();
     }
 
     public List<Status> statuses(Actor actor) {
         return indexed("outbox:" + actor.deviceId(), "r:", Receipt.class).stream()
-                .filter(receipt -> receipt.senderDeviceId().equals(actor.deviceId())).map(Status::from).toList();
+                .filter(receipt -> receipt.senderId().equals(actor.userId()) && receipt.senderDeviceId().equals(actor.deviceId())
+                        && accounts.canInteract(receipt.senderId(), receipt.recipientId())).map(Status::from).toList();
     }
 
     public List<Status> statuses(Actor actor, List<UUID> ids) {
@@ -95,7 +100,8 @@ public class RedisRelay {
         List<String> values = redis.opsForValue().multiGet(ids.stream().map(id -> "r:" + id).toList());
         if (values == null) return List.of();
         return values.stream().filter(Objects::nonNull).map(value -> decode(value, Receipt.class))
-                .filter(receipt -> receipt.senderDeviceId().equals(actor.deviceId())).map(Status::from).toList();
+                .filter(receipt -> receipt.senderId().equals(actor.userId()) && receipt.senderDeviceId().equals(actor.deviceId())
+                        && accounts.canInteract(receipt.senderId(), receipt.recipientId())).map(Status::from).toList();
     }
 
     private <Value> List<Value> indexed(String index, String prefix, Class<Value> type) {
@@ -108,15 +114,22 @@ public class RedisRelay {
     }
 
     public Status acknowledge(Actor actor, UUID id, State state) {
+        Receipt receipt = decode(redis.opsForValue().get("r:" + id), Receipt.class);
+        if (!(actor.userId().equals(receipt.senderId()) && actor.deviceId().equals(receipt.senderDeviceId()))
+                && !(actor.userId().equals(receipt.recipientId()) && actor.deviceId().equals(receipt.recipientDeviceId())))
+            throw new ApiException(HttpStatus.NOT_FOUND, "not_found");
+        accounts.requireInteraction(receipt.senderId(), receipt.recipientId());
         String result = redis.execute(acknowledge, List.of("m:" + id, "r:" + id), actor.deviceId().toString(), state.name());
         return Status.from(decode(checked(result), Receipt.class));
     }
 
-    public void upload(Actor actor, UUID mediaId, UUID recipientDeviceId, long expiresAt, byte[] ciphertext) {
+    public void upload(Actor actor, UUID mediaId, UUID recipientId, UUID recipientDeviceId, long expiresAt, byte[] ciphertext) {
+        accounts.requireInteraction(actor.userId(), recipientId);
         RelayPolicy.deadline(Expiry.HOURS_24, expiresAt, clock.instant());
         if (ciphertext.length < 17 || ciphertext.length > RelayPolicy.MAX_MEDIA_BYTES)
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_media_size");
-        Media media = new Media(mediaId, actor.deviceId(), recipientDeviceId, expiresAt, null, ciphertext, digest(ciphertext));
+        Media media = new Media(mediaId, actor.deviceId(), recipientDeviceId, expiresAt, null, ciphertext, digest(ciphertext),
+                actor.userId(), recipientId);
         checked(redis.execute(upload, List.of("b:" + mediaId), encode(media), Long.toString(clock.millis())));
     }
 
@@ -124,12 +137,26 @@ public class RedisRelay {
         Media media = decode(redis.opsForValue().get("b:" + id), Media.class);
         if (!media.recipientDeviceId().equals(actor.deviceId()) || media.messageId() == null || media.expiresAt() <= clock.millis())
             throw new ApiException(HttpStatus.NOT_FOUND, "not_found");
-        if (!Boolean.TRUE.equals(redis.hasKey("m:" + media.messageId())))
+        Message message = decode(redis.opsForValue().get("m:" + media.messageId()), Message.class);
+        if (!message.recipientId().equals(actor.userId()) || !message.recipientDeviceId().equals(actor.deviceId()))
             throw new ApiException(HttpStatus.NOT_FOUND, "not_found");
+        accounts.requireInteraction(message.senderId(), message.recipientId());
         return media.ciphertext();
     }
 
+    public boolean reportable(Actor actor, UUID target, UUID id) {
+        String stored = redis.opsForValue().get("m:" + id);
+        if (stored == null) return false;
+        Message message = decode(stored, Message.class);
+        return actor.userId().equals(message.recipientId()) && actor.deviceId().equals(message.recipientDeviceId())
+                && target.equals(message.senderId()) && message.expiresAt() > clock.millis()
+                && accounts.canInteract(actor.userId(), target);
+    }
+
     public void deleteMedia(Actor actor, UUID id) {
+        Media media = decode(redis.opsForValue().get("b:" + id), Media.class);
+        if (media.senderId() != null && !actor.userId().equals(media.senderId()))
+            throw new ApiException(HttpStatus.NOT_FOUND, "not_found");
         checked(redis.execute(removeMedia, List.of("b:" + id), actor.deviceId().toString()));
     }
 }

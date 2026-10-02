@@ -146,10 +146,12 @@ public final class MainActivity extends AppCompatActivity {
     private boolean completingGoogle;
     private CancellationSignal googleCancellation;
     private GoogleSignIn.Failure googleFailure;
+    private boolean loginPolicyApproved;
     private static final class GoogleAttempt {
         final String origin;
         final boolean replace;
         final GoogleSignIn.Challenge challenge;
+        UUID deletingAccount;
         String idToken;
         GoogleAttempt(String origin, boolean replace, GoogleSignIn.Challenge challenge) { this.origin = origin; this.replace = replace; this.challenge = challenge; }
     }
@@ -478,6 +480,7 @@ public final class MainActivity extends AppCompatActivity {
         homeConnection = null; unreadFilter = null;
         screenPadding(20);
         shownEntries = java.util.List.of();
+        if (current.safety().deletionPending()) { pendingDeletionScreen(); return; }
         if (googleAttempt != null || completingGoogle) { storageState(); return; }
         if (!current.authenticated()) {
             current.presence().foreground(false);
@@ -485,6 +488,7 @@ public final class MainActivity extends AppCompatActivity {
             if (VanishrApplication.pushConfigured()) FirebaseMessaging.getInstance().setAutoInitEnabled(false);
             notificationOpen = null; loginScreen(); maybePromptUpdate(false); return;
         }
+        if (!current.safety().termsAccepted(PlayPolicy.VERSION)) { policyScreen(); return; }
         if (notificationOpen != null) { storageState(); openNotification(); return; }
         current.presence().foreground(true);
         ChatEngine.Peer peer = conversationPeer(selectedPeer);
@@ -499,6 +503,10 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void checkForUpdates(boolean manual) {
+        if (BuildConfig.PLAY_STORE) {
+            if (manual) openPublicPage(PlayPolicy.PLAY_URL);
+            return;
+        }
         if (!resumed || isDestroyed() || checkingUpdates) return;
         SharedPreferences preferences = getSharedPreferences("updates", MODE_PRIVATE);
         long now = System.currentTimeMillis();
@@ -526,6 +534,7 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void maybePromptUpdate(boolean manual) {
+        if (BuildConfig.PLAY_STORE) return;
         AppUpdates.Release release = availableUpdate;
         if (release == null || !resumed || isDestroyed() || engine == null || busy
             || googleAttempt != null || completingGoogle
@@ -608,14 +617,17 @@ public final class MainActivity extends AppCompatActivity {
             boolean replaceExisting = replace.isChecked();
             ChatEngine current = engine;
             password.setText("");
-            submit(() -> current.login(origin, accountHandle, secret, register, replaceExisting), () -> {
+            ensurePolicies(() -> submit(() -> {
+                current.login(origin, accountHandle, secret, register, replaceExisting);
+                if (loginPolicyApproved) current.safety().acceptTerms(PlayPolicy.VERSION);
+            }, () -> {
                 signingUp = false;
                 deviceReplacementRequired = false;
                 engine.connect(this::queueSync);
                 render();
                 registerPush();
                 queueSync();
-            });
+            }));
         });
         if (passwordAccount) form.addView(continueButton);
         mode.addOnButtonCheckedListener((group, checkedId, checked) -> {
@@ -635,9 +647,12 @@ public final class MainActivity extends AppCompatActivity {
             form.addView(design.spacer(18));
         }
         if (saved == null || !passwordAccount) {
-            MaterialButton google = design.button("Continue with Google", !passwordAccount, () -> googleLogin(origin, replace.isChecked()));
+            MaterialButton google = design.button("Continue with Google", !passwordAccount, () -> ensurePolicies(() -> googleLogin(origin, replace.isChecked())));
             form.addView(google);
         }
+        form.addView(profileAction("Privacy policy", R.drawable.ic_file_text, () -> openPublicPage(PlayPolicy.PRIVACY_URL)));
+        form.addView(profileAction("Terms & safety", R.drawable.ic_shield_check, () -> openPublicPage(PlayPolicy.TERMS_URL)));
+        form.addView(profileAction("Request account deletion", R.drawable.ic_trash_2, () -> openPublicPage(PlayPolicy.DELETION_URL)));
         if (saved != null) {
             form.addView(design.spacer(18));
             form.addView(command("Use another account", this::signOutDialog));
@@ -742,12 +757,18 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void beginGoogleSignIn(String origin, boolean replace) {
+        beginGoogleSignIn(origin, replace, null);
+    }
+
+    private void beginGoogleSignIn(String origin, boolean replace, UUID deletingAccount) {
         if (!resumed || engine == null || busy || googleAttempt != null) return;
         googleFailure = null;
         if (actionError != null) { actionError.setText(""); actionError.setVisibility(View.GONE); }
         var prepared = new java.util.concurrent.atomic.AtomicReference<GoogleSignIn.Challenge>();
-        submit(() -> prepared.set(GoogleSignIn.prepare(origin)), () -> {
+        UUID expectedAccount = deletingAccount != null ? deletingAccount : engine.account() == null ? null : engine.account().userId();
+        submit(() -> prepared.set(GoogleSignIn.prepare(origin, expectedAccount)), () -> {
             GoogleAttempt attempt = new GoogleAttempt(origin, replace, prepared.get());
+            attempt.deletingAccount = deletingAccount;
             googleAttempt = attempt;
             render();
             googleCancellation = GoogleSignIn.request(this, attempt.challenge, new GoogleSignIn.Callback() {
@@ -789,10 +810,24 @@ public final class MainActivity extends AppCompatActivity {
         completingGoogle = true;
         render();
         submit(() -> {
-            try { current.loginGoogle(attempt.origin, attempt.challenge, attempt.idToken, attempt.replace); }
+            try {
+                if (attempt.deletingAccount != null) {
+                    if (current.account() == null || !attempt.deletingAccount.equals(current.account().userId()))
+                        throw new SecurityException("The account selected for deletion changed");
+                    current.safety().deleteWithGoogle(attempt.challenge, attempt.idToken);
+                } else {
+                    current.loginGoogle(attempt.origin, attempt.challenge, attempt.idToken, attempt.replace);
+                    if (loginPolicyApproved) current.safety().acceptTerms(PlayPolicy.VERSION);
+                }
+            }
             finally { attempt.idToken = null; }
-        }, () -> { completingGoogle = false; deviceReplacementRequired = false; render(); engine.connect(this::queueSync); registerPush(); queueSync(); }, failure -> {
+        }, () -> {
             completingGoogle = false;
+            if (attempt.deletingAccount != null) { deletedAccount(); return; }
+            deviceReplacementRequired = false; render(); engine.connect(this::queueSync); registerPush(); queueSync();
+        }, failure -> {
+            completingGoogle = false;
+            if (attempt.deletingAccount != null) { render(); deletionFailed(failure); return; }
             if (failure instanceof RelayApi.ApiFailure apiFailure && apiFailure.status == 401) {
                 getSharedPreferences("preferences", MODE_PRIVATE).edit().putBoolean("google-reset-pending", true).apply();
                 submit(current::invalidateToken, () -> {
@@ -1146,6 +1181,8 @@ public final class MainActivity extends AppCompatActivity {
         menu.getMenu().add("Disappearing messages").setOnMenuItemClickListener(item -> { expiryDialog(); return true; });
         menu.getMenu().add("Remove contact").setOnMenuItemClickListener(item -> { forgetDialog(peer); return true; });
         menu.getMenu().add("Clear chat").setOnMenuItemClickListener(item -> { clearChatDialog(peer); return true; });
+        menu.getMenu().add("Block user").setOnMenuItemClickListener(item -> { blockUserDialog(peer); return true; });
+        menu.getMenu().add("Report user").setOnMenuItemClickListener(item -> { reportUserDialog(peer.userId(), null); return true; });
         menu.show();
     }
 
@@ -1161,7 +1198,8 @@ public final class MainActivity extends AppCompatActivity {
     private void photoRequestsOnce() {
         ChatEngine current = engine;
         int generation = screenGeneration;
-        if (!resumed || busy || current == null || !current.authenticated() || SystemClock.elapsedRealtime() < nextPhotoPoll) return;
+        if (!resumed || busy || current == null || !current.authenticated()
+                || !current.safety().termsAccepted(PlayPolicy.VERSION) || SystemClock.elapsedRealtime() < nextPhotoPoll) return;
         try {
             UUID account = current.account().userId();
             if (!account.equals(photoRoleAccount) || SystemClock.elapsedRealtime() - photoRoleChecked > 60_000) {
@@ -1327,8 +1365,11 @@ showDialog(approval);
                 status.setPadding(0,dp(4),0,0); status.setMaxWidth(Math.max(dp(120),root.getWidth()-root.getPaddingLeft()-root.getPaddingRight()-dp(80))); row.addView(status);
             }
             row.setOnLongClickListener(view -> {
-                showDialog(new SecureSheet.Builder(this).setTitle("Delete message?").setNegativeButton("Cancel", null)
-                    .setPositiveButton("Delete", (dialog, which) -> submit(() -> engine.erase(entry, "delete"), () -> refreshMessages(peer))).create());
+                SecureSheet.Builder actions = new SecureSheet.Builder(this).setTitle("Message actions").setNegativeButton("Cancel", null)
+                    .setPositiveButton("Delete", (dialog, which) -> submit(() -> engine.erase(entry, "delete"), () -> refreshMessages(peer)));
+                if (!entry.outgoing()) actions.setNeutralButton("Report", (dialog, which) ->
+                    reportUserDialog(entry.groupEpoch() == null ? entry.peerId() : entry.senderId(), entry));
+                showDialog(actions.create());
                 return true;
             });
             alignment.addView(row, new LinearLayout.LayoutParams(-2, -2));
@@ -1639,11 +1680,19 @@ showDialog(approval);
         notificationStatus.setContentDescription("Notification status");
         panel.addView(notificationStatus); updateNotificationStatus();
         if (!VanishrApplication.pushConfigured()) { TextView unavailable = design.text("Not configured", 12, 500, MUTED); panel.addView(unavailable); }
-        panel.addView(profileAction("Check for updates", R.drawable.ic_arrow_up, () -> { dismissContent(); checkForUpdates(true); }));
+        panel.addView(profileAction(BuildConfig.PLAY_STORE ? "Open Google Play" : "Check for updates", R.drawable.ic_arrow_up, () -> { dismissContent(); checkForUpdates(true); }));
+        panel.addView(profileAction("Blocked accounts", R.drawable.ic_eye_off, this::blockedAccounts));
+        if (photoAdmin && current.account().userId().equals(photoRoleAccount))
+            panel.addView(profileAction("Safety reports", R.drawable.ic_shield_check, this::safetyReports));
+        panel.addView(profileAction("Privacy policy", R.drawable.ic_file_text, () -> openPublicPage(PlayPolicy.PRIVACY_URL)));
+        panel.addView(profileAction("Terms & safety", R.drawable.ic_shield_check, () -> openPublicPage(PlayPolicy.TERMS_URL)));
+        panel.addView(profileAction("Support", R.drawable.ic_message_circle, this::contactSupport));
         panel.addView(profileAction("Licenses & source", R.drawable.ic_file_text, () -> { dismissContent(); legalNotices(); }));
         panel.addView(design.spacer(8)); panel.addView(design.divider()); panel.addView(design.spacer(8));
         MaterialButton signOut = profileAction("Sign out", R.drawable.ic_log_out, this::signOutDialog);
         signOut.setTextColor(Ui.ERROR); signOut.setIconTint(android.content.res.ColorStateList.valueOf(Ui.ERROR)); panel.addView(signOut);
+        MaterialButton delete = profileAction("Delete account", R.drawable.ic_trash_2, this::deleteAccountDialog);
+        delete.setTextColor(Ui.ERROR); delete.setIconTint(android.content.res.ColorStateList.valueOf(Ui.ERROR)); panel.addView(delete);
         ScrollView scroll = new ScrollView(this); scroll.addView(panel);
         SecureSheet dialog = new SecureSheet.Builder(this).setTitle("My profile").setView(scroll).setNegativeButton("Close", null).create();
         dialog.setOnDismissListener(ignored -> {
@@ -1763,6 +1812,225 @@ showDialog(approval);
                 .setPositiveButton("Close", null).create());
     }
 
+    private void openPublicPage(String url) {
+        try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE)); }
+        catch (ActivityNotFoundException failure) { problem("No browser is available. Open " + url + " on another device."); }
+    }
+
+    private void contactSupport() {
+        Intent email = new Intent(Intent.ACTION_SENDTO, Uri.fromParts("mailto", PlayPolicy.SUPPORT, null))
+                .putExtra(Intent.EXTRA_SUBJECT, "Vanishr support");
+        try { startActivity(email); }
+        catch (ActivityNotFoundException failure) { problem("Email " + PlayPolicy.SUPPORT + ". Never include passwords, sign-in tokens or private keys."); }
+    }
+
+    private LinearLayout policyDetails() {
+        LinearLayout content = vertical();
+        TextView summary = design.text(PlayPolicy.SUMMARY, 13, 500, INK);
+        content.addView(summary);
+        content.addView(profileAction("Privacy policy", R.drawable.ic_file_text, () -> openPublicPage(PlayPolicy.PRIVACY_URL)));
+        content.addView(profileAction("Terms & safety", R.drawable.ic_shield_check, () -> openPublicPage(PlayPolicy.TERMS_URL)));
+        return content;
+    }
+
+    private void ensurePolicies(Runnable action) {
+        ChatEngine current = engine;
+        if (current == null || busy) return;
+        if (loginPolicyApproved || current.account() != null && current.safety().termsAccepted(PlayPolicy.VERSION)) {
+            action.run(); return;
+        }
+        LinearLayout content = policyDetails(); content.setPadding(dp(22), dp(8), dp(22), dp(12));
+        MaterialCheckBox agree = new MaterialCheckBox(this);
+        agree.setText("I agree to the Terms and have read the Privacy policy.");
+        content.addView(agree);
+        ScrollView scroll = new ScrollView(this); scroll.addView(content);
+        SecureSheet sheet = new SecureSheet.Builder(this).setTitle("Before using Vanishr").setView(scroll)
+            .setNegativeButton("Cancel", null).setPositiveButton("Continue", null).create();
+        sheet.setOnShowListener(ignored -> {
+            sheet.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
+            agree.setOnCheckedChangeListener((button, checked) -> sheet.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(checked));
+            sheet.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+                if (!resumed || engine != current || !agree.isChecked() || busy) return;
+                loginPolicyApproved = true;
+                sheet.dismiss(); action.run();
+            });
+        });
+        showDialog(sheet);
+    }
+
+    private void policyScreen() {
+        chatScreen = false;
+        engine.presence().foreground(false);
+        title("vanishr", false);
+        LinearLayout content = policyDetails();
+        MaterialCheckBox agree = new MaterialCheckBox(this);
+        agree.setText("I agree to the Terms and have read the Privacy policy.");
+        content.addView(agree);
+        ChatEngine current = engine;
+        MaterialButton proceed = design.button("Agree and continue", true, () -> {
+            if (!agree.isChecked() || engine != current) return;
+            submit(() -> current.safety().acceptTerms(PlayPolicy.VERSION), () -> { render(); queueSync(); registerPush(); });
+        });
+        proceed.setEnabled(false);
+        agree.setOnCheckedChangeListener((button, checked) -> proceed.setEnabled(checked));
+        content.addView(proceed);
+        content.addView(profileAction("Request account deletion", R.drawable.ic_trash_2, this::deleteAccountDialog));
+        content.addView(profileAction("Sign out", R.drawable.ic_log_out, this::signOutDialog));
+        ScrollView scroll = new ScrollView(this); scroll.addView(content);
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+    }
+
+    private void blockUserDialog(ChatEngine.Peer peer) {
+        ChatEngine current = engine;
+        if (current == null || !current.authenticated()) return;
+        showDialog(new SecureSheet.Builder(this).setTitle("Block " + peer.name() + "?")
+            .setMessage("This stops direct contact and ends photo access. Local direct-chat content and the saved identity will be removed. Unblocking does not restore them. Shared group history on other devices cannot be erased.")
+            .setNegativeButton("Cancel", null).setPositiveButton("Block", (dialog, which) -> {
+                if (engine != current) return;
+                submit(() -> current.safety().block(peer), () -> { selectedPeer = null; render(); queueSync(); });
+            }).create());
+    }
+
+    private void reportUserDialog(UUID targetId, ChatEngine.Entry entry) {
+        ChatEngine current = engine;
+        if (current == null || !current.authenticated() || targetId == null) { problem("This report is unavailable."); return; }
+        String[] labels = {"Spam", "Harassment", "Sexual content", "Child safety", "Impersonation", "Threats", "Other"};
+        showDialog(new SecureSheet.Builder(this).setTitle(entry == null ? "Report user" : "Report message")
+            .setSingleChoiceItems(labels, -1, (dialog, selected) -> {
+                AccountSafety.Reason reason = AccountSafety.Reason.values()[selected];
+                showDialog(new SecureSheet.Builder(this).setTitle("Send safety report?")
+                    .setMessage("The moderator receives your account ID, the reported account, the selected reason and any message/group IDs. No chat text or photos are uploaded. Reports are retained for up to 30 days for safety review.")
+                    .setNegativeButton("Cancel", null).setPositiveButton("Send report", (confirmation, which) ->
+                        submit(() -> current.safety().report(targetId, reason, entry), () ->
+                            problem("Report submitted for review. You can also block this user or contact " + PlayPolicy.SUPPORT + "."))).create());
+            }).setNegativeButton("Cancel", null).create());
+    }
+
+    private void blockedAccounts() {
+        ChatEngine current = engine;
+        if (current == null || !current.authenticated()) return;
+        dismissContent();
+        submit(current.safety()::refresh, () -> {
+            java.util.List<UUID> blocked = current.safety().blockedUsers();
+            if (blocked.isEmpty()) { problem("No blocked accounts."); return; }
+            String[] names = blocked.stream().map(id -> "Account " + id.toString().substring(0, 8)).toArray(String[]::new);
+            showDialog(new SecureSheet.Builder(this).setTitle("Blocked accounts")
+                .setSingleChoiceItems(names, -1, (dialog, which) -> showDialog(new SecureSheet.Builder(this).setTitle("Unblock account?")
+                    .setMessage("This permits future contact but does not restore messages or verify the account. Add and verify it again if you want to chat.")
+                    .setNegativeButton("Cancel", null).setPositiveButton("Unblock", (choice, button) ->
+                        submit(() -> current.safety().unblock(blocked.get(which)), () -> { render(); blockedAccounts(); })).create()))
+                .setNegativeButton("Close", null).create());
+        });
+    }
+
+    private void safetyReports() {
+        ChatEngine current = engine;
+        if (current == null || !current.authenticated()) return;
+        dismissContent();
+        var reports = new java.util.concurrent.atomic.AtomicReference<AccountSafety.Report[]>();
+        submit(() -> reports.set(current.safety().reports()), () -> {
+            AccountSafety.Report[] values = reports.get();
+            if (values.length == 0) { problem("No pending safety reports."); return; }
+            String[] labels = Arrays.stream(values).map(report -> report.reason().name().replace('_', ' ')
+                + " - " + report.targetId().toString().substring(0, 8)).toArray(String[]::new);
+            showDialog(new SecureSheet.Builder(this).setTitle("Safety reports")
+                .setSingleChoiceItems(labels, -1, (dialog, which) -> {
+                    AccountSafety.Report report = values[which];
+                    showDialog(new SecureSheet.Builder(this).setTitle("Safety report")
+                        .setMessage("Reason: " + report.reason().name().replace('_', ' ') + "\nReported account: " + report.targetId()
+                            + "\nReporter: " + report.reporterId() + "\nReport: " + report.id()
+                            + "\n\nNo plaintext evidence is collected. Contact the reporter privately if needed, and follow the published safety policy. Mark reviewed only after appropriate action.")
+                        .setNegativeButton("Close", null).setPositiveButton("Mark reviewed", (choice, button) ->
+                            submit(() -> current.safety().resolveReport(report.id()), this::safetyReports)).create());
+                }).setNegativeButton("Close", null).create());
+        });
+    }
+
+    private void deleteAccountDialog() {
+        ChatEngine current = engine;
+        if (current == null || current.account() == null || busy) return;
+        UUID deleting = current.account().userId();
+        dismissContent();
+        LinearLayout content = vertical(); content.setPadding(dp(22), dp(8), dp(22), dp(12));
+        content.addView(design.text("Permanently delete this account, its server identity and this phone's encrypted account data. "
+            + "Groups you own will close. Other people's delivered copies cannot be erased. Safety reports you submitted or that target you are removed. "
+            + "This cannot be undone. You must sign in again to confirm ownership.", 13, 500, INK));
+        if (current.onboarding().admin()) content.addView(design.text(
+            "This is the sole admin account. Deleting it also disables administration and automatic admin chats. The permanent reservation will not transfer to anyone else.",
+            13, 700, Ui.ERROR));
+        Ui.Field confirmation = design.field("Type DELETE to confirm", InputType.TYPE_CLASS_TEXT);
+        content.addView(confirmation.view());
+        Ui.Field password = design.field("Password", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        boolean google = current.usesGoogle();
+        if (!google) content.addView(password.view());
+        content.addView(profileAction("Deletion policy and help", R.drawable.ic_file_text, () -> openPublicPage(PlayPolicy.DELETION_URL)));
+        ScrollView scroll = new ScrollView(this); scroll.addView(content);
+        SecureSheet sheet = new SecureSheet.Builder(this).setTitle("Delete account").setView(scroll)
+            .setNegativeButton("Cancel", null).setPositiveButton(google ? "Confirm with Google" : "Delete permanently", null).create();
+        sheet.setOnShowListener(ignored -> sheet.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+            if (busy || engine != current || current.account() == null || !deleting.equals(current.account().userId())) return;
+            if (!"DELETE".contentEquals(confirmation.input().getText())) { confirmation.layout().setError("Type DELETE exactly"); return; }
+            String secret = password.input().getText().toString();
+            if (!google && (secret.length() < 16 || secret.length() > 64)) { password.layout().setError("Enter your account password"); return; }
+            password.input().setText(""); sheet.dismiss();
+            if (google) beginGoogleSignIn(current.account().origin(), false, deleting);
+            else submit(() -> current.safety().deleteWithPassword(secret), this::deletedAccount, this::deletionFailed);
+        }));
+        showDialog(sheet);
+    }
+
+    private void deletionFailed(Exception failure) {
+        if (failure instanceof AccountSafety.DeletionPendingException pending) {
+            render(); problem(pending.getMessage()); return;
+        }
+        if (failure instanceof GeneralSecurityException || failure instanceof AndroidVault.PhoneLockedException
+                || failure instanceof AndroidVault.PhoneLockRequiredException) { showFailure(failure); return; }
+        if (failure instanceof RelayApi.ApiFailure apiFailure && apiFailure.status == 401) {
+            problem("Deletion was not authorized. Check your password or choose the same Google account, then retry."); return;
+        }
+        problem("Account deletion did not finish. Keep the app installed and use the deletion retry, or request help at " + PlayPolicy.SUPPORT + ".");
+    }
+
+    private void pendingDeletionScreen() {
+        chatScreen = false;
+        pendingSends.forEach(PendingSend::clear); pendingSends.clear();
+        selectedPeer = null; notificationOpen = null;
+        clearProfileAvatars(); dismissContent();
+        root.removeAllViews();
+        screenPadding(20);
+        title("vanishr", false);
+        ChatEngine current = engine;
+        LinearLayout content = vertical();
+        content.addView(design.text("Account deletion is pending", 22, 700, INK));
+        content.addView(design.spacer(18));
+        content.addView(design.text("The request may have reached the server. Chats and sign-in stay disabled until its result is confirmed. "
+            + "Keep the app installed and your phone unlocked while retrying. No other saved account is deleted.", 13, 500, MUTED));
+        content.addView(design.spacer(18));
+        content.addView(design.button("Retry deletion cleanup", true, () ->
+            submit(current.safety()::retryPendingDeletion, this::deletedAccount, this::deletionFailed)));
+        content.addView(profileAction("Deletion policy and help", R.drawable.ic_file_text, () -> openPublicPage(PlayPolicy.DELETION_URL)));
+        content.addView(profileAction("Contact support", R.drawable.ic_message_circle, this::contactSupport));
+        ScrollView scroll = new ScrollView(this); scroll.addView(content);
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+    }
+
+    private void deletedAccount() {
+        screenGeneration++;
+        loginPolicyApproved = false;
+        selectedPeer = null; signingUp = false; notificationOpen = null; photoChoice = null;
+        pushRegistrationRunning = false; pushRegisteredAccount = null;
+        getSharedPreferences("preferences", MODE_PRIVATE).edit().putBoolean("push-active", false).putBoolean("google-reset-pending", true).apply();
+        getSystemService(NotificationManager.class).cancelAll();
+        if (VanishrApplication.pushConfigured()) {
+            FirebaseMessaging.getInstance().setAutoInitEnabled(false);
+            FirebaseMessaging.getInstance().deleteToken();
+        }
+        GoogleSignIn.clear(this, cleared -> {
+            if (cleared) getSharedPreferences("preferences", MODE_PRIVATE).edit().putBoolean("google-reset-pending", false).apply();
+        });
+        hideContent(); load();
+    }
+
     private void signOutDialog() {
         if (engine == null || busy) return;
         ChatEngine current = engine;
@@ -1786,6 +2054,7 @@ showDialog(approval);
                         if (cleared) getSharedPreferences("preferences", MODE_PRIVATE).edit().putBoolean("google-reset-pending", false).apply();
                     });
                     selectedPeer = null; signingUp = false; deviceReplacementRequired = false; shownPeers = java.util.List.of();
+                    loginPolicyApproved = false;
                     selectedImage = null;
                     if (cameraImage != null) Arrays.fill(cameraImage, (byte) 0);
                     cameraImage = null;
@@ -1808,13 +2077,15 @@ showDialog(approval);
     }
 
     private void requestPushPermission(boolean explicit) {
-        if (!resumed || engine == null || !engine.authenticated() || !VanishrApplication.pushConfigured()) return;
+        if (!resumed || engine == null || !engine.authenticated()
+                || !engine.safety().termsAccepted(PlayPolicy.VERSION) || !VanishrApplication.pushConfigured()) return;
         if (PushService.claimPermissionPrompt(this, explicit)) requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, NOTIFICATIONS);
         updateNotificationStatus();
     }
 
     private void registerPush() {
         if (!resumed || engine == null || !engine.authenticated() || !VanishrApplication.pushConfigured()
+                || !engine.safety().termsAccepted(PlayPolicy.VERSION)
                 || pushRegistrationRunning || !PushService.notificationsEnabled(this)) return;
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             getSharedPreferences("preferences", MODE_PRIVATE).edit().putBoolean("push-active", false).apply();
@@ -2042,7 +2313,7 @@ showDialog(approval);
     private void syncOnce() {
         int generation = screenGeneration;
         ChatEngine current = engine;
-        if (!resumed || current == null) return;
+        if (!resumed || current == null || !current.safety().termsAccepted(PlayPolicy.VERSION)) return;
         try { current.sync(); }
         catch (GeneralSecurityException | AndroidVault.PhoneLockedException failure) {
             ui.post(() -> { if (engine == current && generation == screenGeneration && !busy) { hideContent(); storageFailure(failure); } }); return;
@@ -2117,7 +2388,8 @@ showDialog(approval);
     }
 
     private void showFailure(Exception failure) {
-        if (failure instanceof GeneralSecurityException || failure instanceof AndroidVault.PhoneLockedException
+        if (failure instanceof AccountSafety.DeletionPendingException) { deletionFailed(failure); }
+        else if (failure instanceof GeneralSecurityException || failure instanceof AndroidVault.PhoneLockedException
                 || failure instanceof AndroidVault.PhoneLockRequiredException) { hideContent(); storageFailure(failure); }
         else if (failure instanceof SecurityException) problem("Identity verification or secure storage check failed.");
         else if (failure instanceof RelayApi.ApiFailure apiFailure) {

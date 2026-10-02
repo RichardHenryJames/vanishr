@@ -37,7 +37,8 @@ class GenericNotifierTest {
         StringRedisTemplate redis = mock(StringRedisTemplate.class);
         ValueOperations<String, String> values = mock(ValueOperations.class);
         when(redis.opsForValue()).thenReturn(values);
-        GenericNotifier notifier = new GenericNotifier(redis, new ObjectMapper(), mock(RealtimeHub.class), false, "");
+        GenericNotifier notifier = new GenericNotifier(redis, new ObjectMapper(), mock(RealtimeHub.class),
+                mock(AccountDirectory.class), mock(SafetyGate.class), false, "");
         UUID device = UUID.randomUUID();
         try {
             notifier.register(device, "synthetic-provider-token");
@@ -53,7 +54,8 @@ class GenericNotifierTest {
         ValueOperations<String, String> values = mock(ValueOperations.class);
         when(redis.opsForValue()).thenReturn(values);
         ObjectMapper json = new ObjectMapper();
-        GenericNotifier notifier = new GenericNotifier(redis, json, mock(RealtimeHub.class), false, "");
+        GenericNotifier notifier = new GenericNotifier(redis, json, mock(RealtimeHub.class),
+                mock(AccountDirectory.class), mock(SafetyGate.class), false, "");
         UUID device = UUID.randomUUID();
         try {
             notifier.register(device, "synthetic-provider-token", true);
@@ -66,7 +68,8 @@ class GenericNotifierTest {
     @Test void unconfiguredPushStillWakesRealtimeWithoutReadingProviderTokens() {
         StringRedisTemplate redis = mock(StringRedisTemplate.class);
         RealtimeHub realtime = mock(RealtimeHub.class);
-        GenericNotifier notifier = new GenericNotifier(redis, new ObjectMapper(), realtime, false, "");
+        GenericNotifier notifier = new GenericNotifier(redis, new ObjectMapper(), realtime,
+                mock(AccountDirectory.class), mock(SafetyGate.class), false, "");
         UUID device = UUID.randomUUID();
         try {
             notifier.wake(device);
@@ -77,6 +80,6 @@ class GenericNotifierTest {
 
     @Test void enablingPushWithoutAValidProjectFailsClosed() {
         assertThrows(IllegalStateException.class, () -> new GenericNotifier(mock(StringRedisTemplate.class),
-                new ObjectMapper(), mock(RealtimeHub.class), true, ""));
+                new ObjectMapper(), mock(RealtimeHub.class), mock(AccountDirectory.class), mock(SafetyGate.class), true, ""));
     }
 }

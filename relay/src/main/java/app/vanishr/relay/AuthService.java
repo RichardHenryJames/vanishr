@@ -77,6 +77,9 @@ public class AuthService {
     }
 
     public Token issue(Actor actor) {
+        if (actor == null || actor.userId() == null || !accounts.exists(actor.userId())
+                || actor.deviceId() != null && !accounts.active(actor.userId(), actor.deviceId()))
+            throw new ApiException(HttpStatus.UNAUTHORIZED, "authentication_required");
         if (actor.deviceId() != null) return issueDevice(actor, accounts.version(actor.deviceId()), null, null, null);
         String token = randomToken();
         Duration lifetime = Duration.ofMinutes(5);
@@ -121,7 +124,7 @@ public class AuthService {
         String value = redis.opsForValue().get(key);
         StoredRefresh stored;
         try { stored = value == null ? null : json.readValue(value, StoredRefresh.class); }
-        catch (Exception failure) { throw new ApiException(HttpStatus.UNAUTHORIZED, "authentication_required"); }
+        catch (com.fasterxml.jackson.core.JsonProcessingException failure) { throw new ApiException(HttpStatus.UNAUTHORIZED, "authentication_required"); }
         if (stored == null || stored.actor() == null || stored.actor().deviceId() == null
                 || stored.accessKey() == null || !stored.accessKey().startsWith("auth:") || !accounts.active(stored.actor(), stored.deviceVersion()))
             throw new ApiException(HttpStatus.UNAUTHORIZED, "authentication_required");
@@ -132,13 +135,20 @@ public class AuthService {
     static String refreshKey(String token) { return "refresh:" + RedisRelay.digest(token.getBytes(StandardCharsets.US_ASCII)); }
 
     public Actor authenticate(String token) {
+        return authenticate(token, false);
+    }
+
+    public Actor authenticate(String token, boolean accountDeletion) {
         if (token == null || !token.matches("[A-Za-z0-9_-]{43}")) throw new ApiException(HttpStatus.UNAUTHORIZED, "authentication_required");
         String stored = redis.opsForValue().get(tokenKey(token));
         if (stored == null) throw new ApiException(HttpStatus.UNAUTHORIZED, "authentication_required");
         StoredSession session;
         try { session = json.readValue(stored, StoredSession.class); }
-        catch (Exception failure) { throw new ApiException(HttpStatus.UNAUTHORIZED, "authentication_required"); }
-        Actor actor = session.actor();
+        catch (com.fasterxml.jackson.core.JsonProcessingException failure) { throw new ApiException(HttpStatus.UNAUTHORIZED, "authentication_required"); }
+        Actor actor = session == null ? null : session.actor();
+        if (actor == null || actor.userId() == null
+                || !(accountDeletion && actor.deviceId() == null ? accounts.exists(actor.userId()) : accounts.available(actor.userId())))
+            throw new ApiException(HttpStatus.UNAUTHORIZED, "authentication_required");
         if (actor.deviceId() != null && !accounts.active(actor, session.deviceVersion()))
             throw new ApiException(HttpStatus.UNAUTHORIZED, "authentication_required");
         return actor;
@@ -147,11 +157,12 @@ public class AuthService {
     public void revoke(String token) { redis.execute(revoke, List.of(tokenKey(token))); }
 
     public boolean activeSession(String sessionKey, Actor actor) {
+        if (sessionKey == null || actor == null || actor.userId() == null || actor.deviceId() == null) return false;
         String stored = redis.opsForValue().get(sessionKey);
         if (stored == null) return false;
         try {
             StoredSession session = json.readValue(stored, StoredSession.class);
-            return actor.equals(session.actor()) && accounts.active(actor, session.deviceVersion());
-        } catch (Exception failure) { return false; }
+            return session != null && actor.equals(session.actor()) && accounts.active(actor, session.deviceVersion());
+        } catch (com.fasterxml.jackson.core.JsonProcessingException failure) { return false; }
     }
 }

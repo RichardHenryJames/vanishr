@@ -52,6 +52,7 @@ public class ProfileMessages {
     }
 
     public void send(Actor actor, Send request) {
+        accounts.requireInteraction(actor.userId(), request.recipientId());
         RelayPolicy.deadline(Expiry.HOURS_24,request.expiresAt(),clock.instant());
         if (actor.userId().equals(request.recipientId()) || !accounts.active(request.recipientId(),request.recipientDeviceId()))
             throw new ApiException(HttpStatus.NOT_FOUND,"not_found");
@@ -79,7 +80,8 @@ public class ProfileMessages {
             try { packet=json.readValue(value,Packet.class); }
             catch (Exception failure) { throw new IllegalStateException("Invalid ephemeral profile state"); }
             if (!packet.recipientId().equals(actor.userId()) || !packet.recipientDeviceId().equals(actor.deviceId())) continue;
-            if (packet.expiresAt()>clock.millis() && accounts.active(packet.senderId(),packet.senderDeviceId())) result.add(packet);
+            if (packet.expiresAt()>clock.millis() && accounts.active(packet.senderId(),packet.senderDeviceId())
+                    && accounts.canInteract(actor.userId(), packet.senderId())) result.add(packet);
             else acknowledge(actor,packet.id());
         }
         return result;

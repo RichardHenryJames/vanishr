@@ -69,8 +69,12 @@ class RelayIntegrationTest {
         redis.getConnectionFactory().getConnection().serverCommands().flushDb();
         // Only the disposable Testcontainers database resets its permanent admin pin.
         database.execute("ALTER TABLE admin_identity DISABLE TRIGGER admin_identity_immutable");
-        try { database.execute("TRUNCATE TABLE accounts CASCADE"); }
-        finally { database.execute("ALTER TABLE admin_identity ENABLE TRIGGER admin_identity_immutable"); }
+        database.execute("ALTER TABLE accounts DISABLE TRIGGER accounts_admin_truncate");
+        try { database.execute("TRUNCATE TABLE accounts, admin_identity, account_deletion_receipts CASCADE"); }
+        finally {
+            database.execute("ALTER TABLE accounts ENABLE TRIGGER accounts_admin_truncate");
+            database.execute("ALTER TABLE admin_identity ENABLE TRIGGER admin_identity_immutable");
+        }
     }
 
     private ResultActions request(MockHttpServletRequestBuilder request, Device device) throws Exception {
@@ -591,7 +595,7 @@ class RelayIntegrationTest {
         assertThrows(ApiException.class, () -> notifications.resolve(new Actor(sender.userId(), recipient.deviceId()), reference));
         request(body(post("/notifications/resolve"), Map.of("reference", reference, "userId", recipient.userId())), recipient).andExpect(status().isBadRequest());
         request(body(post("/notifications/resolve"), Map.of("reference", sender.userId().toString())), recipient).andExpect(status().isBadRequest());
-        String next = notifications.reference(new GenericNotifier.Destination(recipient.userId(), recipient.deviceId(), UUID.randomUUID(), UUID.randomUUID(),
+        String next = notifications.reference(new GenericNotifier.Destination(recipient.userId(), recipient.deviceId(), sender.userId(), UUID.randomUUID(),
             System.currentTimeMillis() + 3_600_000));
         assertNotEquals(reference, next);
         request(body(post("/notifications/resolve"), body), recipient).andExpect(status().isNotFound());
@@ -1040,6 +1044,9 @@ class RelayIntegrationTest {
         request(get("/account/admin-contacts/" + fresh.userId()), existing).andExpect(status().isOk())
             .andExpect(jsonPath("$.contacts").isEmpty());
         request(get("/account/admin-contacts"), admin).andExpect(status().isOk()).andExpect(jsonPath("$.contacts.length()").value(2));
+        Device newest = device("intro_newest");
+        request(get("/account/admin-contacts"), admin).andExpect(status().isOk())
+            .andExpect(jsonPath("$.contacts[0].userId").value(newest.userId().toString()));
         request(body(patch("/account/username"), Map.of("handle", "intro_renamed")), admin).andExpect(status().isOk());
         request(get("/account/admin-contacts"), fresh).andExpect(status().isOk())
             .andExpect(jsonPath("$.contacts[0].userId").value(admin.userId().toString()))
@@ -1051,7 +1058,7 @@ class RelayIntegrationTest {
             "INSERT INTO admin_introductions(user_id, admin_id) VALUES (?, ?)", existing.userId(), other.userId()));
         assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM accounts WHERE user_type = 'ADMIN'", Integer.class));
         assertEquals("USER", database.queryForObject("SELECT user_type FROM accounts WHERE id = ?", String.class, fresh.userId()));
-        assertEquals(2, database.queryForObject("SELECT COUNT(*) FROM admin_introductions", Integer.class));
+        assertEquals(3, database.queryForObject("SELECT COUNT(*) FROM admin_introductions", Integer.class));
     }
 
     @Test void adminIntroductionsWaitForEnrollmentIncludeGoogleOnceAndPauseOnRoleRevocation() throws Exception {
@@ -1357,10 +1364,10 @@ class RelayIntegrationTest {
             }
         }
         List<String> tables = database.queryForList("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name", String.class);
-        assertEquals(List.of("accounts", "admin_identity", "admin_introductions", "devices", "flyway_schema_history", "group_members", "prekeys", "private_groups"), tables);
+        assertEquals(List.of("account_blocks", "account_deletion_receipts", "accounts", "admin_identity", "admin_introductions", "devices", "flyway_schema_history", "group_members", "prekeys", "private_groups"), tables);
         assertEquals(List.of("singleton", "user_id"), database.queryForList(
             "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='admin_identity' ORDER BY ordinal_position", String.class));
-        assertEquals(List.of("user_id", "admin_id"), database.queryForList(
+        assertEquals(List.of("user_id", "admin_id", "introduced_at"), database.queryForList(
             "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='admin_introductions' ORDER BY ordinal_position", String.class));
         assertEquals(List.of("id","owner_id","revision","epoch","closed_at"),database.queryForList(
             "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='private_groups' ORDER BY ordinal_position",String.class));
@@ -1380,7 +1387,7 @@ class RelayIntegrationTest {
         request(body(post("/auth/google/challenge"), new GoogleAuth.Start(null)), null)
                 .andExpect(status().isServiceUnavailable()).andExpect(content().json("{\"error\":\"google_sign_in_unavailable\"}"));
         List<String> fields = database.queryForList("SELECT column_name FROM information_schema.columns WHERE table_name = 'accounts' AND table_schema = 'public' ORDER BY ordinal_position", String.class);
-        assertEquals(List.of("id", "handle", "password_hash", "google_subject", "display_name", "user_type"), fields);
+        assertEquals(List.of("id", "handle", "password_hash", "google_subject", "display_name", "user_type", "deletion_state"), fields);
         assertEquals(AccountDirectory.UserType.USER, directory.accountType(first.userId()).userType());
         assertNull(database.queryForObject("SELECT display_name FROM accounts WHERE id = ?", String.class, first.userId()));
     }
@@ -1406,6 +1413,878 @@ class RelayIntegrationTest {
             .andExpect(status().isMethodNotAllowed());
         request(get("/account/profile"), bob).andExpect(status().isOk()).andExpect(jsonPath("$.displayName").value("Receiver Profile"));
         }
+
+    private AuthService.Token recentLogin(String handle, UUID device) throws Exception {
+        return json.readValue(request(body(post("/auth/login"),
+                new AuthService.Login(handle, "test-only-password-12345", device)), null)
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString(), AuthService.Token.class);
+    }
+
+    private Device enrollment(Device owner, AuthService.Token session) {
+        return new Device(owner.userId(), null, session.accessToken(), owner.crypto());
+    }
+
+    private SendRequest opaqueSend(Device sender, Device recipient, UUID media) {
+        return new SendRequest(UUID.randomUUID(), recipient.userId(), recipient.deviceId(), Expiry.VIEW_ONCE,
+                System.currentTimeMillis() + 3_500_000, 2, new byte[128], media);
+    }
+
+    private Actor actor(Device device) { return new Actor(device.userId(), device.deviceId()); }
+
+    private AccountDirectory.Contact contact(Device device) {
+        return new AccountDirectory.Contact(device.userId(), device.deviceId(), Base64.getEncoder().encodeToString(device.crypto().publicIdentity()));
+    }
+
+    private GroupDirectory.Snapshot sharedGroup(Device owner, Device... members) {
+        GroupDirectory.Snapshot group = groups.create(actor(owner), UUID.randomUUID());
+        group = groups.invite(actor(owner), group.id(), group.revision(), Arrays.stream(members).map(this::contact).toList());
+        for (Device member : members) group = groups.accept(actor(member), group.id(), group.revision());
+        return group;
+    }
+
+    @Test void playSafetyDeletionRequiresRecentEnrollmentAndNeverResurrectsAnAccount() throws Exception {
+        Device owner = device("erase_owner"), other = device("erase_other");
+        AuthService.Token recent = recentLogin("erase_owner", null);
+        Device confirming = enrollment(owner, recent);
+        assertNull(recent.deviceId());
+        assertTrue(redis.getExpire(AuthService.tokenKey(recent.accessToken())) > 0);
+        assertTrue(redis.getExpire(AuthService.tokenKey(recent.accessToken())) <= 300);
+        String staleEnrollment = redis.opsForValue().get(AuthService.tokenKey(recent.accessToken()));
+        AuthService.Token renewable = recentLogin("erase_owner", owner.deviceId());
+        String staleAccess = redis.opsForValue().get(AuthService.tokenKey(renewable.accessToken()));
+        String staleRefresh = redis.opsForValue().get(AuthService.refreshKey(renewable.refreshToken()));
+        Map<String, String> confirmation = Map.of("confirmation", "DELETE");
+        request(body(delete("/account"), confirmation), null).andExpect(status().isUnauthorized());
+        request(body(delete("/account"), confirmation), owner).andExpect(status().isForbidden());
+        request(body(delete("/account"), Map.of("confirmation", "delete")), confirming).andExpect(status().isBadRequest());
+        request(body(delete("/account"), Map.of("confirmation", "DELETE", "userId", other.userId())), confirming)
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.error").value("invalid_request"));
+        AuthService.Token expired = recentLogin("erase_owner", null);
+        redis.expire(AuthService.tokenKey(expired.accessToken()), Duration.ofMillis(1));
+        await().atMost(Duration.ofSeconds(2)).until(() -> !Boolean.TRUE.equals(redis.hasKey(AuthService.tokenKey(expired.accessToken()))));
+        request(body(delete("/account"), confirmation), enrollment(owner, expired)).andExpect(status().isUnauthorized());
+        request(body(delete("/account"), confirmation), confirming).andExpect(status().isNoContent());
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM accounts WHERE id = ?", Integer.class, owner.userId()));
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM devices WHERE user_id = ?", Integer.class, owner.userId()));
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM prekeys WHERE device_id = ?", Integer.class, owner.deviceId()));
+        assertFalse(Boolean.TRUE.equals(redis.hasKey(AuthService.tokenKey(renewable.accessToken()))));
+        assertFalse(Boolean.TRUE.equals(redis.hasKey(AuthService.refreshKey(renewable.refreshToken()))));
+        request(get("/auth/me"), other).andExpect(status().isOk());
+        request(get("/users/id/" + owner.userId()), other).andExpect(status().isNotFound());
+        request(get("/keys"), other).andExpect(status().isOk()).andExpect(jsonPath("$.remaining").value(1));
+        redis.opsForValue().set(AuthService.tokenKey(recent.accessToken()), staleEnrollment, Duration.ofMinutes(5));
+        redis.opsForValue().set(AuthService.tokenKey(renewable.accessToken()), staleAccess, Duration.ofHours(1));
+        redis.opsForValue().set(AuthService.refreshKey(renewable.refreshToken()), staleRefresh, Duration.ofDays(30));
+        request(get("/auth/me"), confirming).andExpect(status().isUnauthorized());
+        request(body(post("/devices"), new AccountDirectory.DeviceRequest(owner.deviceId(), owner.crypto().publicIdentity(), true)), confirming)
+                .andExpect(status().isUnauthorized());
+        request(body(delete("/account"), confirmation), confirming).andExpect(status().isUnauthorized());
+        request(body(post("/auth/refresh"), new AuthService.Refresh(renewable.refreshToken(), null)), null).andExpect(status().isUnauthorized());
+        request(get("/auth/me"), new Device(owner.userId(), owner.deviceId(), renewable.accessToken(), owner.crypto())).andExpect(status().isUnauthorized());
+        Device reusedHandle = device("erase_owner");
+        assertNotEquals(owner.userId(), reusedHandle.userId());
+        request(body(delete("/account"), confirmation), confirming).andExpect(status().isUnauthorized());
+        request(get("/auth/me"), reusedHandle).andExpect(status().isOk());
+    }
+
+    @Test void playSafetyDeletionFailuresStayDisabledAndRetryAfterRedisAndDatabaseFailures() throws Exception {
+        Device owner = device("erase_retry"), other = device("erase_retry_other");
+        Device confirming = enrollment(owner, recentLogin("erase_retry", null));
+        String broken = "r:" + UUID.randomUUID();
+        redis.execute(new org.springframework.data.redis.core.script.DefaultRedisScript<>(
+                "redis.call('LPUSH', KEYS[1], 'test-only'); redis.call('EXPIRE', KEYS[1], 60); return 1", Long.class), List.of(broken));
+        request(body(delete("/account"), Map.of("confirmation", "DELETE")), confirming)
+                .andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.error").value("service_unavailable"));
+        assertEquals("DELETING", database.queryForObject("SELECT deletion_state FROM accounts WHERE id = ?", String.class, owner.userId()));
+        request(get("/auth/me"), owner).andExpect(status().isUnauthorized());
+        request(body(post("/devices"), new AccountDirectory.DeviceRequest(owner.deviceId(), owner.crypto().publicIdentity(), false)), confirming)
+                .andExpect(status().isUnauthorized());
+        request(get("/users/id/" + owner.userId()), other).andExpect(status().isNotFound());
+        redis.delete(broken);
+        database.execute("""
+                CREATE FUNCTION test_erasure_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN RAISE EXCEPTION 'synthetic_cleanup_failure' USING ERRCODE = '23514'; END; $$;
+                CREATE TRIGGER test_erasure_failure BEFORE DELETE ON accounts FOR EACH ROW EXECUTE FUNCTION test_erasure_failure();
+                """);
+        try {
+            request(body(delete("/account"), Map.of("confirmation", "DELETE")), confirming).andExpect(status().isServiceUnavailable());
+            assertEquals("DELETING", database.queryForObject("SELECT deletion_state FROM accounts WHERE id = ?", String.class, owner.userId()));
+            assertFalse(Boolean.TRUE.equals(redis.hasKey(AuthService.tokenKey(confirming.token()))));
+        } finally {
+            database.execute("DROP TRIGGER test_erasure_failure ON accounts");
+            database.execute("DROP FUNCTION test_erasure_failure()");
+        }
+        Device retry = enrollment(owner, recentLogin("erase_retry", null));
+        request(get("/auth/me"), retry).andExpect(status().isUnauthorized());
+        request(body(delete("/account"), Map.of("confirmation", "DELETE")), retry).andExpect(status().isNoContent());
+        request(get("/auth/me"), other).andExpect(status().isOk());
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM accounts WHERE id = ?", Integer.class, owner.userId()));
+    }
+
+    @Test void playSafetyAdminDeletionKeepsOnlyThePermanentReservationAndPreventsTransfer() throws Exception {
+        Device admin = device("erased_admin");
+        assignAdmin(admin);
+        Device other = device("erased_admin_other");
+        Device reported = device("erased_admin_reported");
+        request(body(post("/safety/reports"), new SafetyReports.Submission(reported.userId(), SafetyReports.Reason.SPAM, null, null)), other)
+                .andExpect(status().isCreated());
+        assertEquals(2, database.queryForObject("SELECT COUNT(*) FROM admin_introductions", Integer.class));
+        Device confirming = enrollment(admin, recentLogin("erased_admin", null));
+        request(body(delete("/account"), Map.of("confirmation", "DELETE")), confirming).andExpect(status().isNoContent());
+        assertEquals(admin.userId(), database.queryForObject("SELECT user_id FROM admin_identity", UUID.class));
+        assertEquals(List.of("singleton", "user_id"), database.queryForList(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='admin_identity' ORDER BY ordinal_position", String.class));
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM admin_introductions", Integer.class));
+        assertTrue(Objects.requireNonNull(redis.keys("safety-report*")).isEmpty());
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM accounts WHERE id = ?", Integer.class, admin.userId()));
+        assertThrows(DataIntegrityViolationException.class, () -> database.update("UPDATE accounts SET user_type='ADMIN' WHERE id=?", other.userId()));
+        assertThrows(DataIntegrityViolationException.class, () -> database.update("DELETE FROM admin_identity"));
+        assertThrows(DataIntegrityViolationException.class, () -> database.update("UPDATE admin_identity SET user_id=?", other.userId()));
+        assertThrows(DataIntegrityViolationException.class, () -> database.update(
+                "INSERT INTO accounts(id,handle,password_hash) VALUES (?,'resurrected_pin','synthetic')", admin.userId()));
+        assertThrows(DataIntegrityViolationException.class, () -> database.update(
+                "UPDATE accounts SET id=? WHERE id=?", admin.userId(), other.userId()));
+        device("erased_admin");
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM accounts WHERE user_type='ADMIN'", Integer.class));
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM admin_introductions", Integer.class));
+        request(get("/account/admin-contacts"), other).andExpect(status().isOk()).andExpect(jsonPath("$.contacts.length()").value(0));
+        request(body(post("/safety/reports"), new SafetyReports.Submission(reported.userId(), SafetyReports.Reason.SPAM, null, null)), other)
+                .andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.error").value("safety_review_unavailable"));
+        request(body(post("/safety/reports"), new SafetyReports.Submission(other.userId(), SafetyReports.Reason.OTHER, null, null)), confirming)
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test void playSafetyDeletionCleansRoutingAndMembershipWithoutDeletingOtherMembersCopies() throws Exception {
+        Device admin = device("cleanup_admin");
+        assignAdmin(admin);
+        Device victim = device("cleanup_victim"), peer = device("cleanup_peer"), other = device("cleanup_other");
+        var victimChat = foreground(victim);
+        var victimPhotos = foreground(victim, true);
+        foreground(admin); foreground(admin, true);
+        UUID photo = UUID.randomUUID();
+        request(body(post("/remote-photos"), photoRequest(photo, admin, victim)), admin).andExpect(status().isCreated());
+        request(body(post("/remote-photos/" + photo + "/accept"), new RemotePhotos.Approval(presencePeer(admin))), victim).andExpect(status().isOk());
+        request(body(post("/remote-photos/" + photo + "/exchange"), new RemotePhotos.Exchange(null,
+                new RemotePhotos.Send(UUID.randomUUID(), System.currentTimeMillis() + 50_000, 2, new byte[128]))), admin).andExpect(status().isOk());
+
+        GroupDirectory.Snapshot shared = sharedGroup(other, victim, peer);
+        GroupDirectory.Snapshot owned = sharedGroup(victim, peer);
+        GroupMessages.Send fromPeer = new GroupMessages.Send(UUID.randomUUID(), shared.epoch(), shared.revision(), Expiry.VIEW_ONCE,
+                System.currentTimeMillis() + 3_500_000, new byte[128], UUID.randomUUID(), new byte[32]);
+        GroupMessages.Send fromVictim = new GroupMessages.Send(UUID.randomUUID(), shared.epoch(), shared.revision(), Expiry.VIEW_ONCE,
+                System.currentTimeMillis() + 3_500_000, new byte[128], UUID.randomUUID(), new byte[32]);
+        request(body(post("/groups/" + shared.id() + "/messages"), fromPeer), peer).andExpect(status().isCreated());
+        request(body(post("/groups/" + shared.id() + "/messages"), fromVictim), victim).andExpect(status().isCreated());
+        GroupMessages.Send ownedMessage = new GroupMessages.Send(UUID.randomUUID(), owned.epoch(), owned.revision(), Expiry.VIEW_ONCE,
+                System.currentTimeMillis() + 3_500_000, new byte[128], UUID.randomUUID(), new byte[32]);
+        request(body(post("/groups/" + owned.id() + "/messages"), ownedMessage), victim).andExpect(status().isCreated());
+        String sharedPayload = redis.opsForValue().get("gm:" + shared.id() + ":" + fromVictim.id());
+        long sharedTtl = redis.getExpire("gm:" + shared.id() + ":" + fromVictim.id(), java.util.concurrent.TimeUnit.MILLISECONDS);
+
+        SendRequest queued = opaqueSend(peer, victim, UUID.randomUUID());
+        request(put("/media/" + queued.mediaId()).param("recipientId", victim.userId().toString())
+                .param("recipientDeviceId", victim.deviceId().toString()).param("expiresAt", Long.toString(queued.expiresAt()))
+                .contentType("application/octet-stream").content(new byte[32]), peer).andExpect(status().isCreated());
+        request(body(post("/messages"), queued), peer).andExpect(status().isCreated());
+        SendRequest outgoing = opaqueSend(victim, peer, null), untouched = opaqueSend(peer, other, null);
+        request(body(post("/messages"), outgoing), victim).andExpect(status().isCreated());
+        request(body(post("/messages"), untouched), peer).andExpect(status().isCreated());
+        UUID detached = UUID.randomUUID();
+        request(put("/media/" + detached).param("recipientId", peer.userId().toString()).param("recipientDeviceId", peer.deviceId().toString())
+                .param("expiresAt", Long.toString(queued.expiresAt())).contentType("application/octet-stream").content(new byte[32]), victim)
+                .andExpect(status().isCreated());
+        UUID profile = UUID.randomUUID();
+        request(body(post("/profile/packets"), new ProfileMessages.Send(profile, peer.userId(), peer.deviceId(), queued.expiresAt(), 2, new byte[128])), victim)
+                .andExpect(status().isNoContent());
+        request(body(post("/devices/push"), new RelayController.PushToken("synthetic-push-token-for-erasure", true)), victim).andExpect(status().isNoContent());
+        request(body(post("/presence"), new Presence.Update(List.of(presencePeer(peer)), null, 0, true)), victim).andExpect(status().isOk());
+        assertNotNull(notifications.reference(new GenericNotifier.Destination(peer.userId(), peer.deviceId(), victim.userId(), outgoing.id(), outgoing.expiresAt())));
+        String otherRoute = notifications.reference(new GenericNotifier.Destination(other.userId(), other.deviceId(), peer.userId(), untouched.id(), untouched.expiresAt()));
+        database.update("INSERT INTO account_blocks(blocker_id,blocked_id) VALUES (?,?)", victim.userId(), other.userId());
+        request(body(post("/safety/reports"), new SafetyReports.Submission(peer.userId(), SafetyReports.Reason.SPAM, null, null)), victim)
+                .andExpect(status().isCreated());
+        request(body(post("/safety/reports"), new SafetyReports.Submission(admin.userId(), SafetyReports.Reason.OTHER, null, null)), peer)
+                .andExpect(status().isCreated());
+
+        Device confirming = enrollment(victim, recentLogin("cleanup_victim", null));
+        request(body(delete("/account"), Map.of("confirmation", "DELETE")), confirming).andExpect(status().isNoContent());
+        verify(victimChat).close(org.springframework.web.socket.CloseStatus.POLICY_VIOLATION);
+        verify(victimPhotos).close(org.springframework.web.socket.CloseStatus.POLICY_VIOLATION);
+        for (String key : List.of("m:" + queued.id(), "r:" + queued.id(), "b:" + queued.mediaId(), "b:" + detached,
+                "m:" + outgoing.id(), "r:" + outgoing.id(), "pc:" + peer.deviceId() + ":" + profile, "pcr:" + peer.deviceId() + ":" + profile,
+                "rps:" + photo, "rpq:" + photo + ":" + victim.deviceId(), "presence:" + victim.deviceId(), "last-seen:" + victim.deviceId(),
+                "push:" + victim.deviceId(), "notification:" + peer.deviceId(), "inbox:" + victim.deviceId(), "outbox:" + victim.deviceId(),
+                AuthService.tokenKey(victim.token()), "gm:" + owned.id() + ":" + ownedMessage.id())) assertFalse(Boolean.TRUE.equals(redis.hasKey(key)), key);
+        request(body(post("/remote-photos/" + photo + "/exchange"), new RemotePhotos.Exchange(null, null)), admin).andExpect(status().isGone());
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM group_members WHERE user_id = ?", Integer.class, victim.userId()));
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM private_groups WHERE id = ?", Integer.class, owned.id()));
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM admin_introductions WHERE user_id = ?", Integer.class, victim.userId()));
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM account_blocks WHERE blocker_id = ? OR blocked_id = ?", Integer.class, victim.userId(), victim.userId()));
+        request(get("/groups/" + shared.id()), peer).andExpect(status().isOk())
+                .andExpect(jsonPath("$.revision").value(shared.revision() + 1)).andExpect(jsonPath("$.members.length()").value(2));
+        assertNotEquals(shared.epoch(), database.queryForObject("SELECT epoch FROM private_groups WHERE id = ?", UUID.class, shared.id()));
+        assertFalse(json.readTree(redis.opsForValue().get("gr:" + shared.id() + ":" + fromPeer.id())).get("recipients").has(victim.deviceId().toString()));
+        assertEquals(sharedPayload, redis.opsForValue().get("gm:" + shared.id() + ":" + fromVictim.id()));
+        assertTrue(redis.getExpire("gm:" + shared.id() + ":" + fromVictim.id(), java.util.concurrent.TimeUnit.MILLISECONDS) <= sharedTtl);
+        request(get("/groups/" + shared.id() + "/messages/" + fromVictim.id() + "/media"), peer).andExpect(status().isOk());
+        request(body(post("/groups/" + shared.id() + "/messages"), fromPeer), peer).andExpect(status().isConflict());
+        request(get("/messages/pending"), other).andExpect(status().isOk()).andExpect(jsonPath("$[0].id").value(untouched.id().toString()));
+        request(body(post("/notifications/resolve"), new RelayController.NotificationReference(otherRoute)), other).andExpect(status().isOk());
+        request(get("/safety/reports"), admin).andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].reporterId").value(peer.userId().toString()));
+    }
+
+    @Test void playSafetyBlocksRejectOldClientBypassesAndPurgeQueuedDirectContent() throws Exception {
+        Device blocker = device("block_owner"), peer = device("block_peer"), other = device("block_other");
+        foreground(blocker); foreground(peer);
+        request(body(post("/presence"), new Presence.Update(List.of(presencePeer(blocker)), blocker.userId(), 5000, true)), peer).andExpect(status().isOk());
+        request(body(post("/presence"), new Presence.Update(List.of(presencePeer(peer)), null, 0, true)), blocker)
+                .andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(1));
+        SendRequest before = opaqueSend(peer, blocker, UUID.randomUUID());
+        request(put("/media/" + before.mediaId()).param("recipientId", blocker.userId().toString())
+                .param("recipientDeviceId", blocker.deviceId().toString()).param("expiresAt", Long.toString(before.expiresAt()))
+                .contentType("application/octet-stream").content(new byte[32]), peer).andExpect(status().isCreated());
+        request(body(post("/messages"), before), peer).andExpect(status().isCreated());
+        request(get("/media/" + before.mediaId()), blocker).andExpect(status().isOk());
+        ProfileMessages.Send profile = new ProfileMessages.Send(UUID.randomUUID(), blocker.userId(), blocker.deviceId(), before.expiresAt(), 2, new byte[128]);
+        request(body(post("/profile/packets"), profile), peer).andExpect(status().isNoContent());
+        String reference = notifications.reference(new GenericNotifier.Destination(blocker.userId(), blocker.deviceId(), peer.userId(), before.id(), before.expiresAt()));
+        long receiptTtl = redis.getExpire("r:" + before.id(), java.util.concurrent.TimeUnit.MILLISECONDS);
+        request(put("/account/blocks/" + peer.userId()), null).andExpect(status().isUnauthorized());
+        request(put("/account/blocks/" + peer.userId()), enrollment(blocker, recentLogin("block_owner", null))).andExpect(status().isForbidden());
+        request(put("/account/blocks/" + blocker.userId()), blocker).andExpect(status().isBadRequest());
+        request(put("/account/blocks/" + UUID.randomUUID()), blocker).andExpect(status().isNotFound());
+        request(put("/account/blocks/" + peer.userId()), blocker).andExpect(status().isNoContent());
+        request(put("/account/blocks/" + peer.userId()), blocker).andExpect(status().isNoContent());
+        request(get("/account/blocks"), blocker).andExpect(status().isOk()).andExpect(content().json("[\"" + peer.userId() + "\"]"));
+        request(get("/account/blocks"), peer).andExpect(status().isOk()).andExpect(content().json("[]"));
+        request(delete("/account/blocks/" + blocker.userId()), peer).andExpect(status().isNoContent());
+        request(get("/account/blocks"), blocker).andExpect(jsonPath("$.length()").value(1));
+        for (Device sender : List.of(blocker, peer)) {
+            Device recipient = sender == blocker ? peer : blocker;
+            request(body(post("/messages"), opaqueSend(sender, recipient, null)), sender).andExpect(status().isNotFound()).andExpect(jsonPath("$.error").value("not_found"));
+            request(post("/keys/" + recipient.userId() + "/claim"), sender).andExpect(status().isNotFound());
+            request(get("/users/id/" + recipient.userId()), sender).andExpect(status().isNotFound());
+            request(get("/users/id/" + recipient.userId() + "/profile"), sender).andExpect(status().isNotFound());
+            request(body(post("/profile/packets"), new ProfileMessages.Send(UUID.randomUUID(), recipient.userId(), recipient.deviceId(),
+                    before.expiresAt(), 2, new byte[128])), sender).andExpect(status().isNotFound());
+            request(put("/media/" + UUID.randomUUID()).param("recipientId", recipient.userId().toString()).param("recipientDeviceId", recipient.deviceId().toString())
+                    .param("expiresAt", Long.toString(before.expiresAt())).contentType("application/octet-stream").content(new byte[32]), sender)
+                    .andExpect(status().isNotFound());
+            request(body(post("/presence"), new Presence.Update(List.of(presencePeer(recipient)), recipient.userId(), 5000, true)), sender)
+                    .andExpect(status().isOk()).andExpect(content().json("[]"));
+        }
+        request(get("/users/block_peer"), blocker).andExpect(status().isNotFound());
+        request(get("/messages/pending"), blocker).andExpect(status().isOk()).andExpect(content().json("[]"));
+        request(get("/profile/packets"), blocker).andExpect(status().isOk()).andExpect(content().json("[]"));
+        request(get("/media/" + before.mediaId()), blocker).andExpect(status().isNotFound());
+        request(post("/messages/" + before.id() + "/read"), blocker).andExpect(status().isNotFound());
+        request(get("/messages/status").param("ids", before.id().toString()), peer).andExpect(status().isOk()).andExpect(content().json("[]"));
+        request(body(post("/notifications/resolve"), new RelayController.NotificationReference(reference)), blocker).andExpect(status().isNotFound());
+        assertFalse(Boolean.TRUE.equals(redis.hasKey("m:" + before.id())));
+        assertFalse(Boolean.TRUE.equals(redis.hasKey("b:" + before.mediaId())));
+        assertTrue(redis.getExpire("r:" + before.id(), java.util.concurrent.TimeUnit.MILLISECONDS) <= receiptTtl);
+        assertEquals("DELETED", json.readTree(redis.opsForValue().get("r:" + before.id())).get("state").asText());
+        request(body(post("/messages"), opaqueSend(peer, other, null)), peer).andExpect(status().isCreated());
+        request(put("/account/blocks/" + blocker.userId()), peer).andExpect(status().isNoContent());
+        request(delete("/account/blocks/" + peer.userId()), blocker).andExpect(status().isNoContent());
+        request(post("/keys/" + peer.userId() + "/claim"), blocker).andExpect(status().isNotFound());
+        request(delete("/account/blocks/" + blocker.userId()), peer).andExpect(status().isNoContent());
+        request(body(post("/messages"), before), peer).andExpect(status().isCreated()).andExpect(jsonPath("$.state").value("DELETED"));
+        request(body(post("/profile/packets"), profile), peer).andExpect(status().isNoContent());
+        request(get("/messages/pending"), blocker).andExpect(content().json("[]"));
+        request(get("/profile/packets"), blocker).andExpect(content().json("[]"));
+        request(body(post("/messages"), opaqueSend(peer, blocker, null)), peer).andExpect(status().isCreated());
+        assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM prekeys WHERE device_id = ?", Integer.class, peer.deviceId()));
+    }
+
+    @Test void playSafetyBlocksEndRemotePhotosAndPreventIntroductionsAndNewGroupConnections() throws Exception {
+        Device admin = device("block_admin");
+        assignAdmin(admin);
+        Device user = device("block_new_user"), other = device("block_group_other");
+        foreground(admin); foreground(admin, true); foreground(user); foreground(user, true);
+        GroupDirectory.Snapshot shared = sharedGroup(admin, user, other);
+        GroupDirectory.Snapshot pending = groups.create(actor(admin), UUID.randomUUID());
+        groups.invite(actor(admin), pending.id(), pending.revision(), List.of(contact(user)));
+        UUID session = UUID.randomUUID();
+        request(body(post("/remote-photos"), photoRequest(session, admin, user)), admin).andExpect(status().isCreated());
+        request(body(post("/remote-photos/" + session + "/accept"), new RemotePhotos.Approval(presencePeer(admin))), user).andExpect(status().isOk());
+        request(body(post("/remote-photos/" + session + "/exchange"), new RemotePhotos.Exchange(null,
+                new RemotePhotos.Send(UUID.randomUUID(), System.currentTimeMillis() + 50_000, 2, new byte[128]))), admin).andExpect(status().isOk());
+        GroupMessages.ControlSend control = new GroupMessages.ControlSend(UUID.randomUUID(), user.userId(), user.deviceId(),
+                shared.epoch(), shared.revision(), System.currentTimeMillis() + 60_000, 2, new byte[128]);
+        request(body(post("/groups/" + shared.id() + "/controls"), new GroupController.Controls(shared.revision(), List.of(control))), admin)
+                .andExpect(status().isNoContent());
+        request(put("/account/blocks/" + admin.userId()), user).andExpect(status().isNoContent());
+        assertFalse(Boolean.TRUE.equals(redis.hasKey("rps:" + session)));
+        assertFalse(Boolean.TRUE.equals(redis.hasKey("rpq:" + session + ":" + user.deviceId())));
+        assertTrue(redis.getExpire("rps-ended:" + session) > 0 && redis.getExpire("rps-ended:" + session) <= 900);
+        request(body(post("/remote-photos/" + session + "/exchange"), new RemotePhotos.Exchange(null, null)), admin).andExpect(status().isGone());
+        request(body(post("/remote-photos"), photoRequest(UUID.randomUUID(), admin, user)), admin).andExpect(status().isNotFound());
+        request(get("/account/admin-contacts"), user).andExpect(status().isOk()).andExpect(jsonPath("$.admin").doesNotExist()).andExpect(jsonPath("$.contacts.length()").value(0));
+        request(get("/account/admin-contacts/" + user.userId()), admin).andExpect(status().isOk()).andExpect(jsonPath("$.contacts.length()").value(0));
+        request(body(post("/groups/" + pending.id() + "/accept"), new GroupController.Revision(pending.revision())), user).andExpect(status().isNotFound());
+        request(body(post("/groups/" + pending.id() + "/invitations"), new GroupController.Invite(pending.revision(), List.of(contact(user)))), admin)
+                .andExpect(status().isNotFound());
+        GroupDirectory.Snapshot thirdParty = groups.create(actor(other), UUID.randomUUID());
+        request(body(post("/groups/" + thirdParty.id() + "/invitations"), new GroupController.Invite(thirdParty.revision(), List.of(contact(user), contact(admin)))), other)
+                .andExpect(status().isNotFound());
+        request(body(post("/groups/" + shared.id() + "/keys"), new GroupController.Claims(shared.revision(), List.of(user.userId()))), admin)
+                .andExpect(status().isNotFound());
+        request(body(post("/groups/" + shared.id() + "/controls"), new GroupController.Controls(shared.revision(), List.of(control))), admin)
+                .andExpect(status().isNotFound());
+        request(get("/groups/" + shared.id() + "/controls"), user).andExpect(status().isOk()).andExpect(content().json("[]"));
+        GroupMessages.Send groupMessage = new GroupMessages.Send(UUID.randomUUID(), shared.epoch(), shared.revision(), Expiry.HOUR_1,
+                System.currentTimeMillis() + 60_000, new byte[128], null, null);
+        request(body(post("/groups/" + shared.id() + "/messages"), groupMessage), admin).andExpect(status().isCreated());
+        request(get("/groups/" + shared.id() + "/messages"), user).andExpect(status().isOk()).andExpect(jsonPath("$[0].id").value(groupMessage.id().toString()));
+        request(delete("/account/blocks/" + admin.userId()), user).andExpect(status().isNoContent());
+        request(get("/account/admin-contacts"), user).andExpect(jsonPath("$.contacts.length()").value(0));
+        request(body(post("/remote-photos"), photoRequest(session, admin, user)), admin).andExpect(status().isGone());
+    }
+
+    @Test void playSafetyReportsValidateAccessibleContextAndRecheckThePinnedAdmin() throws Exception {
+        Device admin = device("report_admin");
+        assignAdmin(admin);
+        Device reporter = device("report_author"), target = device("report_target"), outsider = device("report_outsider");
+        SendRequest message = opaqueSend(target, reporter, null);
+        request(body(post("/messages"), message), target).andExpect(status().isCreated());
+        SafetyReports.Submission submission = new SafetyReports.Submission(target.userId(), SafetyReports.Reason.HARASSMENT, message.id(), null);
+        request(body(post("/safety/reports"), submission), null).andExpect(status().isUnauthorized());
+        request(body(post("/safety/reports"), submission), enrollment(reporter, recentLogin("report_author", null))).andExpect(status().isForbidden());
+        request(body(post("/safety/reports"), submission), outsider).andExpect(status().isNotFound());
+        request(body(post("/safety/reports"), new SafetyReports.Submission(outsider.userId(), SafetyReports.Reason.OTHER, message.id(), null)), reporter)
+                .andExpect(status().isNotFound());
+        request(body(post("/safety/reports"), new SafetyReports.Submission(reporter.userId(), SafetyReports.Reason.OTHER, null, null)), reporter)
+                .andExpect(status().isBadRequest());
+        request(body(post("/safety/reports"), new SafetyReports.Submission(UUID.randomUUID(), SafetyReports.Reason.OTHER, null, null)), reporter)
+                .andExpect(status().isNotFound());
+        for (String field : List.of("text", "plaintext", "photo", "reporterId", "expiresAt")) {
+            request(body(post("/safety/reports"), Map.of("targetId", target.userId(), "reason", "SPAM", field, "unaccepted-test-only")), reporter)
+                    .andExpect(status().isBadRequest()).andExpect(content().json("{\"error\":\"invalid_request\"}"));
+        }
+        request(body(post("/safety/reports"), Map.of("targetId", target.userId(), "reason", "NOT_A_REASON")), reporter)
+                .andExpect(status().isBadRequest());
+        request(body(post("/safety/reports"), Map.of("targetId", target.userId(), "reason", 0)), reporter)
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.error").value("invalid_request"));
+        JsonNode accepted = json.readTree(request(body(post("/safety/reports"), submission), reporter)
+                .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString());
+        assertEquals(Set.of("id", "expiresAt"), json.convertValue(accepted, Map.class).keySet());
+        UUID id = UUID.fromString(accepted.get("id").asText());
+        long ttl = redis.getExpire("safety-report:" + id, java.util.concurrent.TimeUnit.MILLISECONDS);
+        assertTrue(ttl > 0 && ttl <= SafetyReports.LIFETIME);
+        JsonNode stored = json.readTree(redis.opsForValue().get("safety-report:" + id));
+        assertEquals(reporter.userId().toString(), stored.get("reporterId").asText());
+        assertEquals(target.userId().toString(), stored.get("targetId").asText());
+        assertEquals(SafetyReports.LIFETIME, stored.get("expiresAt").asLong() - stored.get("createdAt").asLong());
+        request(get("/safety/reports"), reporter).andExpect(status().isForbidden()).andExpect(jsonPath("$.error").value("admin_required"));
+        request(get("/safety/reports"), null).andExpect(status().isUnauthorized());
+        request(delete("/safety/reports/" + id), reporter).andExpect(status().isForbidden());
+        request(delete("/safety/reports/" + id), outsider).andExpect(status().isForbidden());
+        request(get("/safety/reports"), admin).andExpect(status().isOk()).andExpect(jsonPath("$[0].id").value(id.toString()))
+                .andExpect(jsonPath("$[0].reason").value("HARASSMENT")).andExpect(jsonPath("$[0].messageId").value(message.id().toString()));
+        assertTrue(redis.getExpire("safety-report:" + id, java.util.concurrent.TimeUnit.MILLISECONDS) <= ttl);
+        GroupDirectory.Snapshot group = sharedGroup(target, reporter);
+        GroupMessages.Send groupMessage = new GroupMessages.Send(UUID.randomUUID(), group.epoch(), group.revision(), Expiry.VIEW_ONCE,
+                System.currentTimeMillis() + 60_000, new byte[128], null, null);
+        request(body(post("/groups/" + group.id() + "/messages"), groupMessage), target).andExpect(status().isCreated());
+        SafetyReports.Submission groupReport = new SafetyReports.Submission(target.userId(), SafetyReports.Reason.THREATS, groupMessage.id(), group.id());
+        request(body(post("/safety/reports"), groupReport), outsider).andExpect(status().isNotFound());
+        request(body(post("/safety/reports"), groupReport), reporter).andExpect(status().isCreated());
+        request(body(post("/safety/reports"), new SafetyReports.Submission(target.userId(), SafetyReports.Reason.OTHER, null, group.id())), reporter)
+                .andExpect(status().isCreated());
+        request(body(post("/safety/reports"), new SafetyReports.Submission(target.userId(), SafetyReports.Reason.OTHER, UUID.randomUUID(), group.id())), reporter)
+                .andExpect(status().isNotFound());
+        request(post("/messages/" + message.id() + "/read"), reporter).andExpect(status().isOk());
+        request(body(post("/safety/reports"), submission), reporter).andExpect(status().isNotFound());
+        request(put("/account/blocks/" + target.userId()), reporter).andExpect(status().isNoContent());
+        request(body(post("/safety/reports"), new SafetyReports.Submission(target.userId(), SafetyReports.Reason.CHILD_SAFETY, null, null)), reporter)
+                .andExpect(status().isCreated());
+        database.update("UPDATE accounts SET user_type='USER' WHERE id=?", admin.userId());
+        request(get("/safety/reports"), admin).andExpect(status().isForbidden());
+        request(delete("/safety/reports/" + id), admin).andExpect(status().isForbidden());
+        database.execute("ALTER TABLE accounts DISABLE TRIGGER accounts_admin_identity");
+        try { database.update("UPDATE accounts SET user_type='ADMIN' WHERE id=?", outsider.userId()); }
+        finally { database.execute("ALTER TABLE accounts ENABLE TRIGGER accounts_admin_identity"); }
+        request(get("/safety/reports"), outsider).andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.error").value("admin_identity_unavailable"));
+        request(delete("/safety/reports/" + id), outsider).andExpect(status().isServiceUnavailable());
+        database.update("UPDATE accounts SET user_type='USER' WHERE id=?", outsider.userId());
+        request(body(post("/safety/reports"), new SafetyReports.Submission(target.userId(), SafetyReports.Reason.SPAM, null, null)), reporter)
+                .andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.error").value("safety_review_unavailable"));
+        database.update("UPDATE accounts SET user_type='ADMIN' WHERE id=?", admin.userId());
+        request(delete("/safety/reports/" + id), admin).andExpect(status().isNoContent());
+        request(delete("/safety/reports/" + id), admin).andExpect(status().isNoContent());
+        assertFalse(Boolean.TRUE.equals(redis.hasKey("safety-report:" + id)));
+        assertNull(redis.opsForZSet().score("safety-reports", id.toString()));
+    }
+
+    @Test void playSafetyGroupOnlyReportsRemainParticipantAuthorizedAfterExpiryAndViewOnceRead() throws Exception {
+        Device admin = device("group_report_admin");
+        assignAdmin(admin);
+        Device target = device("group_report_target"), reporter = device("group_report_member");
+        Device outsider = device("group_report_outsider"), invited = device("group_report_invited");
+        GroupDirectory.Snapshot group = sharedGroup(target, reporter);
+        groups.invite(actor(target), group.id(), group.revision(), List.of(contact(invited)));
+        String path = "/groups/" + group.id();
+        Map<String, Object> groupOnly = Map.of("targetId", target.userId(), "reason", "HARASSMENT", "groupId", group.id());
+
+        request(body(post("/safety/reports"), groupOnly), outsider).andExpect(status().isNotFound());
+        request(body(post("/safety/reports"), groupOnly), invited).andExpect(status().isNotFound());
+        request(body(post("/safety/reports"), new SafetyReports.Submission(invited.userId(), SafetyReports.Reason.OTHER, null, group.id())), reporter)
+                .andExpect(status().isNotFound());
+        request(body(post("/safety/reports"), new SafetyReports.Submission(outsider.userId(), SafetyReports.Reason.OTHER, null, group.id())), reporter)
+                .andExpect(status().isNotFound());
+
+        GroupMessages.Send viewOnce = new GroupMessages.Send(UUID.randomUUID(), group.epoch(), group.revision(), Expiry.VIEW_ONCE,
+                System.currentTimeMillis() + 60_000, new byte[128], UUID.randomUUID(), new byte[32]);
+        request(body(post(path + "/messages"), viewOnce), target).andExpect(status().isCreated());
+        request(post(path + "/messages/" + viewOnce.id() + "/read"), reporter).andExpect(status().isOk());
+        assertFalse(Boolean.TRUE.equals(redis.hasKey("gm:" + group.id() + ":" + viewOnce.id())));
+        assertFalse(Boolean.TRUE.equals(redis.hasKey("gb:" + group.id() + ":" + viewOnce.id())));
+        request(body(post("/safety/reports"), new SafetyReports.Submission(target.userId(), SafetyReports.Reason.HARASSMENT, viewOnce.id(), group.id())), reporter)
+                .andExpect(status().isNotFound());
+        request(body(post("/safety/reports"), groupOnly), reporter).andExpect(status().isCreated());
+
+        GroupMessages.Send expiring = new GroupMessages.Send(UUID.randomUUID(), group.epoch(), group.revision(), Expiry.HOUR_1,
+                System.currentTimeMillis() + 2_000, new byte[128], null, null);
+        request(body(post(path + "/messages"), expiring), target).andExpect(status().isCreated());
+        await().atMost(Duration.ofSeconds(5)).until(() -> !Boolean.TRUE.equals(redis.hasKey("gm:" + group.id() + ":" + expiring.id())));
+        request(body(post("/safety/reports"), new SafetyReports.Submission(target.userId(), SafetyReports.Reason.HARASSMENT, expiring.id(), group.id())), reporter)
+                .andExpect(status().isNotFound());
+        request(body(post("/safety/reports"), groupOnly), reporter).andExpect(status().isCreated());
+        request(body(post("/safety/reports"), new SafetyReports.Submission(target.userId(), SafetyReports.Reason.OTHER, UUID.randomUUID(), group.id())), reporter)
+                .andExpect(status().isNotFound());
+
+        SafetyReports.Report[] reports = json.readValue(request(get("/safety/reports"), admin).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString(), SafetyReports.Report[].class);
+        assertEquals(2, reports.length);
+        for (SafetyReports.Report report : reports) {
+            assertEquals(group.id(), report.groupId());
+            assertEquals(reporter.userId(), report.reporterId());
+            assertEquals(target.userId(), report.targetId());
+            assertNull(report.messageId());
+            assertFalse(redis.opsForValue().get("safety-report:" + report.id()).contains(viewOnce.id().toString()));
+            assertFalse(redis.opsForValue().get("safety-report:" + report.id()).contains(expiring.id().toString()));
+        }
+        groups.remove(actor(target), group.id(), group.revision(), reporter.userId());
+        request(body(post("/safety/reports"), groupOnly), reporter).andExpect(status().isNotFound());
+        GroupDirectory.Snapshot closed = sharedGroup(target, reporter);
+        groups.close(actor(target), closed.id(), closed.revision());
+        request(body(post("/safety/reports"), new SafetyReports.Submission(target.userId(), SafetyReports.Reason.OTHER, null, closed.id())), reporter)
+                .andExpect(status().isNotFound());
+    }
+
+    @Test void playSafetyReportsHaveAtomicThirtyDayTtlsRateLimitsAndBoundedReviewPages() throws Exception {
+        Device admin = device("rate_report_admin");
+        assignAdmin(admin);
+        Device reporter = device("rate_report_author"), target = device("rate_report_target");
+        SafetyReports.Submission submission = new SafetyReports.Submission(target.userId(), SafetyReports.Reason.SPAM, null, null);
+        for (int index = 0; index < 5; index++) request(body(post("/safety/reports"), submission), reporter).andExpect(status().isCreated());
+        request(body(post("/safety/reports"), submission), reporter).andExpect(status().isTooManyRequests()).andExpect(jsonPath("$.error").value("rate_limited"));
+        assertTrue(redis.getExpire("rate:safety:" + reporter.userId()) > 0 && redis.getExpire("rate:safety:" + reporter.userId()) <= 86400);
+        request(body(post("/safety/reports"), new SafetyReports.Submission(reporter.userId(), SafetyReports.Reason.IMPERSONATION, null, null)), target)
+                .andExpect(status().isCreated());
+        var script = new org.springframework.data.redis.core.script.DefaultRedisScript<String>();
+        script.setLocation(new org.springframework.core.io.ClassPathResource("redis/safety-report.lua"));
+        script.setResultType(String.class);
+        long now = System.currentTimeMillis();
+        for (int index = 0; index < 49; index++) {
+            SafetyReports.Report report = new SafetyReports.Report(UUID.randomUUID(), UUID.randomUUID(), target.userId(), SafetyReports.Reason.OTHER,
+                    null, null, now, now + SafetyReports.LIFETIME);
+            assertEquals("OK", redis.execute(script, List.of("safety-report:" + report.id(), "safety-reports"),
+                    json.writeValueAsString(report), Long.toString(now), Long.toString(report.expiresAt()), report.id().toString()));
+        }
+        SafetyReports.Report tooLong = new SafetyReports.Report(UUID.randomUUID(), reporter.userId(), target.userId(), SafetyReports.Reason.OTHER,
+                null, null, now, now + SafetyReports.LIFETIME + 1);
+        assertEquals("EXPIRED", redis.execute(script, List.of("safety-report:" + tooLong.id(), "safety-reports"),
+                json.writeValueAsString(tooLong), Long.toString(now), Long.toString(tooLong.expiresAt()), tooLong.id().toString()));
+        assertFalse(Boolean.TRUE.equals(redis.hasKey("safety-report:" + tooLong.id())));
+        for (String key : Objects.requireNonNull(redis.keys("*"))) {
+            Long lifetime = redis.getExpire(key, java.util.concurrent.TimeUnit.MILLISECONDS);
+            long maximum = key.startsWith("refresh:") || key.startsWith("safety-report") ? SafetyReports.LIFETIME : Duration.ofDays(1).toMillis();
+            assertNotNull(lifetime); assertTrue(lifetime > 0 && lifetime <= maximum, "TTL must remain atomically bounded");
+        }
+        SafetyReports.Report[] first = json.readValue(request(get("/safety/reports"), admin).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString(), SafetyReports.Report[].class);
+        assertEquals(50, first.length);
+        for (SafetyReports.Report report : first) request(delete("/safety/reports/" + report.id()), admin).andExpect(status().isNoContent());
+        request(get("/safety/reports"), admin).andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(5));
+        String expiring = Objects.requireNonNull(redis.keys("safety-report:*")).iterator().next();
+        redis.expire(expiring, Duration.ofMillis(1));
+        await().atMost(Duration.ofSeconds(2)).until(() -> !Boolean.TRUE.equals(redis.hasKey(expiring)));
+        request(get("/safety/reports"), admin).andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(4));
+        redis.execute(new org.springframework.data.redis.core.script.DefaultRedisScript<>("""
+                for index = 1, 10000 do redis.call('ZADD', KEYS[1], ARGV[1], 'synthetic-' .. index) end
+                redis.call('PEXPIREAT', KEYS[1], ARGV[1]); return 1
+                """, Long.class), List.of("safety-reports"), Long.toString(System.currentTimeMillis() + SafetyReports.LIFETIME));
+        request(body(post("/safety/reports"), new SafetyReports.Submission(reporter.userId(), SafetyReports.Reason.OTHER, null, null)), target)
+                .andExpect(status().isTooManyRequests()).andExpect(jsonPath("$.error").value("safety_queue_full"));
+    }
+
+    @Test void playSafetyBlocksAreBoundedAndV8PreservesExistingRolesAndIntroductions() throws Exception {
+        Device blocker = device("block_limit_owner"), target = device("block_limit_target");
+        assertThrows(DataIntegrityViolationException.class, () -> database.update("INSERT INTO admin_identity(user_id) VALUES (?)", UUID.randomUUID()));
+        UUID unregistered = UUID.randomUUID();
+        database.update("INSERT INTO accounts(id,handle,password_hash) VALUES (?,'not_enrolled','synthetic')", unregistered);
+        request(put("/account/blocks/" + unregistered), blocker).andExpect(status().isNotFound());
+        for (int index = 0; index < BlockDirectory.MAX_BLOCKS; index++) {
+            UUID user = UUID.randomUUID();
+            database.update("INSERT INTO accounts(id,handle,password_hash) VALUES (?,?,?)", user, "limit_" + index, "synthetic");
+            database.update("INSERT INTO account_blocks(blocker_id,blocked_id) VALUES (?,?)", blocker.userId(), user);
+        }
+        request(get("/account/blocks"), blocker).andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(BlockDirectory.MAX_BLOCKS));
+        request(put("/account/blocks/" + target.userId()), blocker).andExpect(status().isConflict()).andExpect(jsonPath("$.error").value("block_capacity"));
+        assertThrows(DataIntegrityViolationException.class, () -> database.update(
+                "INSERT INTO account_blocks(blocker_id,blocked_id) VALUES (?,?)", blocker.userId(), blocker.userId()));
+        var configuration = org.flywaydb.core.Flyway.configure().dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
+                .schemas("safety_upgrade_fixture").defaultSchema("safety_upgrade_fixture").locations("classpath:db/migration");
+        try {
+            configuration.target("7").load().migrate();
+            UUID admin = UUID.randomUUID(), user = UUID.randomUUID();
+            database.update("INSERT INTO safety_upgrade_fixture.accounts(id,handle,password_hash) VALUES (?,'old_admin','synthetic')", admin);
+            database.update("INSERT INTO safety_upgrade_fixture.admin_identity(user_id) VALUES (?)", admin);
+            database.update("UPDATE safety_upgrade_fixture.accounts SET user_type='ADMIN' WHERE id=?", admin);
+            database.update("INSERT INTO safety_upgrade_fixture.accounts(id,handle,password_hash) VALUES (?,'old_user','synthetic')", user);
+            var links = database.queryForList("SELECT * FROM safety_upgrade_fixture.admin_introductions");
+            var roles = database.queryForList("SELECT id,handle,user_type FROM safety_upgrade_fixture.accounts ORDER BY id");
+            assertEquals(1, configuration.target("8").load().migrate().migrationsExecuted);
+            assertEquals(roles, database.queryForList("SELECT id,handle,user_type FROM safety_upgrade_fixture.accounts ORDER BY id"));
+            assertEquals(links, database.queryForList("SELECT * FROM safety_upgrade_fixture.admin_introductions"));
+            assertEquals(List.of("ACTIVE", "ACTIVE"), database.queryForList("SELECT deletion_state FROM safety_upgrade_fixture.accounts ORDER BY id", String.class));
+            assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM safety_upgrade_fixture.account_blocks", Integer.class));
+            assertEquals(admin, database.queryForObject("SELECT user_id FROM safety_upgrade_fixture.admin_identity", UUID.class));
+            assertThrows(DataIntegrityViolationException.class, () -> database.update("DELETE FROM safety_upgrade_fixture.accounts WHERE id=?", admin));
+            assertEquals(0, configuration.load().migrate().migrationsExecuted);
+        } finally { database.execute("DROP SCHEMA IF EXISTS safety_upgrade_fixture CASCADE"); }
+    }
+
+    @Test void playSafetyGoogleErasureRemovesMappingAndOrphanUploadsFromReplacedDevices() throws Exception {
+        Device peer = device("google_erase_peer");
+        GoogleIdentityVerifier verifier = mock(GoogleIdentityVerifier.class);
+        when(verifier.enabled()).thenReturn(true);
+        when(verifier.clientId()).thenReturn("synthetic-client");
+        when(verifier.verify(anyString(), anyString())).thenReturn("synthetic-erasure-subject");
+        AccountDirectory directory = new AccountDirectory(database, json, Clock.systemUTC());
+        GoogleAuth google = new GoogleAuth(verifier, directory, authentication, redis, json, Clock.systemUTC());
+        GoogleAuth.Challenge challenge = google.challenge(new GoogleAuth.Start(null));
+        AuthService.Token first = google.signIn(new GoogleAuth.SignIn(challenge.id(), "synthetic-id-token".repeat(8))).session();
+        SignalClient crypto = new SignalClient(first.userId(), new TestVault());
+        UUID original = UUID.randomUUID();
+        Device enrolling = new Device(first.userId(), null, first.accessToken(), crypto);
+        AuthService.Token deviceSession = json.readValue(request(body(post("/devices"), new AccountDirectory.DeviceRequest(original, crypto.publicIdentity(), false)), enrolling)
+                .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString(), AuthService.Token.class);
+        Device old = new Device(first.userId(), original, deviceSession.accessToken(), crypto);
+        UUID media = UUID.randomUUID();
+        request(put("/media/" + media).param("recipientId", peer.userId().toString()).param("recipientDeviceId", peer.deviceId().toString())
+                .param("expiresAt", Long.toString(System.currentTimeMillis() + 60_000)).contentType("application/octet-stream").content(new byte[32]), old)
+                .andExpect(status().isCreated());
+        ProfileMessages.Send profile = new ProfileMessages.Send(UUID.randomUUID(), old.userId(), old.deviceId(),
+                System.currentTimeMillis() + 60_000, 2, new byte[128]);
+        request(body(post("/profile/packets"), profile), peer).andExpect(status().isNoContent());
+        request(delete("/profile/packets/" + profile.id()), old).andExpect(status().isNoContent());
+        request(post("/auth/logout"), old).andExpect(status().isNoContent());
+        GoogleAuth.Challenge oldPending = google.challenge(new GoogleAuth.Start(original));
+        challenge = google.challenge(new GoogleAuth.Start(null));
+        AuthService.Token replace = google.signIn(new GoogleAuth.SignIn(challenge.id(), "synthetic-id-token".repeat(8))).session();
+        UUID replacement = UUID.randomUUID();
+        request(body(post("/devices"), new AccountDirectory.DeviceRequest(replacement, crypto.publicIdentity(), true)), enrollment(old, replace))
+                .andExpect(status().isCreated());
+        challenge = google.challenge(new GoogleAuth.Start(null));
+        AuthService.Token deletion = google.signIn(new GoogleAuth.SignIn(challenge.id(), "synthetic-id-token".repeat(8))).session();
+        request(body(delete("/account"), Map.of("confirmation", "DELETE")), enrollment(old, deletion)).andExpect(status().isNoContent());
+        assertFalse(Boolean.TRUE.equals(redis.hasKey("b:" + media)));
+        assertFalse(Boolean.TRUE.equals(redis.hasKey("pcr:" + original + ":" + profile.id())));
+        assertFalse(Boolean.TRUE.equals(redis.hasKey(GoogleAuth.key(oldPending.id()))));
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM accounts WHERE google_subject='synthetic-erasure-subject'", Integer.class));
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM devices WHERE user_id=?", Integer.class, first.userId()));
+        assertNotEquals(first.userId(), directory.googleAccount("synthetic-erasure-subject").userId());
+        request(body(post("/devices"), new AccountDirectory.DeviceRequest(replacement, crypto.publicIdentity(), true)), enrollment(old, deletion))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test void playSafetyCleanupIsSerializedWithOtherRelayRequestsThroughPostgres() throws Exception {
+        Device owner = device("gate_erase_owner"), peer = device("gate_erase_peer");
+        Device confirming = enrollment(owner, recentLogin("gate_erase_owner", null));
+        try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor()) {
+            new TransactionTemplate(transactions).executeWithoutResult(transaction -> {
+                assertEquals(Boolean.TRUE, database.queryForObject("SELECT pg_try_advisory_xact_lock_shared(861904231)", Boolean.class));
+                var attempt = executor.submit(() -> {
+                    request(body(delete("/account"), Map.of("confirmation", "DELETE")), confirming).andExpect(status().isServiceUnavailable())
+                            .andExpect(jsonPath("$.error").value("safety_operation_in_progress"));
+                    request(put("/account/blocks/" + peer.userId()), owner).andExpect(status().isServiceUnavailable());
+                    return true;
+                });
+                try { assertTrue(attempt.get(10, java.util.concurrent.TimeUnit.SECONDS)); }
+                catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException failure) { throw new AssertionError("Concurrent safety request failed", failure); }
+                catch (InterruptedException failure) { Thread.currentThread().interrupt(); throw new AssertionError("Concurrent test interrupted", failure); }
+                assertEquals("ACTIVE", database.queryForObject("SELECT deletion_state FROM accounts WHERE id=?", String.class, owner.userId()));
+            });
+        }
+        request(body(delete("/account"), Map.of("confirmation", "DELETE")), confirming).andExpect(status().isNoContent());
+    }
+
+    @Test void playSafetyFailedBlockCleanupStillDeniesAccessAndCanBeRetried() throws Exception {
+        Device blocker = device("failed_blocker"), peer = device("failed_block_peer");
+        String broken = "r:" + UUID.randomUUID();
+        redis.execute(new org.springframework.data.redis.core.script.DefaultRedisScript<>(
+                "redis.call('LPUSH', KEYS[1], 'test-only'); redis.call('EXPIRE', KEYS[1], 60); return 1", Long.class), List.of(broken));
+        request(put("/account/blocks/" + peer.userId()), blocker).andExpect(status().isServiceUnavailable());
+        request(get("/account/blocks"), blocker).andExpect(status().isOk()).andExpect(content().json("[\"" + peer.userId() + "\"]"));
+        request(body(post("/messages"), opaqueSend(peer, blocker, null)), peer).andExpect(status().isNotFound());
+        request(get("/account/blocks"), peer).andExpect(content().json("[]"));
+        redis.delete(broken);
+        request(put("/account/blocks/" + peer.userId()), blocker).andExpect(status().isNoContent());
+        request(get("/auth/me"), blocker).andExpect(status().isOk());
+    }
+
+    @Test void playSafetyMediaOwnershipSurvivesDeviceIdentifierReuse() throws Exception {
+        Device first = device("old_media_owner"), peer = device("media_peer"), second = device("new_media_owner");
+        GroupDirectory.Snapshot group = sharedGroup(peer, first, second);
+        GroupMessages.Send sharedCopy = new GroupMessages.Send(UUID.randomUUID(), group.epoch(), group.revision(), Expiry.VIEW_ONCE,
+                System.currentTimeMillis() + 60_000, new byte[128], UUID.randomUUID(), new byte[32]);
+        request(body(post("/groups/" + group.id() + "/messages"), sharedCopy), first).andExpect(status().isCreated());
+        UUID media = UUID.randomUUID();
+        long deadline = System.currentTimeMillis() + 60_000;
+        request(put("/media/" + media).param("recipientId", peer.userId().toString()).param("recipientDeviceId", peer.deviceId().toString())
+                .param("expiresAt", Long.toString(deadline)).contentType("application/octet-stream").content(new byte[32]), first).andExpect(status().isCreated());
+        Device replacingFirst = enrollment(first, recentLogin("old_media_owner", null));
+        request(body(post("/devices"), new AccountDirectory.DeviceRequest(UUID.randomUUID(), first.crypto().publicIdentity(), true)), replacingFirst).andExpect(status().isCreated());
+        Device replacingSecond = enrollment(second, recentLogin("new_media_owner", null));
+        AuthService.Token reused = json.readValue(request(body(post("/devices"), new AccountDirectory.DeviceRequest(first.deviceId(), second.crypto().publicIdentity(), true)), replacingSecond)
+                .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString(), AuthService.Token.class);
+        Device intruder = new Device(second.userId(), first.deviceId(), reused.accessToken(), second.crypto());
+        groups.remove(actor(peer), group.id(), group.revision(), second.userId());
+        GroupDirectory.Snapshot removed = groups.list(actor(peer)).getFirst();
+        groups.invite(actor(peer), group.id(), removed.revision(), List.of(contact(intruder)));
+        groups.accept(actor(intruder), group.id(), removed.revision());
+        request(put("/media/" + media).param("recipientId", peer.userId().toString()).param("recipientDeviceId", peer.deviceId().toString())
+                .param("expiresAt", Long.toString(deadline)).contentType("application/octet-stream").content(new byte[32]), intruder).andExpect(status().isNotFound());
+        SendRequest replay = new SendRequest(UUID.randomUUID(), peer.userId(), peer.deviceId(), Expiry.VIEW_ONCE, deadline, 2, new byte[128], media);
+        request(body(post("/messages"), replay), intruder).andExpect(status().isNotFound());
+        request(delete("/media/" + media), intruder).andExpect(status().isNotFound());
+        assertTrue(Boolean.TRUE.equals(redis.hasKey("b:" + media)));
+        Device erasing = enrollment(first, recentLogin("old_media_owner", null));
+        request(body(delete("/account"), Map.of("confirmation", "DELETE")), erasing).andExpect(status().isNoContent());
+        request(get("/auth/me"), intruder).andExpect(status().isOk());
+        assertFalse(Boolean.TRUE.equals(redis.hasKey("b:" + media)));
+        request(get("/groups/" + group.id() + "/status"), intruder).andExpect(status().isOk()).andExpect(content().json("[]"));
+        request(post("/groups/" + group.id() + "/messages/" + sharedCopy.id() + "/delete"), intruder).andExpect(status().isNotFound());
+        request(get("/groups/" + group.id() + "/messages/" + sharedCopy.id() + "/media"), peer).andExpect(status().isOk());
+    }
+
+    @Test void playSafetyLegacyUnattributedUploadsDelayErasureWithoutDeletingOthersData() throws Exception {
+        Device owner = device("legacy_erase_owner"), sender = device("legacy_upload_sender"), recipient = device("legacy_upload_recipient");
+        UUID media = UUID.randomUUID();
+        request(put("/media/" + media).param("recipientId", recipient.userId().toString()).param("recipientDeviceId", recipient.deviceId().toString())
+                .param("expiresAt", Long.toString(System.currentTimeMillis() + 60_000)).contentType("application/octet-stream").content(new byte[32]), sender)
+                .andExpect(status().isCreated());
+        String key = "b:" + media;
+        var legacy = (com.fasterxml.jackson.databind.node.ObjectNode) json.readTree(redis.opsForValue().get(key));
+        legacy.remove(List.of("senderId", "recipientId"));
+        redis.opsForValue().set(key, json.writeValueAsString(legacy), Duration.ofSeconds(60));
+        Device confirming = enrollment(owner, recentLogin("legacy_erase_owner", null));
+        request(body(delete("/account"), Map.of("confirmation", "DELETE")), confirming).andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.error").value("legacy_media_pending"));
+        assertEquals("DELETING", database.queryForObject("SELECT deletion_state FROM accounts WHERE id=?", String.class, owner.userId()));
+        assertTrue(Boolean.TRUE.equals(redis.hasKey(key)));
+        request(get("/auth/me"), owner).andExpect(status().isUnauthorized());
+        request(get("/auth/me"), sender).andExpect(status().isOk());
+        redis.expire(key, Duration.ofMillis(1));
+        await().atMost(Duration.ofSeconds(2)).until(() -> !Boolean.TRUE.equals(redis.hasKey(key)));
+        request(body(delete("/account"), Map.of("confirmation", "DELETE")), confirming).andExpect(status().isNoContent());
+    }
+
+    private String deletionProof() {
+        byte[] bytes = new byte[32];
+        new java.security.SecureRandom().nextBytes(bytes);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    }
+
+    private DeletionReceipts.Status deletionStatus(String proof) throws Exception {
+        return json.readValue(request(body(post("/account/deletion/status"), new DeletionReceipts.Proof(proof)), null)
+                .andExpect(status().isOk()).andExpect(header().string("Cache-Control", "no-store"))
+                .andReturn().getResponse().getContentAsString(), DeletionReceipts.Status.class);
+    }
+
+    @Test void playSafetyDeletionProofConfirmsCommitAfterLostResponseAndRedisReset() throws Exception {
+        Device owner = device("proof_lost_response"), other = device("proof_other_owner");
+        String proof = deletionProof();
+        Map<String, String> confirmation = Map.of("confirmation", "DELETE", "deletionProof", proof);
+        request(body(delete("/account"), confirmation), owner).andExpect(status().isForbidden());
+        request(body(post("/account/deletion/status"), new DeletionReceipts.Proof(proof)), null)
+                .andExpect(status().isNotFound()).andExpect(jsonPath("$.error").value("deletion_proof_unavailable"));
+        Device enrolling = enrollment(owner, recentLogin("proof_lost_response", null));
+        request(body(delete("/account"), confirmation), enrolling).andExpect(status().isNoContent());
+        request(get("/auth/me"), owner).andExpect(status().isUnauthorized());
+        request(body(delete("/account"), confirmation), enrolling).andExpect(status().isUnauthorized());
+        DeletionReceipts.Status confirmed = deletionStatus(proof);
+        assertEquals(owner.userId(), confirmed.userId());
+        assertEquals(DeletionReceipts.State.DELETED, confirmed.state());
+        assertTrue(confirmed.expiresAt() > System.currentTimeMillis());
+        assertTrue(confirmed.expiresAt() <= System.currentTimeMillis() + DeletionReceipts.LIFETIME);
+        Map<String, Object> stored = database.queryForMap("SELECT * FROM account_deletion_receipts WHERE user_id=?", owner.userId());
+        assertEquals(Set.of("proof_digest", "user_id", "state", "created_at", "expires_at"), stored.keySet());
+        assertEquals(DeletionReceipts.digest(proof), stored.get("proof_digest"));
+        assertFalse(stored.toString().contains(proof));
+        assertEquals(DeletionReceipts.LIFETIME, ((java.sql.Timestamp) stored.get("expires_at")).getTime()
+                - ((java.sql.Timestamp) stored.get("created_at")).getTime());
+        request(body(post("/account/deletion/retry"), new DeletionReceipts.Proof(proof)), null)
+                .andExpect(status().isOk()).andExpect(jsonPath("$.userId").value(owner.userId().toString()))
+                .andExpect(jsonPath("$.state").value("DELETED")).andExpect(jsonPath("$.expiresAt").value(confirmed.expiresAt()));
+        assertEquals(confirmed, deletionStatus(proof));
+        Device proofIsNotAnAccessToken = new Device(owner.userId(), owner.deviceId(), proof, owner.crypto());
+        request(get("/auth/me"), proofIsNotAnAccessToken).andExpect(status().isUnauthorized());
+        request(body(post("/auth/refresh"), new AuthService.Refresh(proof, null)), null).andExpect(status().isUnauthorized());
+        request(get("/auth/me"), other).andExpect(status().isOk());
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM accounts WHERE id=?", Integer.class, owner.userId()));
+        // The client retained its proof but lost the DELETE response; confirmation survives Redis loss.
+        redis.getConnectionFactory().getConnection().serverCommands().flushDb();
+        assertEquals(confirmed, deletionStatus(proof));
+        request(body(post("/account/deletion/retry"), new DeletionReceipts.Proof(proof)), null)
+                .andExpect(status().isOk()).andExpect(jsonPath("$.state").value("DELETED"));
+    }
+
+    @Test void playSafetyDeletionProofRetriesRollbackWithoutReauthenticationOrCrossAccountAuthority() throws Exception {
+        Device owner = device("proof_retry_owner"), other = device("proof_retry_other");
+        assignAdmin(owner);
+        String proof = deletionProof();
+        Device enrolling = enrollment(owner, recentLogin("proof_retry_owner", null));
+        database.execute("""
+                CREATE FUNCTION test_deletion_receipt_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                    IF NEW.state = 'DELETED' THEN RAISE EXCEPTION 'synthetic_commit_failure' USING ERRCODE = '23514'; END IF;
+                    RETURN NEW;
+                END; $$;
+                CREATE CONSTRAINT TRIGGER test_deletion_receipt_commit AFTER UPDATE ON account_deletion_receipts
+                DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION test_deletion_receipt_commit();
+                """);
+        try {
+            request(body(delete("/account"), Map.of("confirmation", "DELETE", "deletionProof", proof)), enrolling)
+                    .andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.error").value("service_unavailable"));
+        } finally {
+            database.execute("DROP TRIGGER test_deletion_receipt_commit ON account_deletion_receipts");
+            database.execute("DROP FUNCTION test_deletion_receipt_commit()");
+        }
+        DeletionReceipts.Status pending = deletionStatus(proof);
+        assertEquals(DeletionReceipts.State.PENDING, pending.state());
+        assertEquals(owner.userId(), pending.userId());
+        assertEquals("DELETING", database.queryForObject("SELECT deletion_state FROM accounts WHERE id=?", String.class, owner.userId()));
+        request(get("/auth/me"), owner).andExpect(status().isUnauthorized());
+        request(get("/auth/me"), enrolling).andExpect(status().isUnauthorized());
+        Device otherEnrollment = enrollment(other, recentLogin("proof_retry_other", null));
+        request(body(delete("/account"), Map.of("confirmation", "DELETE", "deletionProof", proof)), otherEnrollment)
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.error").value("deletion_proof_conflict"));
+        assertEquals("ACTIVE", database.queryForObject("SELECT deletion_state FROM accounts WHERE id=?", String.class, other.userId()));
+        Device reauthenticated = enrollment(owner, recentLogin("proof_retry_owner", null));
+        request(body(delete("/account"), Map.of("confirmation", "DELETE", "deletionProof", deletionProof())), reauthenticated)
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.error").value("deletion_proof_conflict"));
+        assertEquals(pending, deletionStatus(proof));
+        request(body(post("/account/deletion/retry"), Map.of("deletionProof", proof, "userId", other.userId())), null)
+                .andExpect(status().isBadRequest());
+        database.update("UPDATE accounts SET deletion_state='ACTIVE' WHERE id=?", owner.userId());
+        request(body(post("/account/deletion/retry"), new DeletionReceipts.Proof(proof)), null)
+                .andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.error").value("account_cleanup_failed"));
+        assertEquals(pending, deletionStatus(proof));
+        database.update("UPDATE accounts SET deletion_state='DELETING' WHERE id=?", owner.userId());
+        try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor()) {
+            new TransactionTemplate(transactions).executeWithoutResult(transaction -> {
+                assertEquals(Boolean.TRUE, database.queryForObject("SELECT pg_try_advisory_xact_lock_shared(861904231)", Boolean.class));
+                var attempt = executor.submit(() -> {
+                    request(body(post("/account/deletion/retry"), new DeletionReceipts.Proof(proof)), null)
+                            .andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.error").value("safety_operation_in_progress"));
+                    return true;
+                });
+                try { assertTrue(attempt.get(10, java.util.concurrent.TimeUnit.SECONDS)); }
+                catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException failure) { throw new AssertionError("Concurrent retry failed", failure); }
+                catch (InterruptedException failure) { Thread.currentThread().interrupt(); throw new AssertionError("Concurrent retry interrupted", failure); }
+            });
+        }
+        assertEquals(pending, deletionStatus(proof));
+        request(body(post("/account/deletion/retry"), new DeletionReceipts.Proof(proof)), null)
+                .andExpect(status().isOk()).andExpect(jsonPath("$.state").value("DELETED"))
+                .andExpect(jsonPath("$.userId").value(owner.userId().toString())).andExpect(jsonPath("$.expiresAt").value(pending.expiresAt()));
+        assertEquals(DeletionReceipts.State.DELETED, deletionStatus(proof).state());
+        request(get("/auth/me"), other).andExpect(status().isOk());
+        request(body(delete("/account"), Map.of("confirmation", "DELETE", "deletionProof", proof)), otherEnrollment)
+                .andExpect(status().isConflict());
+        assertEquals(owner.userId(), database.queryForObject("SELECT user_id FROM admin_identity", UUID.class));
+        assertThrows(DataIntegrityViolationException.class, () -> database.update("UPDATE accounts SET user_type='ADMIN' WHERE id=?", other.userId()));
+    }
+
+    @Test void playSafetyDeletionProofExpiryUnknownValuesAndRateLimitsNeverImplySuccess() throws Exception {
+        Device owner = device("proof_expiry_owner");
+        String proof = deletionProof();
+        for (String operation : List.of("status", "retry")) {
+            request(body(post("/account/deletion/" + operation), new DeletionReceipts.Proof(proof)), null)
+                    .andExpect(status().isNotFound()).andExpect(jsonPath("$.error").value("deletion_proof_unavailable"));
+            request(body(post("/account/deletion/" + operation), new DeletionReceipts.Proof("invalid")), null).andExpect(status().isBadRequest());
+            request(body(post("/account/deletion/" + operation), Map.of("deletionProof", proof, "userId", owner.userId())), null)
+                    .andExpect(status().isBadRequest());
+        }
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM account_deletion_receipts", Integer.class));
+        assertEquals("ACTIVE", database.queryForObject("SELECT deletion_state FROM accounts WHERE id=?", String.class, owner.userId()));
+        Device enrolling = enrollment(owner, recentLogin("proof_expiry_owner", null));
+        request(body(delete("/account"), Map.of("confirmation", "DELETE", "deletionProof", "invalid")), enrolling).andExpect(status().isBadRequest());
+        request(body(delete("/account"), Map.of("confirmation", "DELETE", "deletionProof", proof)), enrolling).andExpect(status().isNoContent());
+        assertThrows(DataIntegrityViolationException.class, () -> database.update(
+                "UPDATE account_deletion_receipts SET expires_at=created_at+interval '25 hours' WHERE user_id=?", owner.userId()));
+        redis.delete("rate:deletion-status:" + DeletionReceipts.digest(proof));
+        redis.delete("rate:deletion-retry:" + DeletionReceipts.digest(proof));
+        for (int index = 0; index < 30; index++) assertEquals(DeletionReceipts.State.DELETED, deletionStatus(proof).state());
+        request(body(post("/account/deletion/status"), new DeletionReceipts.Proof(proof)), null).andExpect(status().isTooManyRequests());
+        for (int index = 0; index < 5; index++) request(body(post("/account/deletion/retry"), new DeletionReceipts.Proof(proof)), null)
+                .andExpect(status().isOk()).andExpect(jsonPath("$.state").value("DELETED"));
+        request(body(post("/account/deletion/retry"), new DeletionReceipts.Proof(proof)), null).andExpect(status().isTooManyRequests());
+        assertTrue(redis.getExpire("rate:deletion-status:" + DeletionReceipts.digest(proof)) > 0);
+        assertTrue(redis.getExpire("rate:deletion-retry:" + DeletionReceipts.digest(proof)) <= 60);
+        database.update("UPDATE account_deletion_receipts SET created_at=now()-interval '2 days', expires_at=now()-interval '1 day' WHERE user_id=?", owner.userId());
+        redis.delete("rate:deletion-status:" + DeletionReceipts.digest(proof));
+        redis.delete("rate:deletion-retry:" + DeletionReceipts.digest(proof));
+        for (String operation : List.of("status", "retry")) request(body(post("/account/deletion/" + operation), new DeletionReceipts.Proof(proof)), null)
+                .andExpect(status().isNotFound()).andExpect(jsonPath("$.error").value("deletion_proof_unavailable"));
+        new DeletionReceipts(database).expire();
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM account_deletion_receipts", Integer.class));
+        request(body(post("/account/deletion/status"), new DeletionReceipts.Proof(proof)), null).andExpect(status().isNotFound());
+    }
+
+    @Test void playSafetyGoogleReauthenticationForSavedAccountNeverRecreatesAnErasedIdentity() throws Exception {
+        GoogleIdentityVerifier verifier = mock(GoogleIdentityVerifier.class);
+        when(verifier.enabled()).thenReturn(true);
+        when(verifier.clientId()).thenReturn("synthetic-client");
+        when(verifier.verify(anyString(), anyString())).thenReturn("synthetic-existing-only-subject");
+        AccountDirectory directory = new AccountDirectory(database, json, Clock.systemUTC());
+        GoogleAuth google = new GoogleAuth(verifier, directory, authentication, redis, json, Clock.systemUTC());
+        GoogleAuth.Challenge initial = google.challenge(new GoogleAuth.Start(null));
+        AuthService.Token original = google.signIn(new GoogleAuth.SignIn(initial.id(), "synthetic-id-token".repeat(8))).session();
+        GoogleAuth.Challenge existing = google.challenge(new GoogleAuth.Start(null, original.userId()));
+        AuthService.Token reauthenticated = google.signIn(new GoogleAuth.SignIn(existing.id(), "synthetic-id-token".repeat(8))).session();
+        assertEquals(original.userId(), reauthenticated.userId());
+        GoogleAuth.Challenge wrong = google.challenge(new GoogleAuth.Start(null, UUID.randomUUID()));
+        ApiException mismatch = assertThrows(ApiException.class, () -> google.signIn(new GoogleAuth.SignIn(wrong.id(), "synthetic-id-token".repeat(8))));
+        assertEquals(org.springframework.http.HttpStatus.UNAUTHORIZED, mismatch.status);
+        assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM accounts", Integer.class));
+        GoogleAuth.Challenge outstanding = google.challenge(new GoogleAuth.Start(null, original.userId()));
+        String proof = deletionProof();
+        Device enrolling = new Device(original.userId(), null, reauthenticated.accessToken(), null);
+        request(body(delete("/account"), Map.of("confirmation", "DELETE", "deletionProof", proof)), enrolling).andExpect(status().isNoContent());
+        assertFalse(Boolean.TRUE.equals(redis.hasKey(GoogleAuth.key(outstanding.id()))));
+        DeletionReceipts.Status confirmed = deletionStatus(proof);
+        assertEquals(original.userId(), confirmed.userId());
+        assertEquals(DeletionReceipts.State.DELETED, confirmed.state());
+        GoogleAuth.Challenge erased = google.challenge(new GoogleAuth.Start(null, original.userId()));
+        ApiException missing = assertThrows(ApiException.class, () -> google.signIn(new GoogleAuth.SignIn(erased.id(), "synthetic-id-token".repeat(8))));
+        assertEquals(org.springframework.http.HttpStatus.UNAUTHORIZED, missing.status);
+        assertEquals("authentication_failed", missing.getMessage());
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM accounts WHERE google_subject='synthetic-existing-only-subject'", Integer.class));
+        assertEquals(confirmed, deletionStatus(proof));
+        GoogleAuth.Challenge explicitSignup = google.challenge(new GoogleAuth.Start(null));
+        AuthService.Token newAccount = google.signIn(new GoogleAuth.SignIn(explicitSignup.id(), "synthetic-id-token".repeat(8))).session();
+        assertNotEquals(original.userId(), newAccount.userId());
+        GoogleAuth.Challenge oldPartition = google.challenge(new GoogleAuth.Start(null, original.userId()));
+        assertThrows(ApiException.class, () -> google.signIn(new GoogleAuth.SignIn(oldPartition.id(), "synthetic-id-token".repeat(8))));
+        assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM accounts", Integer.class));
+        assertEquals(AccountDirectory.UserType.USER, directory.accountType(newAccount.userId()).userType());
+    }
 
     static final class TestVault implements SecureVault {
         private Map<String, byte[]> values = new HashMap<>();

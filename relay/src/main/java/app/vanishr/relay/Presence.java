@@ -62,6 +62,8 @@ public class Presence {
         if (update.typingTo() == null && update.typingForMillis() != 0
                 || update.typingTo() != null && (!recipients.contains(update.typingTo()) || update.typingForMillis() == 0))
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_presence");
+        List<Peer> permitted = update.contacts().stream().filter(peer -> accounts.canInteract(actor.userId(), peer.userId())).toList();
+        UUID typingTo = permitted.stream().anyMatch(peer -> peer.userId().equals(update.typingTo())) ? update.typingTo() : null;
         String key = "presence:" + actor.deviceId();
         String connectionId = realtime.connection(actor);
         if (connectionId == null) { redis.delete(key); return List.of(); }
@@ -71,27 +73,27 @@ public class Presence {
         if (!auth.activeSession(sessionKey, actor)) throw new ApiException(HttpStatus.UNAUTHORIZED, "authentication_required");
         Peer owner = new Peer(identity.userId(), identity.deviceId(), identity.identityKey());
         long now = clock.millis();
-        State state = new State(owner, List.copyOf(update.contacts()), connectionId, sessionKey,
-                update.typingTo(), now + update.typingForMillis(), now + LIFETIME);
+        State state = new State(owner, permitted, connectionId, sessionKey,
+                typingTo, typingTo == null ? now : now + update.typingForMillis(), now + LIFETIME);
         String encoded;
         String recent = "";
         try {
             encoded = json.writeValueAsString(state);
-            if (update.lastSeen() && !update.contacts().isEmpty()) recent = json.writeValueAsString(new LastSeen(
+            if (update.lastSeen() && !permitted.isEmpty()) recent = json.writeValueAsString(new LastSeen(
                 owner, state.contacts(), deviceVersion, now, now + LAST_SEEN_LIFETIME));
         }
         catch (Exception failure) { throw new IllegalStateException("Presence serialization failed"); }
         if (!Long.valueOf(1).equals(redis.execute(heartbeat, List.of(key, "last-seen:" + actor.deviceId(), sessionKey),
             encoded, Long.toString(LIFETIME), recent, Long.toString(LAST_SEEN_LIFETIME))))
             throw new ApiException(HttpStatus.UNAUTHORIZED, "authentication_required");
-        if (update.contacts().isEmpty()) return List.of();
-        List<String> values = redis.opsForValue().multiGet(update.contacts().stream().map(peer -> "presence:" + peer.deviceId()).toList());
+        if (permitted.isEmpty()) return List.of();
+        List<String> values = redis.opsForValue().multiGet(permitted.stream().map(peer -> "presence:" + peer.deviceId()).toList());
         if (values == null) return List.of();
         List<String> recentValues = update.lastSeen() ? redis.opsForValue().multiGet(
-            update.contacts().stream().map(peer -> "last-seen:" + peer.deviceId()).toList()) : null;
+            permitted.stream().map(peer -> "last-seen:" + peer.deviceId()).toList()) : null;
         List<Status> result = new ArrayList<>();
         for (int index = 0; index < values.size(); index++) {
-            Peer peer = update.contacts().get(index);
+            Peer peer = permitted.get(index);
             Actor peerActor = new Actor(peer.userId(), peer.deviceId());
             if (values.get(index) != null) {
             State peerState;

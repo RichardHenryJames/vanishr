@@ -1,6 +1,9 @@
 #requires -Version 7.4
-param([switch]$InitializeSigningKey, [uri]$RelayOrigin, [switch]$WithInstrumentation, [string]$GoogleServicesFile)
+param([switch]$InitializeSigningKey, [uri]$RelayOrigin, [switch]$WithInstrumentation, [string]$GoogleServicesFile,
+    [switch]$Bundle, [switch]$PlayStore)
 $ErrorActionPreference = 'Stop'
+if ($PlayStore -and -not $Bundle) { throw 'Use -Bundle with -PlayStore; Play installs must use Play-managed updates.' }
+if ($Bundle -and $WithInstrumentation) { throw 'Build instrumentation separately from the signed app bundle.' }
 $root = Split-Path $PSScriptRoot -Parent
 & (Join-Path $PSScriptRoot 'prepare-brand-assets.ps1') -Verify
 $signingDirectory = Join-Path $root '.secrets/android-signing'
@@ -23,7 +26,7 @@ try {
             throw 'Provide an HTTPS relay origin without credentials, path, query or fragment.'
         }
         $env:VANISHR_RELAY_ORIGIN = $RelayOrigin.GetLeftPart([System.UriPartial]::Authority)
-        try { $health = Invoke-RestMethod -Uri "$env:VANISHR_RELAY_ORIGIN/health" -MaximumRedirection 0 }
+        try { $health = Invoke-RestMethod -Uri "$env:VANISHR_RELAY_ORIGIN/health" -MaximumRedirection 0 -TimeoutSec 30 }
         catch { throw 'Relay TLS or health verification failed; no APK was built for this origin.' }
         if ($health.status -ne 'up') { throw 'Relay health verification failed.' }
     }
@@ -49,18 +52,27 @@ try {
     }
     $env:VANISHR_SIGNING_KEYSTORE = $keystore
     $env:VANISHR_SIGNING_PASSWORD = [System.IO.File]::ReadAllText($passwordFile)
-    $buildTasks = @(':app:assembleRelease', ':app:lintRelease')
+    $buildTasks = @("-PplayStore=$($PlayStore.IsPresent.ToString().ToLowerInvariant())",
+        $(if ($Bundle) { ':app:bundleRelease' } else { ':app:assembleRelease' }), ':app:lintRelease')
     if ($WithInstrumentation) { $buildTasks += @('-PtestBuildType=release', ':app:assembleReleaseAndroidTest') }
     & (Join-Path $PSScriptRoot 'build-android.ps1') -Tasks $buildTasks
-    $apk = Join-Path $root 'android/app/build/outputs/apk/release/app-release.apk'
-    if (-not (Test-Path $apk)) { throw 'No signed release APK was produced.' }
-    $signer = Join-Path $env:ANDROID_HOME 'build-tools/36.0.0/apksigner.bat'
-    & $signer verify --verbose --print-certs $apk
-    if ($LASTEXITCODE -ne 0) { throw 'APK signature verification failed.' }
+    $apk = if ($Bundle) { Join-Path $root 'android/app/build/outputs/bundle/release/app-release.aab' }
+        else { Join-Path $root 'android/app/build/outputs/apk/release/app-release.apk' }
+    if (-not (Test-Path $apk)) { throw 'No signed release artifact was produced.' }
+    if ($Bundle) {
+        $signer = Join-Path $env:JAVA_HOME 'bin/jarsigner.exe'
+        $verification = & $signer '-J-Duser.language=en' -verify $apk
+        if ($LASTEXITCODE -ne 0 -or ($verification -join "`n") -notmatch 'jar verified\.') { throw 'AAB signature verification failed.' }
+        Write-Output 'AAB JAR signature verified. Play App Signing and store review still need configuration.'
+    } else {
+        $signer = Join-Path $env:ANDROID_HOME 'build-tools/36.0.0/apksigner.bat'
+        & $signer verify --verbose --print-certs $apk
+        if ($LASTEXITCODE -ne 0) { throw 'APK signature verification failed.' }
+    }
     $size = (Get-Item $apk).Length
     if ($size -gt 95MB) { throw 'The signed APK exceeds the reserved static-download upload budget.' }
     $checksum = (Get-FileHash $apk -Algorithm SHA256).Hash.ToLowerInvariant()
-    Write-Output "Signed APK: $apk"
+    Write-Output "Signed $(if ($Bundle) { 'AAB' } else { 'APK' }): $apk"
     Write-Output "Size: $([math]::Round($size / 1MB, 1)) MiB"
     Write-Output "SHA-256: $checksum"
     if ($env:VANISHR_RELAY_ORIGIN) { Write-Output "Default relay: $env:VANISHR_RELAY_ORIGIN" }

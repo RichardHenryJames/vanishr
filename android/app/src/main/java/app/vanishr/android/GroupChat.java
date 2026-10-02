@@ -51,7 +51,11 @@ final class GroupChat {
         byte[] value=vault.get(key);
         return value==null ? null : JSON.fromJson(new String(value,StandardCharsets.UTF_8),type);
     }
-    private void write(String key, Object value) { vault.put(key,JSON.toJson(value).getBytes(StandardCharsets.UTF_8)); }
+    private void write(String key, Object value) {
+        if (engine.safety().deletionPending() || engine.safety().deletionCompleted())
+            throw new SecurityException("Account deletion prevents further writes");
+        vault.put(key,JSON.toJson(value).getBytes(StandardCharsets.UTF_8));
+    }
     private String path(UUID id) { return "/groups/"+id; }
     private String epochKey(UUID id,UUID epoch) { return id+"/"+epoch; }
     private String validName(String value) {
@@ -60,7 +64,9 @@ final class GroupChat {
     }
 
     List<Conversation> conversations() {
-        return vault.names("group/").stream().map(name -> read(name,Conversation.class)).sorted(Comparator.comparing(Conversation::name)).toList();
+        return vault.names("group/").stream().map(name -> read(name,Conversation.class))
+                .filter(group -> !invited(group) || !engine.safety().isBlocked(group.snapshot().ownerId()))
+                .sorted(Comparator.comparing(Conversation::name)).toList();
     }
     Conversation get(UUID id) { return id==null ? null : read("group/"+id,Conversation.class); }
     boolean owner(Conversation group) { return group.snapshot().ownerId().equals(user()); }
@@ -120,11 +126,13 @@ final class GroupChat {
     }
 
     void invite(UUID id,List<ChatEngine.Peer> peers) throws Exception {
+        engine.safety().refresh();
         Conversation group=Objects.requireNonNull(get(id));
         if (!owner(group) || peers.isEmpty() || peers.size()+group.snapshot().members().size()>200) throw new IllegalArgumentException("Group member limit reached");
         List<GroupRoster.Member> allowed=new ArrayList<>(Arrays.asList(read("group-allowed/"+id,GroupRoster.Member[].class)));
         List<ChatEngine.Contact> contacts=new ArrayList<>();
         for (ChatEngine.Peer peer : peers) {
+            engine.safety().requireAllowed(peer.userId());
             if (!engine.peers().contains(peer) || !engine.independentlyVerified(peer.userId())) throw new SecurityException("Verify the invited contact first");
             contacts.add(new ChatEngine.Contact(peer.userId(),peer.deviceId(),peer.identityKey()));
             allowed.removeIf(member -> member.userId().equals(peer.userId())); allowed.add(new GroupRoster.Member(peer.userId(),peer.deviceId(),peer.identityKey()));
@@ -136,8 +144,20 @@ final class GroupChat {
 
     private ChatEngine.Peer verifiedOwner(Snapshot group) {
         Member owner=group.member(group.ownerId());
-        return engine.peers().stream().filter(peer -> engine.independentlyVerified(peer.userId()) && peer.userId().equals(owner.userId()) && peer.deviceId().equals(owner.deviceId()) && peer.identityKey().equals(owner.identityKey()))
-                .findFirst().orElseThrow(() -> new SecurityException("Verify the group owner first"));
+        ChatEngine.Peer contact=engine.peers().stream().filter(peer -> engine.independentlyVerified(peer.userId()) && peer.userId().equals(owner.userId()) && peer.deviceId().equals(owner.deviceId()) && peer.identityKey().equals(owner.identityKey()))
+                .findFirst().orElse(null);
+        if (contact!=null) return contact;
+        if (engine.safety().isBlocked(owner.userId()) && group.member(user()).state().equals("ACTIVE")) {
+            // Blocking hides content, but an already approved group retains its exact owner identity.
+            for (String name : vault.names("group-approval/"+group.id()+"/")) {
+                Approval accepted=read(name,Approval.class);
+                if ((accepted.expiresAt()>System.currentTimeMillis() || accepted.roster().epoch().equals(group.epoch()))
+                        && accepted.roster().ownerId().equals(owner.userId()) && accepted.roster().revision()<=group.revision()
+                        && accepted.roster().member(owner.userId()).equals(owner.identity()))
+                    return new ChatEngine.Peer(owner.userId(),owner.deviceId(),owner.identityKey(),owner.name(),owner.handle(),owner.displayName());
+            }
+        }
+        throw new SecurityException("Verify the group owner first");
     }
     boolean ownerVerified(Conversation group) { try { verifiedOwner(group.snapshot()); return true; } catch (SecurityException failure) { return false; } }
     void accept(UUID id) throws Exception {
@@ -164,7 +184,10 @@ final class GroupChat {
         api().call("DELETE",path(id)+"?revision="+group.snapshot().revision(),null,Void.class); forget(id);
     }
     void forget(UUID id) throws Exception {
-        for (ChatEngine.Entry entry : engine.entries(id)) engine.erase(entry,null);
+        for (String name : vault.names("entry/")) {
+            ChatEngine.Entry entry=read(name,ChatEngine.Entry.class);
+            if (entry.groupEpoch()!=null && id.equals(entry.peerId())) engine.erase(entry,null);
+        }
         vault.transaction(() -> {
             vault.remove("group/"+id); vault.remove("group-title/"+id); vault.remove("group-allowed/"+id); vault.remove("group-invitation/"+id);
             for (String prefix : List.of("group-approval/","group-signal/","group-key/","group-mark/","group-packet/","group-distribution/")) for (String name : vault.names(prefix+id+"/")) vault.remove(name);
@@ -172,6 +195,16 @@ final class GroupChat {
             for (String name : vault.names("group-control-out/")) if (read(name,QueuedControl.class).groupId().equals(id)) vault.remove(name);
             return null;
         });
+    }
+
+    void discardBlockedControls(UUID peerId) {
+        for (String name : vault.names("group-control-out/")) {
+            QueuedControl queued=read(name,QueuedControl.class);
+            if (peerId.equals(queued.packet().recipientId())) {
+                vault.remove(name);
+                vault.remove(queued.marker().replace("group-mark/","group-packet/"));
+            }
+        }
     }
 
     private void approveOwner(Snapshot group) throws Exception {
@@ -183,6 +216,7 @@ final class GroupChat {
         for (GroupRoster.Member member : roster.members()) if (!verified.contains(member)) throw new SecurityException("Unapproved member in group");
         for (Member member : group.members()) {
             if (member.userId().equals(user())) continue;
+            if (engine.safety().isBlocked(member.userId()) && verified.contains(member.identity())) continue;
             if (!verified.contains(member.identity()) || engine.peers().stream().noneMatch(peer -> engine.independentlyVerified(peer.userId()) && peer.userId().equals(member.userId()) && peer.deviceId().equals(member.deviceId()) && peer.identityKey().equals(member.identityKey())))
                 throw new SecurityException("Group member verification changed");
         }
@@ -201,7 +235,7 @@ final class GroupChat {
         });
     }
 
-    private SignalGroup cipher(UUID group,UUID epoch) { return new SignalGroup(vault,group,epoch,user()); }
+    private SignalGroup cipher(UUID group,UUID epoch) { return new SignalGroup(vault.accountVault(engine.account()),group,epoch,user()); }
     private byte[] distribution(Snapshot group) throws Exception {
         String key="group-distribution/"+epochKey(group.id(),group.epoch());
         Distribution saved=read(key,Distribution.class);
@@ -223,7 +257,7 @@ final class GroupChat {
         List<Planned> planned=new ArrayList<>();
         String base="group-mark/"+epochKey(snapshot.id(),snapshot.epoch())+"/";
         for (Member member : snapshot.members()) {
-            if (member.userId().equals(user())) continue;
+            if (member.userId().equals(user()) || engine.safety().isBlocked(member.userId())) continue;
             String kind=member.state().equals("INVITED") ? "INVITE" : "ROSTER";
             if (owner && !marked(base+kind+"/"+member.userId())) planned.add(new Planned(member,kind,base+kind+"/"+member.userId()));
             if (member.state().equals("ACTIVE") && !marked(base+"KEY/"+member.userId())) planned.add(new Planned(member,"KEY",base+"KEY/"+member.userId()));
@@ -273,6 +307,10 @@ final class GroupChat {
     }
 
     private void flushControls(Snapshot snapshot) throws Exception {
+        vault.transaction(() -> {
+            for (UUID peerId : engine.safety().blockedUsers()) discardBlockedControls(peerId);
+            return null;
+        });
         List<QueuedControl> pending=vault.names("group-control-out/").stream().map(name -> read(name,QueuedControl.class))
                 .filter(item -> item.groupId().equals(snapshot.id()) && item.packet().epoch().equals(snapshot.epoch()) && item.packet().expiresAt()>System.currentTimeMillis()).limit(32).toList();
         if (pending.isEmpty()) return;
@@ -305,6 +343,7 @@ final class GroupChat {
         if (!sender.deviceId().equals(packet.senderDeviceId())) throw new SecurityException("Group sender device changed");
         signal().verifyPeer(sender.userId(),Base64.getDecoder().decode(sender.identityKey()));
         vault.transaction(() -> {
+            engine.safety().requireNotDeleting();
             byte[] plaintext=signal().decrypt(sender.userId(),new SignalClient.Packet(packet.type(),packet.ciphertext()));
             try {
                 ControlBody body=JSON.fromJson(new String(plaintext,StandardCharsets.UTF_8),ControlBody.class);
@@ -342,6 +381,7 @@ final class GroupChat {
     }
 
     void sync() throws Exception {
+        engine.safety().requireNotDeleting();
         if (!supported) return;
         Snapshot[] snapshots;
         try { snapshots=api().call("GET","/groups",null,Snapshot[].class); }
@@ -390,6 +430,7 @@ final class GroupChat {
     }
 
     void send(UUID groupId,String text,byte[] image,ChatEnvelope.Expiry expiry,UUID id,long createdAt,Runnable stored) throws Exception {
+        engine.safety().refresh();
         engine.purge();
         Snapshot current=api().call("GET",path(groupId),null,Snapshot.class); snapshot(current);
         if (current.ownerId().equals(user())) approveOwner(current);
@@ -405,6 +446,7 @@ final class GroupChat {
         try {
             envelope.verify(groupId,current.epoch(),current.revision(),id,user(),engine.account().deviceId(),expiry,deadline,mediaId,Instant.now());
             vault.transaction(() -> {
+                engine.safety().requireNotDeleting();
                 SignalGroup cipher=cipher(groupId,current.epoch());
                 byte[] distribution=distribution(current); Arrays.fill(distribution,(byte)0);
                 byte[] plaintext=JSON.toJson(envelope).getBytes(StandardCharsets.UTF_8);
@@ -441,20 +483,39 @@ final class GroupChat {
     }
 
     private void receive(Snapshot current,Message message) throws Exception {
-        if (message.expiresAt()<=System.currentTimeMillis() || marked("seen/"+message.id()) || vault.names("entry/").size()>=100) return;
+        boolean blocked=engine.safety().isBlocked(message.senderId());
+        if (message.expiresAt()<=System.currentTimeMillis() || marked("seen/"+message.id())
+                || !blocked && vault.names("entry/").size()>=100) return;
         if (!current.id().equals(message.groupId())) throw new SecurityException("Group routing changed");
+        if (message.id()==null || message.expiresAt()>System.currentTimeMillis()+86_400_000L)
+            throw new SecurityException("Invalid group message deadline");
         Approval approval=approval(message.groupId(),message.epoch());
-        if (approval==null || approval.roster().revision()!=message.revision()) return;
+        if (approval==null || approval.roster().revision()!=message.revision()) {
+            if (blocked) vault.transaction(() -> { discardBlockedMessage(message); return null; });
+            return;
+        }
         GroupRoster.Member sender=approval.roster().member(message.senderId());
         if (!sender.deviceId().equals(message.senderDeviceId()) || !approval.roster().member(user()).deviceId().equals(engine.account().deviceId())) throw new SecurityException("Group device changed");
-        if (vault.get("group-key/"+epochKey(message.groupId(),message.epoch())+"/"+sender.userId())==null) return;
-        byte[] imageCiphertext=message.mediaId()==null ? null : api().groupMedia(message.groupId(),message.id());
+        if (vault.get("group-key/"+epochKey(message.groupId(),message.epoch())+"/"+sender.userId())==null) {
+            if (blocked) vault.transaction(() -> { discardBlockedMessage(message); return null; });
+            return;
+        }
+        byte[] imageCiphertext=blocked || message.mediaId()==null ? null : api().groupMedia(message.groupId(),message.id());
         try {
             vault.transaction(() -> {
+                engine.safety().requireNotDeleting();
                 byte[] plaintext=cipher(message.groupId(),message.epoch()).decrypt(sender.userId(),message.ciphertext());
                 try {
                     GroupEnvelope envelope=JSON.fromJson(new String(plaintext,StandardCharsets.UTF_8),GroupEnvelope.class);
                     envelope.verify(message.groupId(),message.epoch(),message.revision(),message.id(),sender.userId(),sender.deviceId(),message.expiry(),message.expiresAt(),message.mediaId(),Instant.now());
+                    if (blocked || engine.safety().isBlocked(sender.userId())) {
+                        if (envelope.content().image()!=null) {
+                            Arrays.fill(envelope.content().image().key(),(byte)0);
+                            Arrays.fill(envelope.content().image().nonce(),(byte)0);
+                        }
+                        discardBlockedMessage(message);
+                        return null;
+                    }
                     byte[] image=imageCiphertext==null ? null : ImageCipher.decrypt(message.mediaId(),imageCiphertext,envelope.content().image().key(),envelope.content().image().nonce());
                     ChatEngine.Entry entry=new ChatEngine.Entry(message.id(),message.groupId(),message.expiresAt(),message.expiry(),false,image!=null,"DELIVERED",user(),message.epoch(),message.revision(),sender.userId());
                     try { engine.storeContent(entry,new ChatEngine.Content(envelope.content(),image)); } finally { if (image!=null) Arrays.fill(image,(byte)0); }
@@ -465,12 +526,18 @@ final class GroupChat {
             });
         } catch (Exception failure) { AndroidVault.deleteContentKey(message.expiresAt(),message.id(),user()); throw failure; }
     }
+    private void discardBlockedMessage(Message message) {
+        vault.put("seen/"+message.id(),Long.toString(message.expiresAt()).getBytes(StandardCharsets.US_ASCII));
+        write("group-ack/"+message.id(),new Ack(message.groupId(),message.id(),message.expiresAt(),"delete"));
+    }
     void acknowledge(ChatEngine.Entry entry,String action) { write("group-ack/"+entry.id(),new Ack(entry.peerId(),entry.id(),entry.expiresAt(),action)); }
     private void flushAcks(UUID group) throws Exception {
         for (String name : vault.names("group-ack/")) {
             Ack ack=read(name,Ack.class); if (!ack.groupId().equals(group)) continue;
             try { api().call("POST",path(group)+"/messages/"+ack.id()+"/"+ack.action(),null,Void.class); }
-            catch (RelayApi.ApiFailure failure) { if (failure.status!=404 && failure.status!=410) throw failure; }
+            catch (RelayApi.ApiFailure failure) {
+                if (failure.status!=404 && failure.status!=410 && !(failure.status==403 && ack.action().equals("delete"))) throw failure;
+            }
             vault.transaction(() -> { vault.remove(name); return null; });
         }
         for (String name : vault.names("group-control-ack/")) {
