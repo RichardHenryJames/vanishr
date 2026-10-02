@@ -7,8 +7,10 @@ messenger. Do not use it for real sensitive conversations yet.**
 
 ## Hosted Development Build
 
-Download the signed Android 0.4.7 APK, matching application/libsignal source and
+Download the currently published signed Android APK, matching application/libsignal source and
 license notices at **https://vanishr-download.vercel.app**.
+The public [update feed](https://vanishr-download.vercel.app/updates.json), not
+the latest Git version, determines which release users can download and discover.
 
 Release **0.4.7/code 28** keeps the 0.4.6 Play-safety controls and makes official
 administrator onboarding bilateral: every enrolled account appears in the
@@ -227,6 +229,9 @@ reports can include the deployment's consented QA visit/download event.
 For a website-only rebuild, [scripts/prepare-website.ps1](scripts/prepare-website.ps1)
 requires the locally audited, published app release and writes a separate
 `.tools/vercel-website-<version>` stage without changing its APK, source or feed.
+See the [manual deployment guide](docs/DEPLOYMENT-GUIDE.md) for the Terms-page
+and native-popup source locations, new app versions, Vercel production uploads,
+website-only releases and public update-feed verification.
 The shared [renderer](scripts/render-website.ps1) also runs from future app release
 packaging. Public Google IDs belong in [download/site-settings.json](download/site-settings.json),
 never credentials. Upload only the audited generated stage, not the templates or

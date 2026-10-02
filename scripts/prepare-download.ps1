@@ -65,7 +65,7 @@ $sourcePaths = @('LICENSE', 'NOTICE.md', 'README.md', 'pom.xml', '.gitignore', '
     'Vanishr Icon.png', 'scripts/prepare-brand-assets.ps1',
     'android/build.gradle', 'android/settings.gradle', 'android/gradle.properties', 'android/app/build.gradle', 'android/app/proguard-rules.pro',
     'android/app/src', 'client-core/pom.xml', 'client-core/build.gradle', 'client-core/src', 'relay/pom.xml', 'relay/src',
-    'docs/API.md', 'docs/ARCHITECTURE.md', 'docs/ENCRYPTION.md', 'docs/THREAT-MODEL.md', 'docs/VERIFICATION.md', 'docs/GOOGLE-SETUP.md', 'docs/PLAY-STORE.md',
+    'docs/API.md', 'docs/ARCHITECTURE.md', 'docs/ENCRYPTION.md', 'docs/THREAT-MODEL.md', 'docs/VERIFICATION.md', 'docs/GOOGLE-SETUP.md', 'docs/PLAY-STORE.md', 'docs/DEPLOYMENT-GUIDE.md',
     'infra/Dockerfile', 'infra/compose.yml', 'infra/compose.low-memory.yml', 'infra/pg_hba.conf', 'infra/postgres-entrypoint.sh',
     'scripts/build-android.ps1', 'scripts/new-local-config.ps1', 'scripts/package-apk.ps1', 'scripts/start-local.ps1', 'scripts/test-android.ps1',
     'scripts/test-release.ps1', 'scripts/prepare-ui-assets.ps1', 'scripts/verify.ps1', 'scripts/read-google-config.ps1', 'scripts/prepare-download.ps1',
