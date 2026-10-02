@@ -30,7 +30,7 @@ $consentPanel = @'
 '@
 $verification = if ($settings.googleSiteVerification) { '<meta name="google-site-verification" content="' + [System.Net.WebUtility]::HtmlEncode($settings.googleSiteVerification) + '">' } else { '' }
 $analyticsStatus = if ($settings.ga4MeasurementId) { 'Optional Google Analytics is available on this website. It is disabled until you give consent.' } else { 'Google Analytics is not configured on this website yet. No Google Analytics requests are sent.' }
-$accountControlsNote = if ($feed.versionCode -lt 27) { "The download offered here is $version. In-app account deletion, blocking and reporting are being prepared for 0.4.6 (code 27); those controls are not in 0.4.5. Use the email routes on these pages if the controls are unavailable." } else { 'In-app account deletion, blocking and reporting require version 0.4.6 (code 27) or later and the matching updated relay. Use the email routes on these pages if the controls are unavailable.' }
+$accountControlsNote = if ($feed.versionCode -lt 27) { "The download offered here is $version. In-app account deletion, blocking and reporting are being prepared for 0.4.7 (code 27); those controls are not in 0.4.5. Use the email routes on these pages if the controls are unavailable." } else { 'In-app account deletion, blocking and reporting require version 0.4.7 (code 27) or later and the matching updated relay. Use the email routes on these pages if the controls are unavailable.' }
 $replacements = [ordered]@{
     '__VERSION__' = $version
     '__VERSION_CODE__' = [string]$feed.versionCode

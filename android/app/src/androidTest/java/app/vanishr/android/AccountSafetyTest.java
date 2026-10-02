@@ -1168,7 +1168,7 @@ public class AccountSafetyTest {
 
     @Test public void blockAndTermsSettingsStayInsideTheirEncryptedAccountPartition() throws Exception {
         verifiedPeer();
-        engine.safety().acceptTerms("candidate0.4.6");
+        engine.safety().acceptTerms("candidate0.4.7");
         engine.safety().block(peer);
         vault.saveAccount(userId);
         engine.close();
@@ -1177,7 +1177,7 @@ public class AccountSafetyTest {
         vault.transaction(() -> { write("account", account(other, UUID.randomUUID(), "other")); return null; });
         engine = new ChatEngine(vault);
         assertFalse(engine.safety().isBlocked(peerId));
-        assertFalse(engine.safety().termsAccepted("candidate0.4.6"));
+        assertFalse(engine.safety().termsAccepted("candidate0.4.7"));
         engine.safety().acceptTerms("other-version");
         vault.saveAccount(other);
         engine.close();
@@ -1185,7 +1185,7 @@ public class AccountSafetyTest {
         assertTrue(vault.restoreAccount(userId));
         engine = new ChatEngine(vault);
         assertTrue(engine.safety().isBlocked(peerId));
-        assertTrue(engine.safety().termsAccepted("candidate0.4.6"));
+        assertTrue(engine.safety().termsAccepted("candidate0.4.7"));
         assertFalse(engine.safety().termsAccepted("other-version"));
         assertNotNull(vault.get(AndroidVault.savedAccountPrefix(other) + "terms-version"));
     }

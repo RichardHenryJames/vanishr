@@ -1,17 +1,17 @@
-# Google Play readiness: candidate 0.4.7
+# Google Play readiness: candidate 0.4.8
 
 Status: **DRAFT / NOT READY TO SUBMIT**. Reviewed against the working tree and
-official Google guidance on 2 October 2026. The candidate is **0.4.7, code 28**;
-the current public development release remains **0.4.6, code 27** until the
-0.4.7 artifacts and matching schema-10 relay are published. A locally built
+official Google guidance on 2 October 2026. The candidate is **0.4.8, code 28**;
+the current public development release remains **0.4.7, code 27** until the
+0.4.8 artifacts and matching schema-10 relay are published. A locally built
 bundle, public policy page, passing test or completed checklist is not Google
 Play approval, legal certification or an independent security audit.
 
 ### Implementation and publication update
 
-The currently published development release is **0.4.6/code 27** on the public
+The currently published development release is **0.4.7/code 27** on the public
 download site, with the matching schema-9 relay and
-app/privacy/deletion/Terms pages. Candidate **0.4.7/code 28** adds bilateral
+app/privacy/deletion/Terms pages. Candidate **0.4.8/code 28** adds bilateral
 official-admin chat-list enrollment and requires the schema-10 relay.
 The final Play-specific AAB passed signing and official bundle validation;
 54 targeted Android tests, 42 relay/provider tests, six unit tests and live
@@ -176,7 +176,7 @@ transfer. The service is not automatically restarted after force-stop.
 
 ## Account deletion and safety contract gates
 
-The following is the **0.4.6 implemented contract**, verified with the matching
+The following is the **0.4.7 implemented contract**, verified with the matching
 schema-9 relay. The earlier 0.4.5 client does not expose its controls. Read the
 [API](API.md), relay implementation and integrated client tests.
 
@@ -333,7 +333,7 @@ versions/configurations distributed through Play, not just one test run.
 ## Signing, packaging and distribution
 
 - [x] [build.gradle](../android/app/build.gradle) defines the candidate as
-  `0.4.7` / `28` and supports `-PplayStore=true` (default `false`).
+  `0.4.8` / `28` and supports `-PplayStore=true` (default `false`).
   [MainActivity](../android/app/src/main/java/app/vanishr/android/MainActivity.java)
   uses that flag to skip external APK-feed checks and prompts; the manual update
   action opens the Google Play URL for `app.vanishr.android` instead.
@@ -346,7 +346,7 @@ versions/configurations distributed through Play, not just one test run.
   [deletion](../download/delete-account/) template directories in its source
   archive allowlist. Verify the actual generated archive when packaging; this
   does not alter the immutable 0.4.5 source archive.
-- [ ] Confirm candidate `app.vanishr.android`, version **0.4.7 / 28**, target SDK
+- [ ] Confirm candidate `app.vanishr.android`, version **0.4.8 / 28**, target SDK
   and release manifest from [build.gradle](../android/app/build.gradle) and the
   final signed AAB, not from a debug/QA build. Packaging is a separate workstream.
 - [ ] The original/current sideload signing certificate SHA-256 is
@@ -437,7 +437,7 @@ Run [render-website.ps1](../scripts/render-website.ps1) with `-Stage` pointing t
 the new directory, not the immutable source stage.
 
 - [x] Confirm six rendered pages with no unresolved placeholders, correct
-  0.4.5 download links and a clear 0.4.6 candidate-controls notice.
+  0.4.5 download links and a clear 0.4.7 candidate-controls notice.
 - [x] Parse the HTML/JSON-LD, verify local links/fragments/assets, all navigation
   menus, sitemap coverage, canonical URLs and mobile layout. The static redirect
   configuration and local emulation passed; deployed Vercel behavior is untested.

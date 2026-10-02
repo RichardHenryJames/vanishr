@@ -12,12 +12,12 @@ license notices at **https://vanishr-download.vercel.app**.
 The public [update feed](https://vanishr-download.vercel.app/updates.json), not
 the latest Git version, determines which release users can download and discover.
 
-Release **0.4.7/code 28** keeps the 0.4.6 Play-safety controls and makes official
+Release **0.4.8/code 28** keeps the 0.4.7 Play-safety controls and makes official
 administrator onboarding bilateral: every enrolled account appears in the
 administrator's chat list during background sync before either side sends a
 message.
 
-Release **0.4.6/code 27** adds fresh-authentication account deletion with
+Release **0.4.7/code 27** adds fresh-authentication account deletion with
 interrupted-request recovery, server-side blocking, metadata-only safety reports,
 Terms acknowledgement and public app/privacy/deletion resources. The signed Play
 AAB disables sideload update prompts; the direct-download APK retains its usual
@@ -26,7 +26,7 @@ Remote Photos behavior still requires Google's consent/permission review, and
 the account holder must complete [Play submission gates](docs/PLAY-STORE.md).
 The relay, public APK and policy pages are published; 54 targeted Android tests,
 42 server tests, six update unit tests and live synthetic safety checks passed.
-See [0.4.6 verification](docs/VERIFICATION.md#release-046--play-candidate).
+See [0.4.7 verification](docs/VERIFICATION.md#release-046--play-candidate).
 
 Release 0.4.5/code 26 adds the Vanishr logo (launcher and themed icon,
 notification icon, app headers, website favicon and social preview) and an

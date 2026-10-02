@@ -3,9 +3,9 @@
 Evidence refreshed on Windows, 2026-10-02. This is a development foundation,
 not a production security assessment or independent audit.
 
-## Release 0.4.7 / bilateral administrator onboarding
+## Release 0.4.8 / bilateral administrator onboarding
 
-- Version 0.4.7/code 28 makes the server-authorized official-administrator
+- Version 0.4.8/code 28 makes the server-authorized official-administrator
   relationship visible on both sides before either participant sends a message.
   The client now persists validated introductions for the administrator as well
   as ordinary users. Background refresh always starts with the newest page, and
@@ -31,8 +31,8 @@ not a production security assessment or independent audit.
 - Final Play AAB: 45,734,605 bytes, SHA-256
   `96157d0c7e5da80be34a93a55c1cb1383f39c389bbf5e4ffee52318954bf55c8`.
   JAR signature verification and official bundletool validation passed;
-  bundletool reported version code 28 and version name 0.4.7.
-- The static 0.4.7 candidate contains 31 files / 59,602,665 bytes. Both the
+  bundletool reported version code 28 and version name 0.4.8.
+- The static 0.4.8 candidate contains 31 files / 59,602,665 bytes. Both the
   staged files and 469-entry source archive were checked for secret, signing-key
   and deployment-state paths with no matches. Vercel publication is **pending**:
   the Vercel CLI and a direct request to the public Vercel origin both hung from
@@ -42,9 +42,9 @@ not a production security assessment or independent audit.
   were therefore built without configured FCM/Google sign-in client values;
   those provider features are not claimed ready in this release.
 
-## Release 0.4.6 / Play candidate
+## Release 0.4.7 / Play candidate
 
-- Version 0.4.6/code 27 implements fresh-authentication account deletion,
+- Version 0.4.7/code 27 implements fresh-authentication account deletion,
   owner-only blocked accounts, server-enforced direct-contact blocking,
   metadata-only user/message reports, pinned-admin review, explicit Terms
   acknowledgement and in-app privacy/deletion/support links. Account deletion
@@ -100,9 +100,9 @@ not a production security assessment or independent audit.
   ownership-verification of email requests, mailbox-retention practices, account
   testing eligibility, Play App Signing configuration or Google/Firebase signer
   registration. See [Play submission checklist](PLAY-STORE.md).
-- Evidence: `.tools/play-safety-0.4.6-verified-native.txt`,
+- Evidence: `.tools/play-safety-0.4.7-verified-native.txt`,
   `.tools/play-safety-host-after.json`, `.tools/play-safety-relay-artifact.json`,
-  `.tools/play-store-0.4.6/validation.json`, current Surefire reports, and the
+  `.tools/play-store-0.4.7/validation.json`, current Surefire reports, and the
   sanitized live smoke/website evidence in the session workspace. No full
   Android suite, physical-phone acceptance or independent security audit is
   claimed.
@@ -117,9 +117,9 @@ not a production security assessment or independent audit.
   are publicly accessible without app installation or login. Initial alias
   propagation briefly returned the old home page; the complete retry passed.
   This is website/APK publication, not a Google Play upload or approval.
-  Evidence: `.tools/distribution-audit-0.4.6.json`,
-  `.tools/public-release-verification-0.4.6.json` and
-  `.tools/public-website-verification-0.4.6.json`.
+  Evidence: `.tools/distribution-audit-0.4.7.json`,
+  `.tools/public-release-verification-0.4.7.json` and
+  `.tools/public-website-verification-0.4.7.json`.
   Publication-status documentation updates postdate the immutable source ZIP;
   the signed binaries and archived source were not silently repackaged.
 

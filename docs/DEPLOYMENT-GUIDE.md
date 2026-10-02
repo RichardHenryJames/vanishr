@@ -60,8 +60,8 @@ wires the check and the **Update available / Download / Later** prompt.
 - Play builds use **Open Google Play**, not this external APK updater.
   Publishing to Vercel does not update a Play listing or roll out a Play AAB.
 
-If the public feed still says `0.4.6`, direct-download users cannot discover
-`0.4.7`, even if the newer binary exists on your computer or its code is on GitHub.
+If the public feed still says `0.4.7`, direct-download users cannot discover
+`0.4.8`, even if the newer binary exists on your computer or its code is on GitHub.
 Do not change only the website label or only the feed: publish the matching
 signed APK, feed, source archive, notices and pages together.
 
@@ -92,10 +92,10 @@ $VersionCode = 29
 
 `0.4.8/code 29` is an **example**, not a release made by these instructions.
 Choose a code above every previously distributed or Play-uploaded code.
-The current source at the time of writing is `0.4.7/code 28`.
+The current source at the time of writing is `0.4.8/code 28`.
 
-**To publish the already-built 0.4.7 instead:** set `$Version = '0.4.7'` and
-`$VersionCode = 28`, use `.tools\vercel-download-0.4.7`, and start at section 5.
+**To publish the already-built 0.4.8 instead:** set `$Version = '0.4.8'` and
+`$VersionCode = 28`, use `.tools\vercel-download-0.4.8`, and start at section 5.
 Re-audit it; do not rebuild or silently replace that version's signed artifacts.
 Review its recorded [release limitations](VERIFICATION.md#release-047--bilateral-administrator-onboarding)
 first, including the absent Google/Firebase client configuration.
@@ -247,7 +247,7 @@ files. The preparation/publication scripts do **not** automatically create both:
 | `.tools\public-release-verification-<version>.json` | `version`, `apkSha256`, `signingIdentityMatches`. Also record the real deployment ID, time and verification results. |
 
 Create these records only from completed inspection and public verification.
-See the existing local 0.4.6 records for their full structure. Do not copy an old
+See the existing local 0.4.7 records for their full structure. Do not copy an old
 version's hashes or set success flags just to bypass the website guard.
 Missing evidence means the publication/audit must be verified first.
 
@@ -352,8 +352,8 @@ serves that release.
 
 If the CLI hangs or you interrupt it, inspect the project's Deployments page
 before retrying; a server-side deployment may already exist. Never mark a
-stalled attempt as published. A dashboard **Redeploy** of the old 0.4.6
-deployment reuses its old files; it does not upload your local 0.4.7 folder.
+stalled attempt as published. A dashboard **Redeploy** of the old 0.4.7
+deployment reuses its old files; it does not upload your local 0.4.8 folder.
 
 ## 7. Verify the actual public release, without login
 
@@ -489,7 +489,7 @@ an APK/AAB, redeploy Azure or advertise a new app update just for a web edit.
 
 | Symptom | Check |
 | --- | --- |
-| App still sees 0.4.6 after building 0.4.7 | Fetch the production `updates.json`. Publish the audited 0.4.7 stage, not just Git changes or the relay. |
+| App still sees 0.4.7 after building 0.4.8 | Fetch the production `updates.json`. Publish the audited 0.4.8 stage, not just Git changes or the relay. |
 | A preview URL has the new version but production does not | Verify team/project, `--prod`, deployment Ready state and production domain assignment; then recheck the fixed origin. |
 | Feed is new but no automatic popup appears immediately | Automatic checks are daily and prompts can be deferred. Use the manual check while foregrounded; verify installed code, Android compatibility and direct-vs-Play build. |
 | App says it cannot check right now | Verify HTTPS, HTTP 200 without redirects, JSON content type, the strict feed shape and network access. Do not disable TLS checks. |
