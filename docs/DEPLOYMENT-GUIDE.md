@@ -95,7 +95,7 @@ Choose a code above every previously distributed or Play-uploaded code.
 The current source at the time of writing is `0.4.8/code 28`.
 
 **To publish the already-built 0.4.8 instead:** set `$Version = '0.4.8'` and
-`$VersionCode = 28`, use `.tools\vercel-download-0.4.8`, and start at section 5.
+`$VersionCode = 29`, use `.tools\vercel-download-0.4.8`, and start at section 5.
 Re-audit it; do not rebuild or silently replace that version's signed artifacts.
 Review its recorded [release limitations](VERIFICATION.md#release-047--bilateral-administrator-onboarding)
 first, including the absent Google/Firebase client configuration.
