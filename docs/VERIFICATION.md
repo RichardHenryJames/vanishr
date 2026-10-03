@@ -5,7 +5,7 @@ not a production security assessment or independent audit.
 
 ## Release 0.5.1 / restore Google sign-in configuration
 
-- Candidate `0.5.1` / code `32` restores the existing Google/Firebase Android
+- Published `0.5.1` / code `32` restores the existing Google/Firebase Android
   client settings omitted from the 0.5.0 APK and Play bundle. The earlier
   "Google sign-in is not configured for this build yet" message was triggered
   locally by the empty compiled Web OAuth client ID, before contacting Google.
@@ -27,7 +27,36 @@ not a production security assessment or independent audit.
   missing Web OAuth, rejected server credentials, misspelled/conflicting options
   and environment restoration. The fixtures use no real signing credentials,
   network requests or Android builds.
-- Signed builds, bundle verification and public publication are pending.
+- Both final signed artifacts passed compilation, R8 and release lint. The actual
+  APK and AAB DEX contain the validated Google/Firebase client values, checked
+  without displaying them. The direct APK retains the website updater; the Play
+  AAB retains its Play listing action and excludes the external APK updater.
+  The original release/upload certificate is unchanged.
+- Direct APK: 44,438,025 bytes, SHA-256
+  `66bc5048ef87b6c7a5dafbff40262bf8f5e368aca1bd8e33918b27b64d7452ea`.
+  Play AAB: 45,741,102 bytes, SHA-256
+  `1783680526344f02e12be100384f5e6d49d70149b6b0b16f8347bc20ccb121d7`.
+  The AAB passed official checksum-verified bundletool validation, actual
+  package/version/minimum-28/target-36 manifest checks, signer/notices checks
+  and 16-KiB packaging/load-segment alignment for all four 64-bit native libraries.
+  The versioned AAB and its verification record are in `.tools/play-store-0.5.1`.
+- Source commit: `15f9dd76e3bc423883d2d3f5f7a3a9068dbad10e`.
+  The inspected static stage contains 31 files / 59,621,007 bytes and a
+  438-entry corresponding-source ZIP. Client JSON, server credentials, signing
+  material and private deployment files were excluded; no credential-content
+  markers were found. Source ZIP SHA-256:
+  `c03a812c233c7dc14977fc14dedf061941a0d73a06d78369aa054dce9f0fcae0`.
+- Published only that stage to the existing Vanishr Hobby project:
+  `dpl_EBrwxQh1i8xd2kHuRDBhV7UrQAR7`, then updated the canonical public alias.
+  At `2026-10-03T15:19:18Z`, all 30 public artifacts matched their audited hashes.
+  The anonymously downloaded APK's version, original signer and restored
+  Google/Firebase values were verified. The exact update-feed URL advertises
+  `0.5.1` / `32` with `no-store`.
+- No relay/OAuth project configuration, account records or Play Console settings
+  were changed. Real Google-account sign-in and FCM delivery were not performed
+  by this verification. Play-installed Google access still requires registration
+  and authorization of the actual Play app-signing certificate/client, which
+  may differ from the upload certificate. No Play upload or approval is claimed.
 
 ## Release 0.5.0 / active-chat responsiveness
 
