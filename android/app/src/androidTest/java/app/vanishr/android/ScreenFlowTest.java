@@ -468,6 +468,26 @@ public class ScreenFlowTest {
         setField(activity, "engine", engine); invoke(activity, "render");
     }
 
+    private void awaitMainCondition(ActivityScenario<MainActivity> scenario, java.util.function.Predicate<MainActivity> condition) throws Exception {
+        var ready = new java.util.concurrent.CountDownLatch(1);
+        var matched = new java.util.concurrent.atomic.AtomicBoolean();
+        long deadline = android.os.SystemClock.elapsedRealtime() + 15_000;
+        scenario.onActivity(activity -> new Runnable() {
+            @Override public void run() {
+                if (condition.test(activity)) { matched.set(true); ready.countDown(); }
+                else if (android.os.SystemClock.elapsedRealtime() >= deadline) ready.countDown();
+                else new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(this, 20);
+            }
+        }.run());
+        assertTrue("The chat UI must finish its asynchronous update", ready.await(20, java.util.concurrent.TimeUnit.SECONDS));
+        assertTrue("The chat UI did not reach the expected state", matched.get());
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+    }
+
+    private void awaitMessages(ActivityScenario<MainActivity> scenario) throws Exception {
+        awaitMainCondition(scenario, activity -> !(boolean) readField(activity, "messageRefreshQueued"));
+    }
+
     private void snapshot(ActivityScenario<MainActivity> scenario, String name) {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync();
         scenario.onActivity(activity -> {
@@ -848,6 +868,254 @@ public class ScreenFlowTest {
                 assertEquals("alex",engine.account().handle());
                 activity.getSystemService(android.view.inputmethod.InputMethodManager.class).hideSoftInputFromWindow(save.getWindowToken(),0);
             });
+        }
+    }
+
+    @Test public void chatTypingAndSendDoNotWaitForBusyEncryptedStorage() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var locked = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                ((EditText) readField(activity, "composer")).requestFocus();
+                invoke(activity, "refreshProfileAvatars");
+                ((java.util.concurrent.ExecutorService) readField(activity, "work")).execute(() -> {
+                    synchronized (vault) {
+                        locked.countDown();
+                        try { release.await(2, java.util.concurrent.TimeUnit.SECONDS); }
+                        catch (InterruptedException failure) { Thread.currentThread().interrupt(); }
+                    }
+                });
+            });
+            try {
+                assertTrue(locked.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                scenario.onActivity(activity -> {
+                    EditText input = (EditText) readField(activity, "composer");
+                    long started = android.os.SystemClock.elapsedRealtime();
+                    invoke(activity, "refreshMessages", new Class<?>[]{ChatEngine.Peer.class}, peer);
+                    invoke(activity, "refreshContactStatus");
+                    for (int index = 0; index < 12; index++) input.append("a");
+                    ((View) readField(activity, "sendControl")).performClick();
+                    assertEquals("", input.getText().toString());
+                    assertNotNull(text(root(activity), "Sending"));
+                    input.setText("Next draft");
+                    long elapsed = android.os.SystemClock.elapsedRealtime() - started;
+                    assertTrue("Typing and send callbacks must take <100ms while the vault is locked; took " + elapsed + "ms", elapsed < 100);
+                    android.os.Bundle metrics = new android.os.Bundle(); metrics.putLong("chatInputMillis", elapsed);
+                    InstrumentationRegistry.getInstrumentation().sendStatus(0, metrics);
+                });
+            } finally { release.countDown(); }
+        }
+    }
+
+    @Test public void receiptBurstsReuseEightyMessageRowsAndExpiryClearsCachedText() throws Exception {
+        signedInFixture(); conversationsFixture();
+        for (int index = 0; index < 73; index++)
+            entry(true, "Synthetic history " + index, null, ChatEnvelope.Expiry.HOUR_1, "PENDING", -50_000 + index);
+        Map<Object, Object> original = new HashMap<>();
+        Object[] composer = new Object[1];
+        int[] scrollPosition = new int[1];
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                original.putAll((Map<?, ?>) readField(activity, "messageRows"));
+                assertEquals(80, original.size());
+                composer[0] = readField(activity, "composer");
+                ((EditText) composer[0]).setText("Keep typing through receipts");
+                ((EditText) composer[0]).requestFocus(); ((EditText) composer[0]).setSelection(5);
+                ScrollView scroll = (ScrollView) readField(activity, "messageScroll");
+                scroll.scrollTo(0, 400); scrollPosition[0] = scroll.getScrollY();
+            });
+            for (String state : List.of("QUEUED", "DELIVERED", "READ")) {
+                vault.transaction(() -> {
+                    for (ChatEngine.Entry entry : engine.entries(peerId))
+                        if (entry.outgoing()) write("entry/" + entry.id(), entry.withState(state));
+                    return null;
+                });
+                scenario.onActivity(activity -> {
+                    for (int wake = 0; wake < 30; wake++)
+                        invoke(activity, "refreshMessages", new Class<?>[]{ChatEngine.Peer.class}, peer);
+                });
+                awaitMessages(scenario);
+                scenario.onActivity(activity -> {
+                    Map<?, ?> rows = (Map<?, ?>) readField(activity, "messageRows");
+                    assertEquals(80, rows.size());
+                    original.forEach((id, row) -> {
+                        assertSame("Receipts must not recreate message views", row, rows.get(id));
+                        ChatEngine.Entry entry = (ChatEngine.Entry) readField(row, "entry");
+                        if (entry.outgoing()) assertEquals(state, entry.state());
+                    });
+                    assertSame(composer[0], readField(activity, "composer"));
+                    assertEquals("Keep typing through receipts", ((EditText) composer[0]).getText().toString());
+                    assertTrue(((EditText) composer[0]).hasFocus());
+                    assertEquals(5, ((EditText) composer[0]).getSelectionStart());
+                    assertEquals(scrollPosition[0], ((ScrollView) readField(activity, "messageScroll")).getScrollY());
+                });
+            }
+            ChatEngine.Entry fresh = entry(false, "A fresh reply", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", 0);
+            scenario.onActivity(activity -> invoke(activity, "refreshMessages", new Class<?>[]{ChatEngine.Peer.class}, peer));
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                Map<?, ?> rows = (Map<?, ?>) readField(activity, "messageRows");
+                assertEquals(81, rows.size());
+                original.forEach((id, row) -> assertSame(row, rows.get(id)));
+                assertNotNull(text(root(activity), "A fresh reply"));
+            });
+            assertEquals("READ", engine.entries(peerId).stream().filter(entry -> entry.id().equals(fresh.id())).findFirst().orElseThrow().state());
+            assertNotNull("Rendering must not consume a view-once message", vault.get("body/" + once.id()));
+            ChatEngine.Entry expiring = entry(false, "Short lived reply", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -3_597_000);
+            TextView[] expiredBody = new TextView[1];
+            scenario.onActivity(activity -> invoke(activity, "refreshMessages", new Class<?>[]{ChatEngine.Peer.class}, peer));
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> expiredBody[0] = (TextView) text(root(activity), "Short lived reply"));
+            awaitMainCondition(scenario, activity -> !((Map<?, ?>) readField(activity, "messageRows")).containsKey(expiring.id()));
+            assertEquals("Expired text must not remain in the row cache", "", expiredBody[0].getText().toString());
+        }
+    }
+
+    @Test public void storedSendAppearsBeforeTheRelayUploadReturns() throws Exception {
+        signedInFixture();
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        peer = new ChatEngine.Peer(peerId, peerDevice, Base64.getEncoder().encodeToString(remote.publicIdentity()), "Synthetic peer");
+        vault.transaction(() -> {
+            engine.groupSignal().verifyPeer(peerId, remote.publicIdentity());
+            write("contact/" + peerId, peer); return null;
+        });
+        engine.groupSignal().establish(peerId, remote.generatePreKey(Instant.now()), Instant.now());
+        notificationTransport(reference -> null);
+        var uploading = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var sent = new java.util.concurrent.atomic.AtomicReference<ChatEngine.Send>();
+        var builder = ((okhttp3.OkHttpClient) readField(engine.groupApi(), "client")).newBuilder();
+        builder.interceptors().add(0, chain -> {
+            if (chain.request().method().equals("POST") && chain.request().url().encodedPath().equals("/messages")) {
+                okio.Buffer body = new okio.Buffer(); chain.request().body().writeTo(body);
+                ChatEngine.Send message = RelayApi.JSON.fromJson(body.readUtf8(), ChatEngine.Send.class); sent.set(message);
+                uploading.countDown();
+                try { assertTrue(release.await(10, java.util.concurrent.TimeUnit.SECONDS)); }
+                catch (InterruptedException failure) { Thread.currentThread().interrupt(); throw new IOException("Synthetic upload interrupted"); }
+                return syntheticResponse(chain.request(), 200, new ChatEngine.Status(message.id(), "QUEUED", message.expiresAt()));
+            }
+            return chain.proceed(chain.request());
+        });
+        setField(engine.groupApi(), "client", builder.build());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            try {
+                scenario.onActivity(activity -> {
+                    ((EditText) readField(activity, "composer")).setText("Durable before upload");
+                    ((View) readField(activity, "sendControl")).performClick();
+                    ((EditText) readField(activity, "composer")).setText("Next draft");
+                });
+                assertTrue(uploading.await(10, java.util.concurrent.TimeUnit.SECONDS));
+                awaitMainCondition(scenario, activity -> ((Map<?, ?>) readField(activity, "messageRows")).containsKey(sent.get().id()));
+                scenario.onActivity(activity -> {
+                    assertTrue(((List<?>) readField(activity, "pendingSends")).isEmpty());
+                    assertNotNull(text(root(activity), "Durable before upload"));
+                    assertEquals("Next draft", ((EditText) readField(activity, "composer")).getText().toString());
+                    Object row = ((Map<?, ?>) readField(activity, "messageRows")).get(sent.get().id());
+                    assertEquals("PENDING", ((ChatEngine.Entry) readField(row, "entry")).state());
+                });
+            } finally { release.countDown(); }
+            awaitMessages(scenario);
+        }
+    }
+
+    @Test public void typingDoesNotWaitForPresenceAudienceStorageReads() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ContactPresence presence = engine.presence(); presence.foreground(true); presence.conversation(peerId);
+        var locked = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var holder = java.util.concurrent.Executors.newSingleThreadExecutor();
+        var reader = java.util.concurrent.Executors.newSingleThreadExecutor();
+        var reading = new java.util.concurrent.atomic.AtomicReference<Thread>();
+        try {
+            holder.submit(() -> {
+                synchronized (vault) {
+                    locked.countDown();
+                    try { release.await(2, java.util.concurrent.TimeUnit.SECONDS); }
+                    catch (InterruptedException failure) { Thread.currentThread().interrupt(); }
+                }
+            });
+            assertTrue(locked.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            var result = reader.submit(() -> { reading.set(Thread.currentThread()); return presence.update(android.os.SystemClock.elapsedRealtime()); });
+            awaitPhotoCondition(() -> reading.get() != null && reading.get().getState() == Thread.State.BLOCKED);
+            InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
+                long started = android.os.SystemClock.elapsedRealtime();
+                presence.edited(peerId, true);
+                long elapsed = android.os.SystemClock.elapsedRealtime() - started;
+                assertTrue("A keystroke must not wait for presence to read the vault; took " + elapsed + "ms", elapsed < 100);
+            });
+            release.countDown();
+            assertEquals(peerId, result.get(5, java.util.concurrent.TimeUnit.SECONDS).typingTo());
+        } finally { release.countDown(); holder.shutdownNow(); reader.shutdownNow(); }
+    }
+
+    @Test public void backgroundingDropsQueuedConversationReadsAndClearsRetainedRows() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var started = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.ExecutorService[] worker = new java.util.concurrent.ExecutorService[1];
+        TextView[] oldBody = new TextView[1];
+        ChatEngine.Entry unread;
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            unread = entry(false, "Unread after leaving", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", 0);
+            scenario.onActivity(activity -> {
+                oldBody[0] = (TextView) text(root(activity), "Coffee at 4?");
+                worker[0] = (java.util.concurrent.ExecutorService) readField(activity, "work");
+                worker[0].execute(() -> {
+                    started.countDown();
+                    try { release.await(10, java.util.concurrent.TimeUnit.SECONDS); }
+                    catch (InterruptedException failure) { Thread.currentThread().interrupt(); }
+                });
+            });
+            try {
+                assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                scenario.onActivity(activity -> invoke(activity, "refreshMessages", new Class<?>[]{ChatEngine.Peer.class}, peer));
+                scenario.moveToState(Lifecycle.State.STARTED);
+                assertEquals("", oldBody[0].getText().toString());
+            } finally { release.countDown(); }
+            worker[0].submit(() -> { }).get(10, java.util.concurrent.TimeUnit.SECONDS);
+        }
+        vault.unlock();
+        ChatEngine.Entry stored = RelayApi.JSON.fromJson(new String(vault.get("entry/" + unread.id()), StandardCharsets.UTF_8), ChatEngine.Entry.class);
+        assertEquals("A stale screen must not read an incoming message", "DELIVERED", stored.state());
+        assertNotNull(vault.get("body/" + once.id()));
+    }
+
+    @Test public void realtimeWakeDuringSyncIsRetainedAndBurstsAreCoalesced() throws Exception {
+        signedInFixture(); conversationsFixture(); notificationTransport(reference -> null);
+        var started = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var followUp = new java.util.concurrent.CountDownLatch(1);
+        var polls = new java.util.concurrent.atomic.AtomicInteger();
+        okhttp3.OkHttpClient transport = (okhttp3.OkHttpClient) readField(engine.groupApi(), "client");
+        var builder = transport.newBuilder();
+        builder.interceptors().add(0, chain -> {
+            if (chain.request().url().encodedPath().equals("/messages/pending")) {
+                if (polls.incrementAndGet() == 1) {
+                    started.countDown();
+                    try { assertTrue(release.await(10, java.util.concurrent.TimeUnit.SECONDS)); }
+                    catch (InterruptedException failure) { Thread.currentThread().interrupt(); throw new IOException("Synthetic sync interrupted"); }
+                } else followUp.countDown();
+            }
+            return chain.proceed(chain.request());
+        });
+        setField(engine.groupApi(), "client", builder.build());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { inject(activity); invoke(activity, "queueSync"); });
+            try {
+                assertTrue(started.await(10, java.util.concurrent.TimeUnit.SECONDS));
+                scenario.onActivity(activity -> { for (int index = 0; index < 100; index++) invoke(activity, "queueSync"); });
+            } finally { release.countDown(); }
+            assertTrue("A wake during sync must trigger another fetch without waiting for the 15s poll", followUp.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            assertTrue("A burst must not enqueue one full sync per notification", polls.get() <= 3);
         }
     }
 
@@ -2390,6 +2658,9 @@ public class ScreenFlowTest {
             snapshot(scenario,"40-new-group");
             scenario.onActivity(activity -> {
                 dialog(activity).dismiss(); setField(activity,"selectedPeer",groupId); invoke(activity,"render");
+            });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
                 assertNotNull(text(root(activity),"Your private group"));
                 assertFalse(((EditText)readField(activity,"composer")).isEnabled());
                 assertFalse(((View)readField(activity,"sendControl")).isEnabled());
@@ -3339,6 +3610,17 @@ public class ScreenFlowTest {
         signedInFixture(); conversationsFixture();
         engine.applyContactProfile(peerId, new ChatEngine.Profile(peerId, "friend_name", "Friend Public"));
         ChatEngine.Contact contact = new ChatEngine.Contact(peerId, peerDevice, peer.identityKey());
+        notificationTransport(reference -> null);
+        var reportedPresence = new java.util.concurrent.atomic.AtomicReference<ContactPresence.Status>();
+        var builder = ((okhttp3.OkHttpClient) readField(engine.groupApi(), "client")).newBuilder();
+        builder.interceptors().add(0, chain -> {
+            if (chain.request().url().encodedPath().equals("/presence")) {
+                ContactPresence.Status state = reportedPresence.get();
+                return syntheticResponse(chain.request(), 200, state == null ? List.of() : List.of(state));
+            }
+            return chain.proceed(chain.request());
+        });
+        setField(engine.groupApi(), "client", builder.build());
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             scenario.onActivity(activity -> {
                 setField(activity, "selectedPeer", peerId); inject(activity);
@@ -3348,13 +3630,20 @@ public class ScreenFlowTest {
                 TextView status = (TextView) readField(activity, "contactStatus");
                 assertEquals(View.GONE, status.getVisibility());
                 setField(engine, "realtimeReady", true);
-                long now = android.os.SystemClock.elapsedRealtime();
-                engine.presence().accept(new ContactPresence.Status[]{new ContactPresence.Status(contact, 12_000, 0)}, List.of(contact), now, now);
-                invoke(activity, "refreshContactStatus"); assertEquals("Online", status.getText().toString()); assertEquals(View.VISIBLE, status.getVisibility());
-                engine.presence().accept(new ContactPresence.Status[]{new ContactPresence.Status(contact, 12_000, 5000)}, List.of(contact), now, now);
-                invoke(activity, "refreshContactStatus"); assertEquals("Typing", status.getText().toString());
-                engine.presence().accept(new ContactPresence.Status[]{new ContactPresence.Status(contact, 0, 0, 82_800_000L)}, List.of(contact), now, now);
-                invoke(activity, "refreshContactStatus"); assertEquals("Last seen 23 hours ago", status.getText().toString());
+            });
+            for (String label : List.of("Online", "Typing", "Last seen 23 hours ago")) {
+                scenario.onActivity(activity -> {
+                    long now = android.os.SystemClock.elapsedRealtime();
+                    ContactPresence.Status state = label.startsWith("Last seen") ? new ContactPresence.Status(contact, 0, 0, 82_800_000L)
+                            : new ContactPresence.Status(contact, 12_000, label.equals("Typing") ? 5000 : 0);
+                    reportedPresence.set(state);
+                    engine.presence().accept(new ContactPresence.Status[]{state}, List.of(contact), now, now);
+                    invoke(activity, "refreshContactStatus");
+                });
+                awaitMainCondition(scenario, activity -> label.contentEquals(((TextView) readField(activity, "contactStatus")).getText()));
+            }
+            scenario.onActivity(activity -> {
+                TextView status = (TextView) readField(activity, "contactStatus");
                 assertEquals(View.VISIBLE, status.getVisibility());
                 EditText input = (EditText) readField(activity, "composer"); input.requestFocus(); input.setText("Synthetic draft stays local");
                 assertEquals(peerId, engine.presence().update(android.os.SystemClock.elapsedRealtime()).typingTo());
@@ -3365,6 +3654,7 @@ public class ScreenFlowTest {
                 status = (TextView) readField(activity, "contactStatus");
                 input.setText(""); assertNull(engine.presence().update(android.os.SystemClock.elapsedRealtime()).typingTo());
             });
+            awaitMainCondition(scenario, activity -> "Last seen 23 hours ago".contentEquals(((TextView) readField(activity, "contactStatus")).getText()));
             snapshot(scenario, "61-contact-last-seen");
             scenario.onActivity(activity -> {
                 TextView status = (TextView) readField(activity, "contactStatus");
@@ -3449,6 +3739,7 @@ public class ScreenFlowTest {
         vault.transaction(() -> { write("contact/" + peerId, peer); return null; });
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
             snapshot(scenario, "30-centered-empty-conversation");
             scenario.onActivity(activity -> {
                 TextView greeting = (TextView) text(root(activity), "Just the two of you");

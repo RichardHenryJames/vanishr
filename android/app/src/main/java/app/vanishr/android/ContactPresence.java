@@ -45,15 +45,21 @@ final class ContactPresence {
         return new ChatEngine.Contact(peer.userId(), peer.deviceId(), peer.identityKey());
     }
 
-    synchronized Update update(long now) {
+    Update update(long now) {
         if (!foreground || !engine.authenticated()) return null;
+        UUID selected;
+        long attempt;
+        synchronized (this) { selected = conversation; attempt = generation; }
         List<ChatEngine.Peer> peers = new ArrayList<>(engine.peers());
-        peers.sort(Comparator.comparing(peer -> !peer.userId().equals(conversation)));
+        peers.sort(Comparator.comparing(peer -> !peer.userId().equals(selected)));
         List<ChatEngine.Contact> contacts = peers.stream().filter(peer -> engine.independentlyVerified(peer.userId()))
                 .limit(128).map(ContactPresence::identity).toList();
-        long remaining = Math.max(0, Math.min(TYPING_LIFETIME, typingUntil - now));
-        UUID typing = remaining > 0 && contacts.stream().anyMatch(peer -> peer.userId().equals(conversation)) ? conversation : null;
-        return new Update(contacts, typing, typing == null ? 0 : remaining);
+        synchronized (this) {
+            if (!foreground || generation != attempt) return null;
+            long remaining = Math.max(0, Math.min(TYPING_LIFETIME, typingUntil - now));
+            UUID typing = remaining > 0 && contacts.stream().anyMatch(peer -> peer.userId().equals(selected)) ? selected : null;
+            return new Update(contacts, typing, typing == null ? 0 : remaining);
+        }
     }
 
     void refresh() throws Exception {
@@ -62,8 +68,9 @@ final class ContactPresence {
         Update update;
         synchronized (this) {
             if (started < retryAt) return;
-            update = update(started); attempt = generation;
+            attempt = generation;
         }
+        update = update(started);
         if (update == null) { disconnected(); return; }
         if (!engine.realtimeReady()) { disconnected(); engine.reconnect(); return; }
         try {
@@ -102,11 +109,23 @@ final class ContactPresence {
     }
 
     String label(ChatEngine.Peer peer, long now) {
-        if (peer == null || !foreground || !engine.realtimeReady() || !engine.authenticated()) return "";
+        return labelSnapshot(snapshot(peer), now);
+    }
+
+    Seen state(UUID peer) { return states.get(peer); }
+
+    Seen snapshot(ChatEngine.Peer peer) {
+        if (peer == null || !foreground || !engine.realtimeReady() || !engine.authenticated()) return null;
         Seen state = states.get(peer.userId());
-        if (state == null || state.expiresAt() <= now || !state.peer().equals(identity(peer))) return "";
+        if (state == null || !state.peer().equals(identity(peer))) return null;
         ChatEngine.Peer saved = engine.peers().stream().filter(value -> value.userId().equals(peer.userId())).findFirst().orElse(null);
-        if (saved == null || !identity(saved).equals(state.peer()) || !engine.independentlyVerified(peer.userId())) return "";
+        if (saved == null || !identity(saved).equals(state.peer()) || !engine.independentlyVerified(peer.userId())) return null;
+        return state;
+    }
+
+    String labelSnapshot(Seen state, long now) {
+        if (state == null || !foreground || !engine.realtimeReady() || !engine.authenticated()
+                || states.get(state.peer().userId()) != state || state.expiresAt() <= now) return "";
         if (state.lastSeenAt() == null) return state.typingUntil() > now ? "Typing" : "Online";
         long age = now - state.lastSeenAt();
         if (age < 60_000) return "Last seen just now";

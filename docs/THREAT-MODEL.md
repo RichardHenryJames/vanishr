@@ -350,6 +350,22 @@ cancelled and their UI payloads cleared on backgrounding, while existing encrypt
 outbox records keep their normal retry and expiry behavior. No plaintext draft
 cache, new logging or weaker identity check is introduced.
 
+Conversation refreshes read protected records, decrypt newly displayed timed text
+and persist read acknowledgements on the existing serialized client worker, not
+the UI thread. Receipt-only updates reuse the existing message views instead of
+decrypting the history again. Retained views remain bounded by the existing
+message limit; their text is cleared on expiry, conversation changes and
+backgrounding. Asynchronous results are bound to the current engine and screen
+generation and recheck absolute deadlines before display. View-once messages
+still require explicit opening. No additional plaintext disk cache is created.
+
+Presence-header identity checks also run on the client worker. The UI checks the
+validated in-memory snapshot's original deadline and current connection state;
+disconnects and replacement snapshots invalidate the label immediately. Typing
+edits do not hold a lock across protected-storage or network operations. Realtime
+wakes arriving during a sync request one coalesced follow-up instead of being
+discarded; Signal and vault mutations remain serialized.
+
 Vanishr has no separate app lock or repeated credential prompt. While Android
 reports the phone unlocked, foreground startup opens the encrypted vault
 automatically after any system-accepted unlock method, including fingerprint or

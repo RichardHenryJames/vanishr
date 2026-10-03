@@ -62,6 +62,7 @@ public final class MainActivity extends AppCompatActivity {
     private final ScheduledExecutorService photoWork = Executors.newSingleThreadScheduledExecutor();
     private final ExecutorService updateWork = Executors.newSingleThreadExecutor();
     private final java.util.concurrent.atomic.AtomicBoolean syncQueued = new java.util.concurrent.atomic.AtomicBoolean();
+    private final java.util.concurrent.atomic.AtomicBoolean syncRequested = new java.util.concurrent.atomic.AtomicBoolean();
     private boolean checkingUpdates;
     private AppUpdates.Release availableUpdate;
     private volatile ChatEngine engine;
@@ -86,7 +87,12 @@ public final class MainActivity extends AppCompatActivity {
     private TextView contactStatus;
     private EditText composer;
     private boolean restoringDraft;
-    private UUID selectedPeer;
+    private volatile UUID selectedPeer;
+    private ChatEngine.Peer shownConversationPeer;
+    private GroupChat.Conversation shownConversationGroup;
+    private ContactPresence.Seen shownPresence;
+    private ContactPresence.Seen checkedPresence;
+    private boolean presenceRefreshQueued;
     private NotificationOpen notificationOpen;
     private static final class NotificationOpen {
         final String reference;
@@ -101,6 +107,24 @@ public final class MainActivity extends AppCompatActivity {
     private Bitmap displayedBitmap;
     private ScrollView messageScroll;
     private java.util.List<ChatEngine.Entry> shownEntries = java.util.List.of();
+    private final Map<UUID, MessageRow> messageRows = new LinkedHashMap<>();
+    private final Map<String, TextView> messageDates = new HashMap<>();
+    private View messageEmpty;
+    private volatile int conversationGeneration;
+    private boolean messageRefreshQueued;
+    private boolean messageRefreshRequested;
+    private static final class MessageRow {
+        ChatEngine.Entry entry;
+        final View alignment;
+        final TextView body;
+        final TextView sender;
+        final ImageView receipt;
+        final TextView groupReceipt;
+        MessageRow(ChatEngine.Entry entry, View alignment, TextView body, TextView sender, ImageView receipt, TextView groupReceipt) {
+            this.entry = entry; this.alignment = alignment; this.body = body; this.sender = sender; this.receipt = receipt; this.groupReceipt = groupReceipt;
+        }
+        void clear() { body.setText(""); }
+    }
     private java.util.List<ChatEngine.Peer> shownPeers = java.util.List.of();
     private java.util.List<GroupChat.Conversation> shownGroups = java.util.List.of();
     private long shownAdminDirectory;
@@ -203,6 +227,10 @@ public final class MainActivity extends AppCompatActivity {
                 return true;
             });
             if (resumed && messages != null) {
+                messageRows.values().removeIf(row -> {
+                    if (row.entry.expiresAt() > System.currentTimeMillis()) return false;
+                    messages.removeView(row.alignment); row.clear(); return true;
+                });
                 for (int index = messages.getChildCount() - 1; index >= 0; index--) {
                     View row = messages.getChildAt(index);
                     if (row.getTag() instanceof Long deadline && deadline <= System.currentTimeMillis()) messages.removeViewAt(index);
@@ -241,7 +269,7 @@ public final class MainActivity extends AppCompatActivity {
         setContentView(root);
         notificationIntent(getIntent());
         androidx.core.view.ViewCompat.requestApplyInsets(root);
-        work.scheduleWithFixedDelay(this::syncOnce, 2, 15, TimeUnit.SECONDS);
+        work.scheduleWithFixedDelay(this::queueSync, 2, 15, TimeUnit.SECONDS);
         work.scheduleWithFixedDelay(this::presenceOnce, 1, 3, TimeUnit.SECONDS);
         photoWork.scheduleWithFixedDelay(this::photoRequestsOnce, 2, 5, TimeUnit.SECONDS);
         ui.post(expiryTick);
@@ -474,6 +502,7 @@ public final class MainActivity extends AppCompatActivity {
         ChatEngine current = engine;
         if (current == null) { storageState(); return; }
         String draft = composer != null && Objects.equals(composerPeer, selectedPeer) ? composer.getText().toString() : "";
+        resetConversation();
         root.removeAllViews();
         messages = null; messageScroll = null; composer = null; connection = null; conversationName = null; conversationUsername = null; actionError = null; contactRows = null; contactSearch = null;
         contactStatus = null;
@@ -942,6 +971,7 @@ public final class MainActivity extends AppCompatActivity {
         chatScreen = true;
         screenPadding(0); composerPeer=peer.userId();
         GroupChat.Conversation group=engine.groups().get(peer.userId());
+        shownConversationPeer = peer; shownConversationGroup = group;
         LinearLayout header = horizontal(); header.setMinimumHeight(dp(68)); header.setPadding(dp(10),dp(8),dp(10),dp(8)); header.setBackgroundColor(Ui.SURFACE);
         header.addView(icon(R.drawable.ic_arrow_left, "Back", () -> { selectedPeer = null; render(); }));
         View avatar=group==null ? profileAvatar(peer.userId(),peer.name(),36,design.avatarColor(peer.userId())) : design.groupAvatar(36,Ui.BLUE);
@@ -1019,10 +1049,33 @@ public final class MainActivity extends AppCompatActivity {
 
     private void refreshContactStatus() {
         if (contactStatus == null || engine == null || !resumed) return;
+        ChatEngine current = engine;
         String value = !busy && engine.authenticated() && engine.realtimeReady()
-                ? engine.presence().label(conversationPeer(selectedPeer), android.os.SystemClock.elapsedRealtime()) : "";
+                ? current.presence().labelSnapshot(shownPresence, SystemClock.elapsedRealtime()) : "";
         if (!value.contentEquals(contactStatus.getText())) contactStatus.setText(value);
         contactStatus.setVisibility(value.isEmpty() ? View.GONE : View.VISIBLE);
+        ContactPresence.Seen observed = current.presence().state(selectedPeer);
+        if (presenceRefreshQueued || observed == checkedPresence || !current.authenticated()) return;
+        presenceRefreshQueued = true;
+        ChatEngine.Peer peer = shownConversationPeer;
+        int generation = conversationGeneration;
+        work.execute(() -> {
+            try {
+                if (!conversationCurrent(current, generation)) return;
+                ContactPresence.Seen verified = current.presence().snapshot(peer);
+                ui.post(() -> {
+                    if (!conversationCurrent(current, generation)) return;
+                    presenceRefreshQueued = false; checkedPresence = observed; shownPresence = verified;
+                    refreshContactStatus();
+                });
+            } catch (Exception failure) {
+                ui.post(() -> {
+                    if (!conversationCurrent(current, generation)) return;
+                    presenceRefreshQueued = false; checkedPresence = observed; shownPresence = null;
+                    showFailure(failure); refreshContactStatus();
+                });
+            }
+        });
     }
 
     private void presenceOnce() {
@@ -1043,7 +1096,10 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void groupComposerState(GroupChat.Conversation group) {
-        boolean enabled=engine.groups().ready(group) && group.snapshot().active().size()>1;
+        groupComposerState(engine.groups().ready(group) && group.snapshot().active().size()>1);
+    }
+
+    private void groupComposerState(boolean enabled) {
         if (composer!=null) composer.setEnabled(enabled);
         if (sendControl!=null) { sendControl.setEnabled(enabled); sendControl.setAlpha(enabled ? 1f : .4f); }
         if (attachmentControl!=null) attachmentControl.setEnabled(enabled);
@@ -1051,8 +1107,8 @@ public final class MainActivity extends AppCompatActivity {
 
     private boolean enqueueSend(ChatEngine.Peer peer, String text, byte[] image, ChatEnvelope.Expiry selectedExpiry) {
         if (!resumed || engine == null || busy) return false;
-        GroupChat.Conversation group=engine.groups().get(peer.userId());
-        if (group!=null && !engine.groups().ready(group)) { problem("Group membership is being verified."); return false; }
+        GroupChat.Conversation group = shownConversationGroup;
+        if (group != null && (sendControl == null || !sendControl.isEnabled())) { problem("Group membership is being verified."); return false; }
         if (pendingSends.size() >= 8) { problem("Wait for a pending message before sending more."); return false; }
         PendingSend pending = new PendingSend(peer, text, image == null ? null : image.clone(), selectedExpiry);
         pending.group=group!=null;
@@ -1090,11 +1146,24 @@ public final class MainActivity extends AppCompatActivity {
                 if (!resumed || generation != screenGeneration || engine != current || pending.cancelled) return;
                 image = pending.copyImage();
                 if (pending.cancelled) return;
-                Runnable stored=() -> ui.post(() -> {
-                    if (!resumed || generation != screenGeneration || engine != current) return;
-                    pendingSends.remove(pending); pending.clear();
-                    if (pending.peer.userId().equals(selectedPeer)) refreshMessages(pending.peer);
-                });
+                Runnable stored = () -> {
+                    ChatEngine.Entry durable = current.entries(pending.peer.userId()).stream()
+                            .filter(entry -> entry.id().equals(pending.id)).findFirst().orElseThrow();
+                    String preparedText = pending.text;
+                    ui.post(() -> {
+                        if (!resumed || generation != screenGeneration || engine != current) return;
+                        pendingSends.remove(pending); pending.clear();
+                        if (pending.peer.userId().equals(selectedPeer)) {
+                            java.util.List<ChatEngine.Entry> visible = new ArrayList<>(shownEntries);
+                            visible.removeIf(entry -> entry.id().equals(durable.id()));
+                            visible.add(durable);
+                            visible.sort(Comparator.comparingLong(entry -> entry.expiresAt() - entry.expiry().milliseconds));
+                            Map<UUID, String> text = new HashMap<>(); text.put(durable.id(), preparedText);
+                            applyMessages(pending.peer, visible, text, Map.of());
+                            refreshMessages(pending.peer);
+                        }
+                    });
+                };
                 if (pending.group) {
                     if (current.groups().get(pending.peer.userId())==null) throw new SecurityException("Group access ended");
                     current.groups().send(pending.peer.userId(),pending.text,image,pending.expiry,pending.id,pending.createdAt,stored);
@@ -1302,35 +1371,173 @@ showDialog(approval);
     }
 
     private void refreshMessages(ChatEngine.Peer peer) {
-        if (!resumed || messages == null || engine == null) return;
-        java.util.List<ChatEngine.Entry> entries = engine.entries(peer.userId());
-        if (entries.equals(shownEntries) && messages.getChildCount() > 0) return;
+        if (!resumed || messages == null || engine == null || peer == null || !peer.userId().equals(selectedPeer)) return;
+        if (messageRefreshQueued) { messageRefreshRequested = true; return; }
+        messageRefreshQueued = true;
+        messageRefreshRequested = false;
+        ChatEngine current = engine;
+        int generation = conversationGeneration;
+        Map<UUID, ChatEngine.Entry> known = new HashMap<>();
+        messageRows.forEach((id, row) -> known.put(id, row.entry));
+        work.execute(() -> {
+            Map<UUID, String> text = new HashMap<>();
+            Map<UUID, String> senders = new HashMap<>();
+            Map<UUID, String> senderNames = new HashMap<>();
+            java.util.List<ChatEngine.Entry> entries = new ArrayList<>();
+            try {
+                if (!conversationCurrent(current, generation)) return;
+                for (ChatEngine.Entry entry : current.entries(peer.userId())) {
+                    if (!conversationCurrent(current, generation)) { text.clear(); return; }
+                    if (entry.groupEpoch() != null && !entry.outgoing()) {
+                        String senderName = senderNames.get(entry.senderId());
+                        if (senderName == null) {
+                            senderName = current.groups().senderName(entry.peerId(), entry.senderId());
+                            senderNames.put(entry.senderId(), senderName);
+                        }
+                        senders.put(entry.id(), senderName);
+                    }
+                    if (!sameMessage(entry, known.get(entry.id()))) {
+                        if (!entry.image() && entry.expiry() != ChatEnvelope.Expiry.VIEW_ONCE) {
+                            try { text.put(entry.id(), current.content(entry, false).envelope().text()); }
+                            catch (Exception failure) {
+                                if (entry.expiresAt() <= System.currentTimeMillis()) continue;
+                                throw failure;
+                            }
+                            if (!entry.outgoing()) entry = entry.withState("READ");
+                        }
+                    }
+                    entries.add(entry);
+                }
+                ui.post(() -> {
+                    try {
+                        if (!conversationCurrent(current, generation)) return;
+                        messageRefreshQueued = false;
+                        applyMessages(peer, entries, text, senders);
+                        if (messageRefreshRequested) refreshMessages(peer);
+                    } finally { text.clear(); }
+                });
+            } catch (Exception failure) {
+                text.clear();
+                ui.post(() -> {
+                    if (!conversationCurrent(current, generation)) return;
+                    messageRefreshQueued = false;
+                    showFailure(failure);
+                });
+            }
+        });
+    }
+
+    private boolean conversationCurrent(ChatEngine current, int generation) {
+        return resumed && engine == current && conversationGeneration == generation;
+    }
+
+    private static boolean sameMessage(ChatEngine.Entry entry, ChatEngine.Entry previous) {
+        return previous != null && previous.equals(entry.withState(previous.state()));
+    }
+
+    private void resetConversation() {
+        conversationGeneration++;
+        messageRefreshQueued = false; messageRefreshRequested = false; presenceRefreshQueued = false;
+        for (MessageRow row : messageRows.values()) row.clear();
+        messageRows.clear(); messageDates.clear(); messageEmpty = null;
+        shownConversationPeer = null; shownConversationGroup = null; shownPresence = null; checkedPresence = null;
+    }
+
+    private void applyMessages(ChatEngine.Peer peer, java.util.List<ChatEngine.Entry> loaded,
+                               Map<UUID, String> text, Map<UUID, String> senders) {
+        java.util.List<ChatEngine.Entry> entries = loaded.stream().filter(entry -> entry.expiresAt() > System.currentTimeMillis()).toList();
         boolean atEnd = messageScroll == null || messages.getHeight() - messageScroll.getScrollY() - messageScroll.getHeight() < dp(100);
         int position = messageScroll == null ? 0 : messageScroll.getScrollY();
         shownEntries = entries;
-        messages.removeAllViews();
+        Set<UUID> retained = new HashSet<>();
+        for (ChatEngine.Entry entry : entries) retained.add(entry.id());
+        messageRows.entrySet().removeIf(row -> {
+            if (retained.contains(row.getKey())) return false;
+            row.getValue().clear(); return true;
+        });
+        java.util.List<View> ordered = new ArrayList<>();
         if (entries.isEmpty() && pendingSends.stream().noneMatch(pending -> pending.peer.userId().equals(peer.userId()))) {
-            LinearLayout empty = vertical(); empty.setGravity(Gravity.CENTER); empty.setPadding(dp(10), dp(48), dp(10), dp(36));
-            empty.addView(design.symbol(R.drawable.ic_shield_check, 40, Ui.PRIMARY)); empty.addView(design.spacer(14));
-            TextView greeting = design.text(engine.groups().get(peer.userId())==null ? "Just the two of you" : "Your private group", 18, 700, INK);
-            greeting.setGravity(Gravity.CENTER);
-            empty.addView(greeting, new LinearLayout.LayoutParams(-1, -2));
-            messages.addView(empty, new LinearLayout.LayoutParams(-1, -2));
+            if (messageEmpty == null) {
+                LinearLayout empty = vertical(); empty.setGravity(Gravity.CENTER); empty.setPadding(dp(10), dp(48), dp(10), dp(36));
+                empty.addView(design.symbol(R.drawable.ic_shield_check, 40, Ui.PRIMARY)); empty.addView(design.spacer(14));
+                TextView greeting = design.text(shownConversationGroup == null ? "Just the two of you" : "Your private group", 18, 700, INK);
+                greeting.setGravity(Gravity.CENTER); empty.addView(greeting, new LinearLayout.LayoutParams(-1, -2));
+                empty.setLayoutParams(new LinearLayout.LayoutParams(-1, -2)); messageEmpty = empty;
+            }
+            ordered.add(messageEmpty);
         }
         String previousDay = "";
+        Set<String> days = new HashSet<>();
         for (ChatEngine.Entry entry : entries) {
             long created = entry.expiresAt() - entry.expiry().milliseconds;
             String day = java.time.Instant.ofEpochMilli(created).atZone(java.time.ZoneId.systemDefault()).toLocalDate().toString();
             if (!day.equals(previousDay)) {
-                TextView date = design.text(day.equals(java.time.LocalDate.now().toString()) ? "Today" : java.time.format.DateTimeFormatter.ofPattern("MMM d", Locale.getDefault()).format(java.time.LocalDate.parse(day)), 10, 500, MUTED);
-                date.setGravity(Gravity.CENTER); date.setPadding(0, 0, 0, dp(28)); messages.addView(date); previousDay = day;
+                TextView date = messageDates.computeIfAbsent(day, key -> {
+                    TextView label = design.text("", 10, 500, MUTED);
+                    label.setGravity(Gravity.CENTER); label.setPadding(0, 0, 0, dp(28)); return label;
+                });
+                String dateText = day.equals(java.time.LocalDate.now().toString()) ? "Today" : java.time.format.DateTimeFormatter.ofPattern("MMM d", Locale.getDefault()).format(java.time.LocalDate.parse(day));
+                if (!dateText.contentEquals(date.getText())) date.setText(dateText);
+                ordered.add(date); days.add(day); previousDay = day;
             }
+            MessageRow existing = messageRows.get(entry.id());
+            if (!sameMessage(entry, existing == null ? null : existing.entry)) {
+                if (existing != null) existing.clear();
+                existing = messageRow(peer, entry, text.get(entry.id()), senders.get(entry.id()));
+                messageRows.put(entry.id(), existing);
+            }
+            updateReceipt(existing, entry);
+            String senderName = senders.get(entry.id());
+            if (existing.sender != null && senderName != null && !senderName.contentEquals(existing.sender.getText()))
+                existing.sender.setText(senderName);
+            ordered.add(existing.alignment);
+        }
+        messageDates.keySet().retainAll(days);
+        for (PendingSend pending : pendingSends) {
+            if (pending.cancelled || !peer.userId().equals(pending.peer.userId()) || retained.contains(pending.id)) continue;
+            if (pending.row == null) appendPending(pending);
+            if (pending.row != null) ordered.add(pending.row);
+        }
+        boolean changed = messages.getChildCount() != ordered.size();
+        Set<View> wanted = new HashSet<>(ordered);
+        for (int index = messages.getChildCount() - 1; index >= 0; index--) {
+            if (!wanted.contains(messages.getChildAt(index))) { messages.removeViewAt(index); changed = true; }
+        }
+        for (int index = 0; index < ordered.size(); index++) {
+            View row = ordered.get(index);
+            if (messages.indexOfChild(row) == index) continue;
+            if (row.getParent() instanceof ViewGroup parent) parent.removeView(row);
+            messages.addView(row, index); changed = true;
+        }
+        ScrollView scroll = messageScroll;
+        int generation = conversationGeneration;
+        if (changed && scroll != null) scroll.post(() -> {
+            if (messageScroll == scroll && generation == conversationGeneration) {
+                if (atEnd) scroll.fullScroll(View.FOCUS_DOWN); else scroll.scrollTo(0, position);
+            }
+        });
+    }
+
+    private void updateReceipt(MessageRow row, ChatEngine.Entry entry) {
+        if (row.entry != null && row.entry.state().equals(entry.state())) return;
+        row.entry = entry;
+        if (row.receipt != null) {
+            row.receipt.setImageResource(switch (entry.state()) { case "READ", "DELIVERED" -> R.drawable.ic_check_check; case "QUEUED" -> R.drawable.ic_check; default -> R.drawable.ic_clock_3; });
+            row.receipt.setColorFilter(entry.state().equals("READ") ? Ui.BLUE : MUTED);
+            row.receipt.setContentDescription(entry.state());
+        }
+        if (row.groupReceipt != null) row.groupReceipt.setText(entry.state());
+    }
+
+    private MessageRow messageRow(ChatEngine.Peer peer, ChatEngine.Entry entry, String text, String senderName) {
+            long created = entry.expiresAt() - entry.expiry().milliseconds;
             LinearLayout alignment = horizontal(); alignment.setGravity(entry.outgoing() ? Gravity.END : Gravity.START); alignment.setTag(entry.expiresAt());
             LinearLayout row = vertical();
             row.setPadding(dp(14), dp(12), dp(14), dp(8));
             row.setBackground(design.background(entry.outgoing() ? Ui.TINT : Ui.SURFACE, 8, entry.outgoing() ? 0 : Ui.LINE));
+            TextView sender = null;
             if (entry.groupEpoch()!=null && !entry.outgoing()) {
-                TextView sender=design.text(engine.groups().senderName(entry.peerId(),entry.senderId()),12,700,Ui.BLUE);
+                sender=design.text(senderName,12,700,Ui.BLUE);
                 sender.setMaxWidth(Math.max(dp(120),root.getWidth()-root.getPaddingLeft()-root.getPaddingRight()-dp(80))); row.addView(sender);
             }
             TextView body;
@@ -1343,11 +1550,7 @@ showDialog(approval);
                 body.setCompoundDrawablePadding(dp(8));
                 body.setOnClickListener(view -> viewContent(entry));
             } else {
-                try { body = design.text(engine.content(entry, false).envelope().text(), 13, 500, INK); }
-                catch (Exception failure) {
-                    body = design.text("Content unavailable", 13, 500, MUTED);
-                    if (failure instanceof GeneralSecurityException) ui.post(() -> { hideContent(); storageFailure(failure); });
-                }
+                body = design.text(Objects.requireNonNull(text), 13, 500, INK);
             }
             body.setMaxWidth(Math.max(dp(120), root.getWidth() - root.getPaddingLeft() - root.getPaddingRight() - dp(80)));
             if (entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE) { body.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_eye, 0, 0, 0); body.setCompoundDrawablePadding(dp(8)); }
@@ -1355,14 +1558,16 @@ showDialog(approval);
             LinearLayout metadata = horizontal(); metadata.setGravity(Gravity.END);
             String time = java.time.format.DateTimeFormatter.ofPattern("HH:mm", Locale.getDefault()).format(java.time.Instant.ofEpochMilli(created).atZone(java.time.ZoneId.systemDefault()));
             TextView timestamp = design.text(time + "  /  " + expiryName(entry.expiry()), 9, 500, MUTED); timestamp.setPadding(0, dp(5), dp(5), 0); metadata.addView(timestamp);
+            ImageView status = null;
             if (entry.outgoing() && entry.groupEpoch()==null) {
-                ImageView status = design.symbol(switch (entry.state()) { case "READ", "DELIVERED" -> R.drawable.ic_check_check; case "QUEUED" -> R.drawable.ic_check; default -> R.drawable.ic_clock_3; }, 15, entry.state().equals("READ") ? Ui.BLUE : MUTED);
-                status.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES); status.setContentDescription(entry.state()); metadata.addView(status);
+                status = design.symbol(R.drawable.ic_clock_3, 15, MUTED);
+                status.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES); metadata.addView(status);
             }
             row.addView(metadata);
+            TextView groupStatus = null;
             if (entry.outgoing() && entry.groupEpoch()!=null) {
-                TextView status=design.text(entry.state(),10,500,MUTED); status.setGravity(Gravity.END);
-                status.setPadding(0,dp(4),0,0); status.setMaxWidth(Math.max(dp(120),root.getWidth()-root.getPaddingLeft()-root.getPaddingRight()-dp(80))); row.addView(status);
+                groupStatus=design.text("",10,500,MUTED); groupStatus.setGravity(Gravity.END);
+                groupStatus.setPadding(0,dp(4),0,0); groupStatus.setMaxWidth(Math.max(dp(120),root.getWidth()-root.getPaddingLeft()-root.getPaddingRight()-dp(80))); row.addView(groupStatus);
             }
             row.setOnLongClickListener(view -> {
                 SecureSheet.Builder actions = new SecureSheet.Builder(this).setTitle("Message actions").setNegativeButton("Cancel", null)
@@ -1373,12 +1578,10 @@ showDialog(approval);
                 return true;
             });
             alignment.addView(row, new LinearLayout.LayoutParams(-2, -2));
-            LinearLayout.LayoutParams placement = new LinearLayout.LayoutParams(-1, -2); placement.setMargins(0, 0, 0, dp(14)); messages.addView(alignment, placement);
-        }
-        for (PendingSend pending : pendingSends) {
-            if (entries.stream().noneMatch(entry -> entry.id().equals(pending.id))) appendPending(pending);
-        }
-        if (messageScroll != null) messageScroll.post(() -> { if (messageScroll != null) { if (atEnd) messageScroll.fullScroll(View.FOCUS_DOWN); else messageScroll.scrollTo(0, position); } });
+            LinearLayout.LayoutParams placement = new LinearLayout.LayoutParams(-1, -2); placement.setMargins(0, 0, 0, dp(14)); alignment.setLayoutParams(placement);
+            MessageRow result = new MessageRow(null, alignment, body, sender, status, groupStatus);
+            updateReceipt(result, entry);
+            return result;
     }
 
     private void addContactDialog() { addContactDialog(""); }
@@ -2256,9 +2459,21 @@ showDialog(approval);
     }
 
     private void queueSync() {
+        syncRequested.set(true);
         if (!syncQueued.compareAndSet(false,true)) return;
-        try { work.execute(() -> { try { syncOnce(); } finally { syncQueued.set(false); } }); }
-        catch (RejectedExecutionException ignored) { syncQueued.set(false); }
+        try {
+            work.execute(() -> {
+                syncRequested.set(false);
+                try { syncOnce(); }
+                finally {
+                    syncQueued.set(false);
+                    if (syncRequested.get() && resumed && engine != null) queueSync();
+                }
+            });
+        } catch (RejectedExecutionException failure) {
+            syncQueued.set(false);
+            if (!work.isShutdown()) throw failure;
+        }
     }
 
     private void notificationIntent(Intent intent) {
@@ -2320,6 +2535,30 @@ showDialog(approval);
         }
         catch (AdminOnboarding.Failure failure) { current.onboarding().blocked(failure); current.unverifiedIncoming = true; }
         catch (Exception failure) { current.online = false; }
+        UUID selected = selectedPeer;
+        java.util.List<ChatEngine.Peer> peers;
+        java.util.List<GroupChat.Conversation> groups;
+        Map<UUID, Long> unreadCounts = new HashMap<>();
+        GroupChat.Conversation selectedGroup;
+        ChatEngine.Peer selectedContact;
+        String groupStatus;
+        boolean groupCanSend;
+        long directoryGeneration = current.onboarding().generation();
+        try {
+            peers = current.authenticated() ? current.peers() : java.util.List.of();
+            groups = current.authenticated() ? current.groups().conversations() : java.util.List.of();
+            if (current.authenticated()) for (ChatEngine.Entry entry : current.entries(null)) {
+                if (!entry.outgoing() && !entry.state().equals("READ")) unreadCounts.merge(entry.peerId(), 1L, Long::sum);
+            }
+            selectedGroup = groups.stream().filter(group -> group.id().equals(selected) && !current.groups().invited(group)).findFirst().orElse(null);
+            selectedContact = selectedGroup == null ? peers.stream().filter(peer -> peer.userId().equals(selected)).findFirst().orElse(null)
+                    : new ChatEngine.Peer(selectedGroup.id(), selectedGroup.snapshot().epoch(), "", selectedGroup.name());
+            groupStatus = selectedGroup == null ? "" : current.groups().status(selectedGroup);
+            groupCanSend = selectedGroup != null && current.groups().ready(selectedGroup) && selectedGroup.snapshot().active().size() > 1;
+        } catch (Exception failure) {
+            ui.post(() -> { if (resumed && engine == current && generation == screenGeneration) showFailure(failure); });
+            return;
+        }
         ui.post(() -> {
             if (!resumed || engine != current || generation != screenGeneration || busy) return;
             if (notificationOpen != null) { render(); return; }
@@ -2327,20 +2566,19 @@ showDialog(approval);
             if (!current.authenticated()) { if (chatScreen || contactRows != null) { dismissContent(); render(); } }
             else if (selectedPeer == null) {
                 if (connection != null) connection.setText(statusText());
-                java.util.List<ChatEngine.Peer> peers = current.peers();
-                java.util.List<GroupChat.Conversation> groups=current.groups().conversations();
-                if (!peers.equals(shownPeers) || !groups.equals(shownGroups) || shownAdminDirectory != current.onboarding().generation()) {
-                    shownPeers = peers; shownGroups=groups; shownAdminDirectory = current.onboarding().generation(); renderContacts();
+                if (!peers.equals(shownPeers) || !groups.equals(shownGroups) || shownAdminDirectory != directoryGeneration) {
+                    shownPeers = peers; shownGroups=groups; shownAdminDirectory = directoryGeneration; renderContacts();
                 }
                 for (var unread : unreadLabels.entrySet()) {
                     TextView badge = unread.getValue();
-                    long count = current.entries(unread.getKey()).stream().filter(entry -> !entry.outgoing() && !entry.state().equals("READ")).count();
+                    long count = unreadCounts.getOrDefault(unread.getKey(), 0L);
                     badge.setText(Long.toString(count)); badge.setVisibility(count == 0 ? View.GONE : View.VISIBLE);
                 }
                 if (unreadOnly) renderContacts();
             }
             else {
-                if (conversationPeer(selectedPeer)==null) {
+                if (!Objects.equals(selected, selectedPeer)) return;
+                if (selectedContact == null) {
                     UUID removed=selectedPeer;
                     pendingSends.removeIf(pending -> {
                         if (!pending.peer.userId().equals(removed)) return false;
@@ -2349,17 +2587,16 @@ showDialog(approval);
                     dismissContent(); selectedPeer=null; render(); return;
                 }
                 if (connection != null) connection.setText(statusText());
-                GroupChat.Conversation group=current.groups().get(selectedPeer);
-                if (group!=null) {
-                    if (conversationName!=null) conversationName.setText(group.name());
-                    if (conversationUsername!=null) conversationUsername.setText(current.groups().status(group));
-                    groupComposerState(group); refreshMessages(conversationPeer(group.id()));
+                shownConversationPeer = selectedContact; shownConversationGroup = selectedGroup;
+                if (conversationName != null && !selectedContact.name().contentEquals(conversationName.getText()))
+                    conversationName.setText(selectedContact.name());
+                if (selectedGroup != null) {
+                    if (conversationUsername != null && !groupStatus.contentEquals(conversationUsername.getText()))
+                        conversationUsername.setText(groupStatus);
+                    groupComposerState(groupCanSend);
                 }
-                for (ChatEngine.Peer peer : current.peers()) if (peer.userId().equals(selectedPeer)) {
-                    if (conversationName != null) conversationName.setText(peer.name());
-                    refreshContactStatus();
-                    refreshMessages(peer);
-                }
+                checkedPresence = null; shownPresence = null; refreshContactStatus();
+                refreshMessages(selectedContact);
             }
         });
     }
@@ -2431,6 +2668,7 @@ showDialog(approval);
         photoAdmin = false; photoRoleAccount = null;
         if (!photoPermissionPending) photoChoice = null;
         screenGeneration++;
+        resetConversation();
         pushRegistrationRunning = false; pushRegistrationFailed = false; pushRegisteredAccount = null; notificationStatus = null;
         completingGoogle = false;
         clearProfileAvatars();

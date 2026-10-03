@@ -1,7 +1,54 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-10-02. This is a development foundation,
+Evidence refreshed on Windows, 2026-10-03. This is a development foundation,
 not a production security assessment or independent audit.
+
+## Release 0.5.0 / active-chat responsiveness
+
+- Release candidate: versionName `0.5.0`, versionCode `31`. Signed packaging and
+  public publication are pending; the regression evidence below covers the
+  tested responsiveness changes before this version-only metadata bump.
+
+- Receipt and message updates previously rebuilt the conversation and called
+  protected-content decryption/read persistence on the main thread. Protected
+  entry reads and new-message text loading now run on the existing serialized
+  worker. Receipt changes update retained rows in place, preserving the composer,
+  caret and scroll position. Durable outgoing bubbles still appear after local
+  encrypted persistence without waiting for the upload response.
+- Presence-header validation no longer reads the vault from the UI timer, and
+  typing edits no longer contend with a presence lock held during vault reads.
+  Snapshot expiry, disconnect, identity checks and foreground cleanup remain in
+  effect. A websocket wake received during a sync now schedules one follow-up,
+  rather than potentially waiting for the next 15-second poll.
+- QA APK/instrumentation compilation, QA lint and release compilation/lint passed.
+  The final focused run passed **27 Android instrumentation tests**, with no
+  failures or skips, in 95.635 seconds on the isolated, secured Android 12
+  `Vanishr_Onboarding_Test` emulator using the separate `.qa` package.
+- New regressions demonstrate:
+  - Twelve text edits, a send tap and entering the next draft completed in
+    **73 ms** while the worker held the vault lock (required bound: <100 ms).
+    This is a UI-callback batch measurement, not end-to-end delivery latency.
+  - An 80-message history retained the same row objects across three receipt
+    transitions and 90 refresh requests, preserving draft, focus, caret and
+    scroll. A fresh incoming text rendered and became read; view-once content
+    was not consumed. Expired text was cleared from the retained row.
+  - A stored outgoing bubble appeared while the synthetic relay upload remained
+    blocked, without claiming delivery or replacing the next draft.
+  - Typing remained responsive while presence audience validation waited on
+    storage. Backgrounding discarded a queued conversation read, retained its
+    unread state and cleared previously rendered text.
+  - A burst of 100 wakes during an in-flight sync was coalesced and fetched again
+    within five seconds of releasing the synthetic response, without waiting
+    for the periodic poll.
+- Related tests cover retry IDs/deadlines, pending-send cancellation, clear chat,
+  presence identity/expiry/last-seen rules, secure profiles, group consent and
+  removal, notification view-once behavior and official Signal admin messaging.
+  The generated emulator credential and synthetic QA account data were removed.
+- These are local deterministic fixtures, not a WhatsApp comparison or sustained
+  two-phone/mobile-network load test. Real-device frame timing and live relay
+  delivery latency still need testing. This direct-download release keeps the
+  existing relay, signing identity and unconfigured Google/FCM client settings.
+  Publication is not a Google Play submission or a production security audit.
 
 ## Release 0.4.8 / bilateral administrator onboarding
 
