@@ -1,0 +1,1055 @@
+VANISHR - GOOGLE PLAY CONSOLE ANSWERS AND SUBMISSION CHECKLIST
+Prepared: 3 October 2026
+Candidate examined: 0.5.1, version code 32, app.vanishr.android
+Official Google guidance checked for this handoff; references are at the end.
+
+READ THIS FIRST
+==============
+You reported uploading an AAB. Your private Play Console was not inspected.
+This sheet is for vanishr-0.5.1.aab, NOT the older 0.5.0 bundle.
+Confirm version 0.5.1 / code 32 in Console's app bundle details.
+Uploading a bundle does not mean the app is approved or published.
+
+Your confirmed choices:
+- Price: FREE.
+- Intended audience: teenagers aged 13-17 and adults.
+
+Labels used below:
+  READY  = supported by the examined app/source; use if nothing has changed.
+  DRAFT  = proposed text or classification; review before submitting.
+  OWNER  = only you can supply or confirm this information.
+  HOLD   = do not certify this item until the stated issue is resolved.
+
+This is a manual answer sheet, not a Play Console import file.
+Copy only the field value or the text between BEGIN/END markers, not the markers.
+Never submit placeholders. Keep real reviewer passwords, tokens, signing keys,
+and personal verification documents OUT of this file and Git.
+Console labels/sections vary by account, country, track and permissions.
+Use Dashboard and App content > Needs attention as the authoritative task list.
+This is not legal advice, a security certification or guaranteed Play approval.
+
+
+0. IMPORTANT HOLDS BEFORE REQUESTING APPROVAL
+============================================
+
+HOLD A - Administrator-requested photo access and consent
+The submitted-source path MainActivity.photoRequestsOnce sets autoAllow=true.
+For a request from an independently verified contact, it skips the in-app
+"Allow photo access?" confirmation and starts preparing the photo session.
+An Android photo/notification permission dialog appears only when permission
+is missing. Existing Android permission is not informed consent for a particular
+administrator to browse a user's library.
+
+This is NOT a claim that signing up alone gives the admin access: verified
+contact identities, authentication, an unlocked phone at session start, and
+Android photo/notification permissions are additional prerequisites.
+Nevertheless, the per-request owner confirmation is skipped.
+
+PhotoLibrary serves thumbnails and requested original image bytes for images
+Android permits the app to read. It is not limited to the one picture a user
+selects as a message attachment. A ready owner-side photo session is also
+permitted by PhotoSharingService to continue after screen-off/device lock.
+Do not claim every photo session stops when the phone locks.
+
+The public Privacy page checked for this handoff does not describe this remote
+library-browsing/automatic-acceptance/lock-continuation feature. The initial
+Terms summary mentions admin introductions, not this specific photo access.
+A generic "Vanishr is active" notification with "End access" is not a substitute
+for the required prior disclosure and affirmative consent.
+
+Action before submission: remove/disable this feature in the Play build, or
+redesign and review explicit informed consent, scope and revocation; then align
+the app, website, declarations, listing and reviewer demonstration. A sentence
+in this file or the listing cannot fix an in-app consent issue. [S09, S10, S11]
+
+HOLD B - Broad photo permission eligibility
+The actual AAB requests READ_MEDIA_IMAGES. Google permits broad gallery access
+only for eligible core functionality where a system picker is insufficient.
+Ordinary chat attachments/profile pictures already use a picker in this app.
+Do not describe Vanishr as a gallery manager or claim the picker cannot support
+chat attachments just to obtain approval. See section 8. [S10]
+
+HOLD C - Reviewers must be able to access every restricted feature
+No reusable reviewer credentials or safe admin-review arrangement were supplied.
+The app is one-device-per-account and independently verifies ordinary peers.
+A random login/password alone may not provide a working two-person conversation
+after device replacement. Provide and test an autonomous review workflow.
+Do not expose the permanent real admin's credentials or create a second admin.
+A demonstration video does not automatically replace required reviewer access.
+[S04]
+
+HOLD D - Google login on a Play-installed copy
+0.5.1 contains the correct existing Google client configuration, but Google Play
+may sign delivered APKs with a different certificate from the upload key.
+Register the ACTUAL Play app-signing certificate(s) with Google/Firebase and
+verify a real Play-installed login. Also resolve OAuth Testing/test-user or
+verification restrictions. This was not verified by the local bundle build.
+See section 11. [S18, S26]
+
+HOLD E - Teen audience, moderation and operations
+You selected teenagers as part of the intended audience. Do not claim an age
+gate, parental consent, proactive content filtering, a staffed moderation team
+or an independent safety assessment: these were not demonstrated.
+The code has reporting/blocking and published standards; human handling,
+child-safety escalation and mailbox ownership/monitoring still need confirmation.
+Local age and consent laws apply; "13+" is not a worldwide compliance exemption.
+[S12, S13, S14]
+
+HOLD F - Public deployment readiness
+The existing deployment is documented as a dev/test backend, not a verified
+production hosting arrangement. Confirm production hosting eligibility,
+operational capacity, support and deletion handling before public production.
+An AAB validation or a successful website deployment does not establish these.
+
+If code changes are needed, issue a NEW higher version code. Do not alter and
+re-upload a different bundle under already-used code 32.
+
+
+1. APP IDENTITY, STORE SETTINGS AND PRICE
+========================================
+App name:                     Vanishr
+Default listing language:     English (United States) - en-US
+                              Suggested to match the current English interface.
+App or game:                  App
+Category:                     Communication
+                              Recommended for direct/private-group messaging.
+                              Do not select another category to avoid policy.
+Tags:                         Select only accurate options actually offered by
+                              Console, such as Messaging/Communication.
+                              Use up to five relevant tags, not unrelated SEO.
+Price:                        Free (confirmed by you)
+Contains ads:                 No
+In-app purchases:             No
+Subscriptions:                No
+Package/application ID:       app.vanishr.android
+Version name:                 0.5.1
+Version code:                 32
+Minimum Android:              Android 9 / API 28
+Target Android:               Android 16 / API 36
+Countries/regions:            OWNER - select intended, legally supported markets.
+                              Do not default to every country without review.
+Form factors:                 Android phones; enable additional form factors
+                              only after their device/asset requirements pass.
+Developer display name:       OWNER - your verified Console developer name.
+                              Do not infer it from a GitHub username.
+
+Free/paid rule: once offered for free, the same app cannot be changed to paid.
+Charging for the download later requires a different app/package. [S23]
+API 36 meets the current phone/tablet target requirement effective
+31 August 2026; a matching target number alone is not functional approval. [S19]
+
+Release artifact:
+  .tools\play-store-0.5.1\vanishr-0.5.1.aab
+  45,741,102 bytes (about 43.6 MiB)
+  SHA-256:
+  1783680526344f02e12be100384f5e6d49d70149b6b0b16f8347bc20ccb121d7
+
+
+2. STORE CONTACTS AND POLICY URLS
+================================
+Support email:
+richardhenryjames64@gmail.com
+
+Website:
+https://vanishr-download.vercel.app/
+
+Privacy policy:
+https://vanishr-download.vercel.app/privacy/
+
+Account-deletion request URL:
+https://vanishr-download.vercel.app/delete-account/
+
+Terms/community standards:
+https://vanishr-download.vercel.app/terms/
+
+Published child-safety standards URL:
+https://vanishr-download.vercel.app/terms/#child-safety
+
+Public support telephone:
+OWNER - enter your real support number if needed; otherwise leave an optional
+store-listing phone field blank. Account-verification phone requirements differ.
+
+Privacy/deletion contact email:
+richardhenryjames64@gmail.com
+OWNER must confirm this mailbox is controlled and monitored. A URL/mailto link
+can be a deletion-request mechanism, but requests must actually be handled.
+The URLs were publicly accessible when checked; HOLD A still requires the
+privacy content to be brought into agreement with the photo-access feature.
+
+
+3. COPY-PASTE STORE LISTING AND RELEASE NOTES
+============================================
+These drafts describe the examined app, including the problematic photo
+feature; they do NOT certify it as compliant. Resolve section 0 first.
+If the feature is removed or changed, revise the description accordingly.
+Official limits: name 30, short description 80, full description 4,000
+characters. Localized release notes: 500 characters per language. [S01, S17]
+
+BEGIN_APP_NAME
+Vanishr
+END_APP_NAME
+
+BEGIN_SHORT_DESCRIPTION
+Encrypted one-to-one chats and private groups with disappearing messages.
+END_SHORT_DESCRIPTION
+
+BEGIN_FULL_DESCRIPTION
+Vanishr is an Android messenger for one-to-one conversations and invite-only groups.
+
+MESSAGE WITH A TIME LIMIT
+Send text and photos with view-once, one-hour, six-hour or 24-hour settings. The app enforces message expiry on trusted clients. Recipients can still copy information outside the app, so disappearing messages are not a guarantee that content can never be retained.
+
+VERIFY YOUR CONTACTS
+Find people by username and independently compare their identity fingerprints before ordinary direct conversations. Private groups use a verified-owner model: members trust the verified owner to approve participants. The app uses official libsignal on client devices; the relay transports encrypted message content.
+
+ACCOUNT AND CONVERSATION CONTROLS
+Use username-and-password sign-in or Google sign-in when provider access is available. Set an optional shared display name, manage your profile, clear local chats, block users, report concerns and request account deletion. Clearing a local chat does not erase another person's copies.
+
+AN OFFICIAL HUMAN ADMIN
+New accounts are introduced to the single official Vanishr admin, @vanishr. The admin sees new-account directory information and conversations addressed to that admin, not unrelated encrypted chats. This is a human account, not an AI assistant.
+
+ADDITIONAL PHOTO-ACCESS FEATURE
+A verified administrator can request a live photo-library browsing session. Android permissions determine which photos can be accessed, including requested originals. In this build, eligible owner-side requests are accepted automatically without a separate confirmation for each request. An active owner session may continue after the phone locks, within its existing time limit; its notification offers End access. This feature is separate from choosing a photo to send in a chat.
+
+IMPORTANT LIMITS
+Android 9 or later, a configured device screen lock and an internet connection are required. The app has no advertising, browser chat client or cloud chat backup. Uninstalling or clearing app data can destroy local keys and chats. Google Play manages updates for Play-installed builds.
+
+Vanishr is a development-stage project, not an independently audited or production-certified messenger. Read the Privacy policy and Terms to understand account metadata, providers, retention, reporting and deletion.
+END_FULL_DESCRIPTION
+
+Release name (internal Console label):
+0.5.1 - Google sign-in configuration fix
+
+BEGIN_RELEASE_NOTES
+<en-US>
+Restored Google sign-in configuration.
+Includes smoother typing and message updates, with conversation drafts and scroll position preserved during updates.
+Play-installed builds continue to use Google Play for updates.
+</en-US>
+END_RELEASE_NOTES
+
+Do not claim "unhackable", "anonymous", "zero data collected", "Google approved",
+"WhatsApp-level performance", "no admin photo access" or guaranteed erasure.
+Do not add app rankings, reviews, pricing promotions or unrelated keywords.
+
+
+4. GRAPHICS, SCREENSHOTS AND VIDEOS
+==================================
+App icon - required:
+  512 x 512 pixels, 32-bit PNG, maximum 1,024 KB. [S03]
+  Use the approved Vanishr logo, not a new unrelated brand.
+  Existing download\icon.png is only 192 x 192: do NOT upload it as the
+  finished Play icon. Vanishr Icon.png is a 1374 x 1145 source image, not
+  itself the correctly sized square Play asset.
+  OWNER ACTION: export the approved logo as a proper 512 x 512 PNG.
+  Suggested icon alt text, if requested: Vanishr app logo.
+
+Feature graphic - required for the standard listing:
+  1024 x 500 pixels; JPEG or 24-bit PNG without alpha. [S03]
+  OWNER ACTION: supply a truthful, correctly sized feature graphic.
+  Suggested on-image copy: Vanishr / Conversations with a time limit.
+  No finished feature graphic was located in the inspected release materials.
+
+Phone screenshots:
+  Minimum two listing screenshots; up to eight per supported device type.
+  JPEG or 24-bit PNG without alpha; each dimension 320-3840 pixels.
+  Longest dimension must not exceed twice the shortest.
+  For stronger merchandising eligibility, Google recommends at least four
+  app screenshots at 1080px minimum, e.g. 1080 x 1920 portrait (9:16). [S03]
+  Use actual current UI with synthetic accounts/content:
+    1. Chats list
+    2. Direct conversation with expiry controls
+    3. Private group
+    4. Profile/account deletion or safety controls
+  Existing download\assets\conversations.png is 480 x 1067 with alpha:
+  its aspect ratio exceeds 2:1, and it is not a ready Play screenshot.
+  Existing chat.png and profile.png are 480 x 960 with alpha:
+  export suitable opaque images and verify current UI before using them.
+  Do not upload real chats, usernames, tokens, credentials or personal photos.
+  Do not disable the shipping app's privacy protections just for marketing.
+
+Tablet/Chromebook/TV/Wear/XR screenshots:
+  Conditional on distribution and the fields Console shows. Do not submit
+  phone images as evidence of a tested tablet/TV/watch layout. [S03]
+
+Store promotional video:
+  Optional; use a compliant, accessible YouTube video showing real functionality.
+  No promotional video URL has been supplied.
+
+Foreground-service/permission demonstration video:
+  Separate from an optional promotional trailer. The FGS declaration needs a
+  demonstration link; see section 8. Never fabricate the video URL.
+
+
+5. APP ACCESS / SIGN-IN DETAILS FOR GOOGLE REVIEWERS
+===================================================
+Access restricted?
+  YES - all or some functionality is restricted.
+  Most functionality needs an account, an unlocked secured phone and network
+  access. Google login and the Photos/admin functions have additional gates.
+
+Instruction name:
+  Vanishr review - standard account and two-person messaging
+
+Username:
+  OWNER - enter a real, prepared reviewer username in Play Console only.
+
+Password:
+  OWNER - enter its real reusable password in Play Console only.
+  Current password rules: 16-64 characters and at most 72 UTF-8 bytes.
+  Username rules: 3-32 lowercase letters, numbers or underscores.
+  Do not submit a made-up example account that has not been provisioned.
+
+BEGIN_REVIEW_INSTRUCTIONS
+Use the reviewer account credentials supplied separately in this Console entry. Open Vanishr on Android 9 or later with a system screen lock configured and the phone unlocked. Vanishr uses the system unlock state; it has no separate app PIN.
+
+Choose Sign in, enter the supplied username and password, and tap Sign in. Read and accept the Terms when prompted. The trusted relay is already configured; do not change its address.
+
+Open Chats to see contacts. Use the prepared test peer and the independently checked identity instructions supplied with that fixture to test messaging. Send text, test the expiry options, and test an ordinary selected image. Groups are invite-only and require a verified owner.
+
+Open a conversation's options for Profile, Clear chat, Block user and Report user. Long-press an incoming message to reach Report. Open Chats > My profile > Delete account for deletion. Use the separate disposable deletion-test account, not the reusable reviewer account. Deletion requires typing DELETE and reauthentication.
+
+Notifications and photo permissions can be denied for ordinary text-chat review. Google sign-in is an additional route and must be tested with the separately described provider-access arrangement. Restricted admin/photo functions and their demonstration are described in the additional instructions.
+END_REVIEW_INSTRUCTIONS
+
+This text is incomplete without the real fixtures below:
+- Standard reviewer account and a separate peer account/device.
+- A repeatable way to independently verify the current peer/device identities.
+- A disposable deletion-test account and replenishment plan.
+- Steps for the one-device-per-account/device-replacement flow, if encountered.
+- Safe access to every role-restricted feature or a method accepted by Google.
+- Google-account/provider access instructions if reviewers must use that route.
+
+Google requires reusable, always available, location-independent sign-in details
+in English, including required third-party login details. Do not rely on a
+one-time OTP, owner approval on demand, expiring password or your personal 2FA.
+[S04]
+
+Do not give reviewers the real permanent admin password, promote another user,
+disable identity checks, or use real people's chats as reviewer fixtures.
+Only allow destructive device replacement on disposable reviewer accounts.
+Do not automatically claim "No additional information required" while the
+review path or restricted features remain unavailable.
+
+
+6. TARGET AUDIENCE, CONTENT RATING AND CHILD SAFETY
+==================================================
+Target audience age bands, matching your stated intent:
+  Select: 13-15, 16-17, and 18 and over.
+  Do not select: 5 and under, 6-8, or 9-12.
+  Do not select adults-only restrictions while claiming to target teens.
+
+This is an intended-audience choice, NOT evidence of age verification.
+No implemented date-of-birth/age-verification workflow was identified.
+Google says to consider local definitions of children when targeting users
+under 21. Do not assume excluding under-13 bands removes all Families/minor
+obligations in every launch country. Review suitability and law for each market.
+[S14]
+
+Content rating contact email:
+  richardhenryjames64@gmail.com (OWNER must confirm receipt/monitoring)
+
+IARC questionnaire category, if these options are shown:
+  Social or Communication.
+  This questionnaire choice is not the same as changing the store category.
+
+Feature answers supported by the build:
+  Is this a game?                                      No.
+  Can users communicate/interact with other users?     Yes.
+  Can users exchange text/messages?                    Yes.
+  Can users exchange photos/images?                    Yes.
+  Can users share user-generated/personal content?     Yes.
+  Are there private or group conversations?            Yes.
+  Can users block users?                              Yes.
+  Can users report a user/content?                    Yes.
+  Is there random matchmaking?                        No identified feature.
+  Is this a dating/matchmaking service?                 No identified feature.
+  Is there built-in location sharing?                  No.
+  Are there in-app purchases or paid random items?     No.
+  Are there gambling/betting/real-money prizes?         No.
+  Is there unrestricted web browsing inside the app?   No.
+
+Read the actual question's scope for violence, profanity, sex, drugs, etc.:
+- Developer-provided screens/promotional material do not intentionally include
+  these themes; answer No only where the question is about that supplied content.
+- Do not answer No to communication/UGC merely because content is encrypted.
+- User text/images are not proactively filtered by an implemented content scanner.
+  Do not claim all potentially objectionable content is filtered or moderated.
+- Whether moderation is effective/ongoing is an OWNER operational decision,
+  not proved by a Report button or a pending report queue.
+- Do not assert that all communication is restricted to real-world friends.
+  Username discovery and admin introductions are not real-world identity checks.
+
+Final rating:
+  GENERATED BY IARC. Do not invent Everyone, Teen, 12+, 16+ or 18+.
+  Reconcile the resulting ratings/territory restrictions with your teen audience.
+[S15]
+
+Child Safety Standards, if Console presents this declaration:
+  Published standards URL:
+  https://vanishr-download.vercel.app/terms/#child-safety
+  In-app reporting mechanism:
+  Conversation > Report user; incoming-message actions > Report.
+  Public escalation email:
+  richardhenryjames64@gmail.com
+  Child-safety contact name:
+  OWNER - real responsible person's full name.
+  Child-safety contact email:
+  Use the public support email only if its owner can handle these duties.
+
+Do not self-certify until true:
+- Published standards against child sexual abuse and exploitation.
+- An accessible in-app feedback/reporting mechanism.
+- Action on known child sexual abuse material under the standards and law.
+- Applicable reporting/escalation to competent authorities.
+- A designated capable point of contact.
+
+Google currently places Anonymous/Random Chat and Social/Dating apps in scope;
+the presence/absence of children does not exempt an in-scope app. Communication
+is the recommended store category here, but do not use that label or private
+usernames as a substitute for assessing the real anonymous/social-chat scope.
+No random-pairing feature was found. [S12]
+
+Vanishr's report payload contains identifiers and a selected reason, not message
+text or images. The relay cannot proactively read encrypted conversations.
+Do not ask users/reviewers to send illegal images as evidence, and do not claim
+automated illegal-content scanning. Human response procedures remain necessary.
+
+
+7. DATA SAFETY - FIELD VALUES AND LIMITS ON WHAT CAN BE CERTIFIED
+===============================================================
+This is a DRAFT classification, not a blindly uploadable "No data" answer.
+Google defines collection broadly, including off-device SDK processing.
+Cover ALL versions, regions and age groups currently distributed on Play.
+Use actual provider behavior/contracts and operator retention, not just local
+code. SDK permission absence is not proof of no data collection. [S05, S06]
+
+7.1 Top-level questions
+----------------------
+Does the app collect or share any of the listed user data types?
+  YES. Account/device identifiers and relationship metadata alone require this.
+
+Is all collected user data encrypted in transit?
+  DRAFT: Yes for the shipped app-to-relay and Google/Firebase paths:
+  HTTPS/WSS is enforced; Firebase documents HTTPS. No cleartext fallback.
+  OWNER must verify any additional collection endpoints/vendor processing before
+  certifying "all". This does not mean routing/presence metadata is E2EE.
+  External support email is not E2EE by Vanishr.
+
+Which account-creation methods does the app support?
+  Select "Username and password".
+  Select "OAuth" for Google sign-in.
+  Do not select no-account creation.
+  No phone OTP or app-provided second authentication method was identified.
+  The Android screen lock is not another Vanishr account-creation method.
+
+Can users request account deletion?
+  YES - implemented in-app path and public request route exist.
+  In-app: Chats > My profile > Delete account > type DELETE > reauthenticate.
+  Link: https://vanishr-download.vercel.app/delete-account/
+  OWNER must test the current deployment and actually handle email requests.
+  Do not claim a fully automated website deletion form: the web route is email.
+
+Can users request deletion of some/all data WITHOUT deleting the account?
+  OWNER / VERIFY before choosing Yes.
+  Clear chat is local; it is not a global server-data erasure request.
+  Profile edits/removals are narrower operations. There is no verified universal
+  data-only request workflow supplied for all collected data.
+  If no such request service is actually provided, choose No.
+  Do not select "all data automatically deleted within 90 days": durable account
+  identifiers and other records make that untrue.
+
+Independent security review / MASA badge?
+  NO completed independent assessment has been supplied.
+  Builds, lint, signature checks and tests are not such an assessment.
+
+7.2 Sharing rule to apply to EVERY selected data type
+---------------------------------------------------
+There is no justified global "Shared: No" answer until these checks are complete.
+
+Google excludes qualifying transfers to service providers acting only on your
+instructions, and specific user-initiated transfers reasonably expected by the
+user, or transfers based on qualifying prominent disclosure and consent, from
+its definition of sharing. These are not exemptions from collection. [S05]
+
+For ordinary user-requested messages/profile actions, assess that exception.
+For Azure/Google/Firebase, verify the actual service-provider relationship,
+settings and permitted uses; not every Google SDK/service has the same role.
+If the admin is the publisher/operator, delivery to that admin is first-party
+receipt, not automatically third-party sharing. If another organization/person
+acts independently as a recipient, classify that relationship accurately.
+
+For automatic photo requests, DO NOT rely on a user-initiated/consent exception
+while HOLD A remains. Being an admin is not the photo owner's consent.
+For automatic new-account directory disclosure, do not assume an unexpected
+third-party disclosure is user-initiated just because someone registered.
+
+Per-type Shared field:
+  No ONLY when there is no reportable third-party transfer, or every applicable
+  transfer meets a documented Google exception.
+  Yes when a transfer to a third party does not meet an exception.
+  OWNER must resolve these conditions before submitting the form.
+
+7.3 Data types: recommended entries based on actual flows
+--------------------------------------------------------
+A. Personal info > User IDs
+   Collected: Yes.
+   Required/optional: Required for the account-based messaging service.
+   Ephemeral: No. Username/account UUID and Google subject mapping are durable.
+   Purposes: App functionality; Account management; Fraud prevention, security,
+             and compliance.
+   Includes: usernames, account UUID, Google stable subject for Google accounts,
+             authentication/account association and deletion-operation IDs.
+   Shared: apply 7.2; include admin introduction/lookup visibility.
+
+B. Personal info > Name
+   Collected: Yes when a shared display name is provided.
+   Required/optional: Optional.
+   Ephemeral: No. Shared profile name persists until changed/deleted.
+   Purposes: App functionality; Account management.
+   Shared: apply 7.2; shared names can appear in lookup/admin directory.
+   Private local contact nicknames are different: they are not uploaded.
+   Do not describe this as automatic import of the user's Google name.
+
+C. Personal info > Email address
+   VERIFY the Google sign-in/SDK and support scope; recommended inclusive draft:
+   Collected: Yes where Google credentials/provider flow or app-directed support
+              transmits the address.
+   Required/optional: Optional; username/password sign-in is an alternative.
+   Purposes: Account management for sign-in; Developer communications for
+             support/deletion correspondence where that collection is in scope.
+   Ephemeral: Do not claim Yes for the whole category if any provider/mailbox
+              retention is non-ephemeral. Verify operator/provider handling.
+   Shared: apply 7.2, including Google and the support-mail provider.
+   Evidence limit: the relay persists only Google's subject and does not import
+   Google email/name/photo into the account table. The full Google ID token is
+   transmitted for validation; not storing its other claims does not prove no
+   off-device email processing. The official credential API exposes email/profile
+   information. External browser/mail-app activity has to be scoped correctly;
+   do not automatically count an unrelated email app's entire data collection.
+   No real user's Google token was inspected for this answer sheet. [S05, S07]
+
+D. Device or other IDs
+   Collected: Yes.
+   Required/optional: Required for device/account binding overall.
+                      Push alone is optional, but not every device-ID flow is.
+   Ephemeral: No.
+   Purposes: App functionality; Account management; Fraud prevention, security,
+             and compliance.
+   Includes: random device UUID, provider registration token, Firebase
+             installation identifier and associated delivery/authentication IDs.
+   Shared: apply 7.2 and actual Google/Firebase provider terms/settings.
+   Advertising ID is a DIFFERENT identifier; its declaration is No below.
+
+E. Contacts
+   Collected: Yes for social/contact relationship information.
+   Required/optional: Required for the implemented introduction/routing flows;
+                      some manual contact/group operations are optional.
+   Ephemeral: No. Admin introduction/group relationships can be durable.
+   Purpose: App functionality.
+   Shared: apply 7.2.
+   Google explicitly includes social graphs/usernames/message relationships
+   under Contacts. No phone address-book import or READ_CONTACTS permission
+   does not justify answering No for this broader Data safety category. [S05]
+
+F. App activity > App interactions
+   Collected: Yes.
+   Required/optional: Required where generated by foreground service use,
+                      message routing and automatic presence behavior.
+   Ephemeral: No for the category overall.
+   Purposes: App functionality; Fraud prevention, security, and compliance.
+   Includes: routing/delivery/read timing and presence/last-seen interactions.
+   Shared: apply 7.2, including the audience receiving presence.
+   This is not a claim that an app analytics SDK is enabled.
+
+G. App activity > In-app search history
+   Collected: Yes for username lookup requests sent to the relay.
+   Required/optional: Optional; users choose to search for contacts.
+   Purpose: App functionality.
+   Ephemeral: VERIFY deployed request/access logging and provider retention.
+              Only choose Yes if each lookup is retained no longer than its
+              real-time request. No durable search-history feature was found,
+              but that is not proof about deployment logs.
+   Shared: apply 7.2; do not invent advertising/personalization purposes.
+
+H. App activity > Other actions
+   Collected: Yes for block/report/deletion-operation choices and metadata.
+   Required/optional: Optional for those explicit user actions.
+   Ephemeral: No. Safety reports can remain up to 30 days.
+   Purposes: App functionality; Fraud prevention, security, and compliance;
+             Account management for account-deletion operations.
+   Shared: apply 7.2 and the real operator/moderation/escalation arrangement.
+   Reports contain selected IDs/reason, not free-text evidence, photos or chats.
+   Do not describe a metadata-only report as a submitted message transcript.
+
+I. Messages > Other in-app messages
+   Collected: Include operator-readable messages sent to the human admin/support.
+   Required/optional: Optional for those operator-addressed messages.
+   Purposes: App functionality; Developer communications if actually used for
+             user support.
+   Ephemeral: No for retained messages with the original 1/6/24-hour deadlines.
+   Shared: apply 7.2; distinguish operator receipt from delivery to other users.
+   IMPORTANT: Google has a real collection exception for end-to-end encrypted
+   data unreadable by you or any intermediary and readable only by sender and
+   recipient. Qualifying ordinary user-to-user payloads can meet it.
+   Do not extrapolate that exception to routing metadata or to content the
+   developer/operator can actually read as the admin recipient. Document the
+   boundary before finalizing this category. [S05]
+
+J. Photos and videos > Photos
+   Collected: Include photos/originals made readable to the human admin/operator
+              through chat or the remote photo feature.
+   Required/optional: Optional for using the text-chat app; media permission can
+                      be denied. This does NOT fix the consent problem.
+   Purpose: App functionality.
+   Ephemeral: Do not claim the entire category is ephemeral: chat/photo caches
+              and browsing sessions can outlive a single real-time request.
+   Shared: HOLD / apply 7.2; auto-acceptance is not a sharing exemption.
+   Qualifying E2EE peer-only images may have the collection exception above.
+   The remote path can stream original image bytes; do not claim all originals
+   have EXIF metadata removed. Ordinary encoded chat/profile photos are a
+   separate path.
+   Videos: No implemented video messaging/library feature was identified.
+
+K. App info and performance > Diagnostics / Other app performance data
+   OWNER / SDK REVIEW before selecting a final answer.
+   The app has no Crashlytics/Performance Monitoring SDK or implemented app
+   analytics collector. Firebase nevertheless documents app-version/user-agent
+   metadata and installation identifiers. Map any applicable SDK telemetry to
+   Console's types/purposes instead of assuming "no analytics SDK" means none.
+   The Firebase user agent includes OS/model/brand/form factor, installer and SDK
+   versions, and Google says it is not linked to a user/device identifier.
+   FCM BigQuery delivery metrics are conditional; no enabling call was found
+   in the app. Verify Console/provider settings and the exact SDK versions.
+   Do not invent active BigQuery export, crash reporting or advertising analytics.
+   Firebase guidance describes its latest SDKs; compare the pinned versions:
+     firebase-messaging 25.1.3
+     firebase-installations 19.1.2
+     googleid 1.1.1 / AndroidX credentials 1.6.0
+   For any reportable diagnostics: choose only actual purposes; do not mark
+   ephemeral or optional without checking the SDK's real behavior. [S06]
+
+L. Other types not identified as structured app features
+   No dedicated collection feature was identified for: address, phone number,
+   race/ethnicity, political/religious beliefs, sexual orientation, financial
+   information, health/fitness, calendar, audio recordings, SMS/MMS, arbitrary
+   files/documents, installed-app inventory or web browsing history.
+   The application is not an email client; email addresses are covered in C.
+   No built-in precise/approximate location feature or location permission was
+   identified. Network IP transit alone is not location collection, but if a
+   provider/operator derives location, declare the actual derived category.
+   Authentication still processes passwords/ID tokens over HTTPS. There is no
+   invented standalone "Passwords" checkbox: map authentication information to
+   the current categories/SDK guidance and its account/security purposes;
+   evaluate Personal info > Other info if needed rather than hiding credentials.
+   Do not automatically label all sensitive categories collected merely because
+   a user might mention them in an otherwise qualifying E2EE message.
+
+7.4 Security, retention and deletion text for supporting explanations
+--------------------------------------------------------------------
+BEGIN_DATA_HANDLING_EXPLANATION
+Vanishr processes account and device identifiers for authentication, contact discovery, delivery, abuse prevention and account management. Optional shared profile names remain until changed or deleted. The relay transports client-encrypted message content and also processes routing and presence metadata. The human admin can read content addressed to that admin; the photo-access feature needs separate disclosure and consent review.
+
+Message deadlines are view once or one, six or 24 hours. Presence lasts up to 12 seconds, typing up to five seconds, and latest-activity/audience metadata up to 24 hours. Safety-report metadata lasts at most 30 days. Account/profile identifiers are not deleted merely because messages expire.
+
+Account deletion is available in My profile and by an email request through the public deletion page. Completion removes the account data and reports submitted by or targeting that account, subject to documented limits. A minimal deletion-confirmation receipt has a fixed 24-hour lifetime; the sole admin's random UUID reservation cannot be reassigned. Other recipients' copies, provider retention and support-mail handling are separate. No fixed automatic mailbox deletion period has been implemented.
+END_DATA_HANDLING_EXPLANATION
+
+Do not paste the explanation as a replacement for per-type form answers.
+Temporary Redis/in-memory storage is not automatically "ephemeral processing".
+Google's real-time-request definition is stricter than having a TTL. [S05]
+The final form must match the corrected privacy policy and actual operations.
+
+
+8. SENSITIVE PERMISSIONS AND FOREGROUND SERVICE DECLARATIONS
+===========================================================
+Permissions observed in the actual 0.5.1 Play manifest:
+  INTERNET
+  POST_NOTIFICATIONS
+  FOREGROUND_SERVICE
+  FOREGROUND_SERVICE_DATA_SYNC
+  READ_EXTERNAL_STORAGE (maximum Android API 32)
+  READ_MEDIA_IMAGES
+  READ_MEDIA_VISUAL_USER_SELECTED
+  HIDE_OVERLAY_WINDOWS
+  USE_BIOMETRIC / USE_FINGERPRINT
+  ACCESS_NETWORK_STATE / WAKE_LOCK
+  RECEIVE_BOOT_COMPLETED
+  com.google.android.c2dm.permission.RECEIVE
+  App-owned non-exported dynamic-receiver permission
+
+No READ_MEDIA_VIDEO, READ_CONTACTS, background location, SMS/Call Log,
+MANAGE_EXTERNAL_STORAGE, QUERY_ALL_PACKAGES, AccessibilityService,
+USE_FULL_SCREEN_INTENT, AD_ID or REQUEST_INSTALL_PACKAGES permission was found.
+Biometric permission does not mean Vanishr receives fingerprint/face templates.
+
+READ_MEDIA_IMAGES explanation - HOLD, honest current-feature description:
+BEGIN_PHOTO_PERMISSION_EXPLANATION
+The Photos feature lets the verified administrator request an encrypted live view of photos Android permits Vanishr to read. The owner device serves thumbnails and requested original images in a bounded session. Ordinary chat attachments and profile photos use a system picker. The current owner-side request flow auto-accepts instead of obtaining a separate confirmation for each request.
+END_PHOTO_PERMISSION_EXPLANATION
+
+Why a system picker is insufficient:
+  HOLD. There is no honest established justification for broad access merely
+  to send a chat/profile picture. Broad access was added for remote browsing.
+  The operator must demonstrate an eligible core use case, or remove the broad
+  permission and feature from the Play variant. Do not claim approval because
+  a custom browsing UI exists. Android limited-photo grants do not waive policy.
+  Updating only Console answers does not remove a permission from an AAB. [S10]
+
+READ_MEDIA_VIDEO explanation:
+  Not requested; do not invent a video-access use case.
+
+Foreground service type:
+  dataSync / FOREGROUND_SERVICE_DATA_SYNC.
+  Service: app.vanishr.android.PhotoSharingService.
+  Suggested Console use case if the feature is retained and eligible:
+  Network transfer: Upload or download.
+  NOT backup/restore, calls, location tracking or emergency alerts.
+
+BEGIN_FGS_FUNCTIONALITY
+The dataSync foreground service transfers encrypted thumbnails and requested original images during an active remote photo session. An administrator initiates the request. The session has an existing absolute deadline of at most 15 minutes and exposes an End access notification action. The current owner-side flow auto-accepts eligible requests; it must not be described as always explicitly owner-initiated.
+END_FGS_FUNCTIONALITY
+
+BEGIN_FGS_DEFERRED_IMPACT
+Deferring the transfer prevents the requester from interactively browsing the current photo session and delays requested thumbnails or images. The session still expires at its original deadline; ordinary messaging does not require this photo transfer to run.
+END_FGS_DEFERRED_IMPACT
+
+BEGIN_FGS_INTERRUPTED_IMPACT
+Interrupting the transfer ends or interrupts the active image request. The service is START_NOT_STICKY and does not promise unattended restart after force-stop. Previously received data and original deadlines are not reset. A ready owner-side session may continue after device lock; do not claim locking always revokes access.
+END_FGS_INTERRUPTED_IMPACT
+
+Is the work user-initiated?
+  Requester-side: admin taps Photos.
+  Owner-side: NOT a fresh affirmative action per request in this build.
+  HOLD any blanket owner-initiation/consent certification.
+
+Video link:
+  OWNER - supply a real Google-accessible demo URL, not a placeholder.
+  Google requires a feature description, impact of deferral/interruption,
+  a demonstration video and a matching use case for each FGS type. [S11]
+  Record only synthetic accounts/photos. Show both sides, the actual permissions,
+  consent behavior, notification, End access, background/lock behavior and expiry.
+  Do not stage a confirmation dialog that the submitted build actually skips.
+  Do not hide the role-restricted feature from the review.
+
+No additional FGS types are declared by this bundle. If you remove the photo
+feature, re-evaluate/remove its service permission and declaration in a new AAB.
+
+
+9. OTHER APP CONTENT DECLARATIONS
+=================================
+Ads:
+  No. No advertising integration was found in the app.
+
+Advertising ID:
+  No. The examined manifest has no com.google.android.gms.permission.AD_ID,
+  and no AdvertisingIdClient use was found.
+  Still declare Firebase/device identifiers in Data safety.
+
+Financial features:
+  "My app doesn't provide any financial features."
+  Complete the declaration even for a non-financial app when requested. [S20]
+
+Health apps:
+  "My app does not have any health features" / equivalent current option.
+  No Health Connect or health/medical app functionality was identified.
+  The non-health declaration is still required on applicable tracks. [S21]
+
+Government apps:
+  No - this is documented as an independent project, not an app developed by
+  or for a government agency. OWNER must correct this if ownership differs.
+
+News and magazine app:
+  No.
+
+COVID-19/contact tracing, if shown:
+  No such feature.
+
+Blockchain, tokenized digital assets, crypto wallets or rewards, if shown:
+  No such feature.
+
+AI-generated content, if a relevant declaration is shown:
+  No AI content-generation feature. The official admin is a human.
+  AI-assisted development is not an AI content-generation feature for users.
+
+Accessibility API / VPN / background location / all-files access /
+SMS and Call Log / package inventory / full-screen intent:
+  Not used by the examined manifest. Do not request these exceptions.
+
+Data deletion, UGC, child safety and foreground/photo access:
+  Use their detailed sections above; these are not all "No".
+
+Country-specific legal, consumer/trader or payment-profile questions:
+  OWNER - answer the actual question in your Console from your legal status.
+  Do not copy an Apple App Store form or choose non-trader merely because the
+  app is free. No such personal/account facts were established here.
+
+
+10. ACCOUNT DELETION AND HUMAN MODERATION OPERATIONS
+===================================================
+Account deletion URL to paste:
+https://vanishr-download.vercel.app/delete-account/
+
+Deletion-request email subject:
+Vanishr account deletion request
+
+Expected request details:
+Current Vanishr username and account UUID if known; requesters can start even
+if they do not know those identifiers. Do not require reinstall merely to
+request deletion. A username, email sender or UUID alone is not ownership proof.
+
+Never ask requesters to email passwords, Google ID tokens, deletion proofs,
+private keys, identity documents, private conversations or illegal images.
+Establish a safe ownership-verification and confirmation process.
+OWNER must specify actual response handling and applicable retention periods;
+the code does not create a staffed mailbox or guarantee a response within X days.
+
+Do not claim:
+- Sign-out is account deletion.
+- All data vanishes immediately from every recipient/provider.
+- All stored data automatically expires in 24 hours.
+- All Google email data is impossible to receive.
+- A reviewer's request will be acted on if no human/process is available.
+
+Reports are metadata-only and depend on the enabled pinned admin. No available
+admin can mean an explicit safety_review_unavailable failure, not successful
+moderation. Arrange a real route for complaints involving that admin.
+Google expects effective ongoing moderation suited to the UGC, not just buttons.
+[S08, S13]
+
+
+11. PLAY APP SIGNING, GOOGLE LOGIN AND UPDATES
+=============================================
+Upload certificate / current sideload certificate SHA-256:
+c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c
+
+Current sideload certificate SHA-1:
+1bfcf77f9ae8c14a53fcd79ceee0e9d2a8f1c0ca
+
+These are PUBLIC fingerprints, not private signing material.
+They are NOT proof of the certificate Google uses for Play-delivered APKs.
+
+Before review:
+1. Open the app's Play app signing / App integrity area (Console navigation may
+   show Protected with Play > Play Store distribution > Play app signing).
+2. Read the actual App signing key certificate(s), not only Upload key.
+3. Register the actual package/certificate identity with Firebase/Google OAuth.
+4. If this creates another Android OAuth client, ensure the relay's authorized
+   Android client list permits that client while retaining audience/nonce checks.
+5. Check Google Auth Platform consent/publishing status and allowed test users.
+6. Install from the chosen Play test track and verify real Google login,
+   logout/login, account deletion and notification behavior.
+
+Do not remove token validation, transfer the sole admin role, replace signing
+keys casually or advise existing users to uninstall to work around a signer
+mismatch. Uninstalling can destroy local keys and chats. [S18, S26]
+
+Update behavior of the provided AAB:
+- Play-specific build; external APK updater URL/action excluded.
+- Profile action is "Open Google Play".
+- Google Play provides Play-installed updates after the release is available.
+- This is not a custom in-app check that reports the Play store's newest version.
+- Publishing to Play does not automatically migrate the update source or signing
+  identity of an already-installed website APK.
+- The separate website APK keeps its existing website update feed.
+
+
+12. TEST TRACKS, PRODUCTION-ACCESS FORM AND RELEASE
+==================================================
+Suggested first track:
+  Internal testing, using the actual Play-generated install.
+  This is not equivalent to a required closed test. [S16, S17]
+
+If your PERSONAL account was created after 13 November 2023:
+  At least 12 testers must remain opted into a CLOSED test continuously for
+  14 days before applying for production access. They must still meet the
+  requirement at application time. Google evaluates actual engagement/readiness.
+  Passing local tests or simply waiting 14 days is not automatic approval. [S16]
+
+Tester email list/group:
+  OWNER - real consenting testers. Enter in Console, not this public file.
+Account creation date/type:
+  OWNER - read your verified account details.
+Closed-test start/end dates:
+  OWNER - use actual Console records.
+Actual count/engagement/feedback:
+  OWNER - use real records; never invent tester activity.
+
+Production-access questions and how to answer:
+  How easy was it to recruit testers?
+    OWNER - select what actually happened.
+  How did testers engage; did they use all features?
+    OWNER - actual duration, scenarios, devices, omissions and outcomes.
+  What feedback did you receive and how was it collected?
+    OWNER - real feedback/channels, not a generic fabricated endorsement.
+  Who is the intended audience?
+    Teenagers aged 13-17 and adults seeking direct and invite-only group
+    messaging with time-limited content. Assess suitability/legal age rules
+    before making this a production promise.
+  How does the app provide value?
+    Direct/private-group messaging with configurable message expiry,
+    contact-identity verification and account/safety controls.
+  Expected installs in the first year?
+    OWNER - an honest business estimate; no value is inferred here.
+  What changes were made following the CLOSED test?
+    OWNER - link actual test feedback to actual changes.
+    Known development history: active-chat lag was investigated and Google
+    configuration accidentally omitted from 0.5.0 was restored in 0.5.1.
+    Do not relabel that history as closed-test results without evidence.
+  How did you decide production readiness?
+    HOLD until section 0 issues, reviewer access, real Play login, operational
+    handling and required testing are resolved. A bundle hash is insufficient.
+
+Known local technical evidence, NOT a substitute for Play testing:
+- 27 targeted Android regressions for the chat-responsiveness change.
+- 13 isolated packaging/configuration regressions for 0.5.1.
+- Signed release build/R8/lint, bundletool and signature checks.
+- Target API 36, min API 28, release/non-backup manifest settings.
+- 16-KiB packaging and load-segment checks for four 64-bit native libraries.
+- Real relay Google challenge/audience preflight and packaged client values.
+- No full real-Google-account login or Play production approval demonstrated.
+
+Rollout steps:
+1. Resolve the holds; issue a new version if the binary must change.
+2. Finish Main store listing and Store settings.
+3. Complete every applicable App content / Needs attention declaration honestly.
+4. Save and verify sign-in/review instructions and demonstrations.
+5. Confirm signing/provider configuration and install from a Play test track.
+6. Review pre-launch reports and fix actual functional/policy issues.
+7. Run required closed testing and obtain production access, if applicable.
+8. Prepare the release; add the correct already-uploaded bundle from the library,
+   rather than attempting to upload an identical version code again.
+9. Enter release name and localized notes; review errors and warnings.
+10. Use Publishing overview > Send for review when everything is truly ready.
+    Follow managed-publishing/rollout controls shown in your Console after review.
+11. Confirm the actual listing/track is live. An upload, Draft or internal-test
+    URL is not evidence that all Play users can install it. [S17, S24]
+
+Private signing keys/passwords and server configuration must never be uploaded
+as listing assets, review attachments or support files.
+
+
+13. OWNER-ONLY INFORMATION THAT CANNOT BE INVENTED
+=================================================
+Enter these directly into the appropriate private Console form, if requested:
+- Verified account type, legal name, address and country.
+- Organization details and D-U-N-S number, if applicable.
+- Account contact email/telephone and public developer-contact details.
+- Identity verification documents and any required device/account checks.
+- Tax, payments and bank details where actually applicable.
+- Countries, responsible operator and support/moderation commitments.
+- Child-safety responsible person's name/contact and escalation procedure.
+- Real reviewer credentials, fixture details and demonstration video URLs.
+- Actual Play app-signing fingerprints/OAuth access and test results.
+- Actual testing evidence and first-year install estimate.
+
+Do not treat a GitHub owner name or the app brand as a verified legal identity.
+An "admin" app role does not make the product an enterprise device-management
+app or grant an exemption from user-data or media-access rules. [S10, S22]
+
+
+14. EVIDENCE AND OFFICIAL GOOGLE REFERENCES
+==========================================
+Workspace evidence used (relative to the project root):
+  .tools\play-store-0.5.1\vanishr-0.5.1.aab
+  .tools\play-store-0.5.1\manifest.xml
+  .tools\play-store-0.5.1\verification.json
+  android\app\build.gradle
+  android\app\src\main\java\app\vanishr\android\MainActivity.java
+  android\app\src\main\java\app\vanishr\android\PhotoLibrary.java
+  android\app\src\main\java\app\vanishr\android\PhotoSharingService.java
+  android\app\src\main\java\app\vanishr\android\RemotePhotoSession.java
+  android\app\src\main\java\app\vanishr\android\GoogleSignIn.java
+  android\app\src\main\java\app\vanishr\android\PlayPolicy.java
+  relay\src\main\java\app\vanishr\relay\GoogleAuth.java
+  relay\src\main\java\app\vanishr\relay\GoogleIdentityVerifier.java
+  docs\THREAT-MODEL.md
+  docs\GOOGLE-SETUP.md
+  docs\VERIFICATION.md
+  Public Privacy, Terms and account-deletion pages listed in section 2.
+
+Some older notes in docs\PLAY-STORE.md refer to 0.4.x candidates. This file
+uses the 0.5.1 artifact and current code, not those old version labels.
+
+S01 - Create/set up an app; store fields and character limits
+https://support.google.com/googleplay/android-developer/answer/9859152?hl=en
+
+S02 - Prepare the app for review; App content declarations
+https://support.google.com/googleplay/android-developer/answer/9859455?hl=en
+
+S03 - Preview assets: icon, feature graphic, screenshots and video
+https://support.google.com/googleplay/android-developer/answer/9866151?hl=en
+
+S04 - Provide sign-in details for review
+https://support.google.com/googleplay/android-developer/answer/15748846?hl=en
+
+S05 - Data safety: types, collection, sharing, E2EE exception, ephemeral processing
+https://support.google.com/googleplay/android-developer/answer/10787469?hl=en
+
+S06 - Firebase Android SDK Google Play data disclosure
+https://firebase.google.com/docs/android/play-data-disclosure
+
+S07 - Google ID credential API: account/token/profile fields
+https://developers.google.com/identity/android-credential-manager/android/reference/com/google/android/libraries/identity/googleid/GoogleIdTokenCredential
+
+S08 - App-account deletion requirements
+https://support.google.com/googleplay/android-developer/answer/13327111?hl=en
+
+S09 - User Data; prominent disclosure and consent
+https://support.google.com/googleplay/android-developer/answer/10144311?hl=en
+
+S10 - Restricted permissions/minimum-scope alternatives, including photos
+https://support.google.com/googleplay/android-developer/answer/16935362?hl=en
+The older photo guidance URL 14115180 redirected to this article when checked.
+
+S11 - Foreground-service and full-screen-intent declaration requirements
+https://support.google.com/googleplay/android-developer/answer/13392821?hl=en
+
+S12 - Child Safety Standards scope and requirements
+https://support.google.com/googleplay/android-developer/answer/14747720?hl=en
+
+S13 - User Generated Content policy
+https://support.google.com/googleplay/android-developer/answer/9876937?hl=en
+
+S14 - Target audience and age groups
+https://support.google.com/googleplay/android-developer/answer/9867159?hl=en
+
+S15 - Content rating/IARC questionnaire
+https://support.google.com/googleplay/android-developer/answer/9859655?hl=en
+
+S16 - Testing requirements for newer personal developer accounts
+https://support.google.com/googleplay/android-developer/answer/14151465?hl=en
+
+S17 - Prepare and roll out a release; release notes
+https://support.google.com/googleplay/android-developer/answer/9859348?hl=en
+
+S18 - Play App Signing and registering certificates with API providers
+https://support.google.com/googleplay/android-developer/answer/9842756?hl=en
+
+S19 - Current target API requirements
+https://support.google.com/googleplay/android-developer/answer/11926878?hl=en
+
+S20 - Financial features declaration, including no-financial-feature apps
+https://support.google.com/googleplay/android-developer/answer/13849271?hl=en
+
+S21 - Health apps declaration, including no-health-feature apps
+https://support.google.com/googleplay/android-developer/answer/14738291?hl=en
+
+S22 - Play Console account/developer requirements
+https://support.google.com/googleplay/android-developer/answer/10788890?hl=en
+
+S23 - Free/paid pricing and the free-to-paid restriction
+https://support.google.com/googleplay/android-developer/answer/6334373?hl=en
+
+S24 - Publishing status: draft, testing and production
+https://support.google.com/googleplay/android-developer/answer/9859751?hl=en
+
+S25 - Device/network abuse policy, including Play-only executable updates
+https://support.google.com/googleplay/android-developer/answer/16559646?hl=en
+
+S26 - Credential Manager Sign in with Google prerequisites
+https://developer.android.com/identity/sign-in/credential-manager-siwg
+
+Official pages can change or redirect. Recheck any Console-specific question
+against its linked help before submission. No Play form, developer setting,
+code, public website or deployed app was changed by preparing this text file.
