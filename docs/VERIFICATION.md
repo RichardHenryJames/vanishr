@@ -1080,6 +1080,24 @@ rules remain unchanged. No personal phone data or relay infrastructure was reset
 - Published signed APK: version 0.2.7, code 10, 44,114,745 bytes, SHA-256
   `000d47824cb7fea6dda984cccfae5f8d03731c272aedeb053bef6d9869c1e96d`.
 
+## 0.4.9 (published)
+- Audited stage: `.tools/vercel-download-0.4.9`
+- APK: vanishr-0.4.9.apk
+- APK SHA-256: `69176ba9b775aeb814871e21e80ca6312a981a9c6981f1ff4e0a9dc8287019d7`
+- Signer certificate SHA-256: `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`
+- Default baked relay: `https://vanishr-dev-ec0d36067d.hhb5hebdbfagapbu.centralindia.sysgen.cloudapp.azure.com`
+- Version: versionName 0.4.9 / versionCode 30
+
+Deployment (Vercel, vanishr/vanishr-download):
+- Deployment id: `dpl_7vcJq8dtwd52Y7pvxf3fXGnwsEDq`
+- Production alias: https://vanishr-download.vercel.app
+- Published: 2026-10-03T13:23+05:30
+
+Anonymous verification (performed against public domain):
+- `https://vanishr-download.vercel.app/updates.json` returns versionName 0.4.9, versionCode 30, matching SHA-256.
+- Public APK download SHA-256 matches `69176ba9b775aeb814871e21e80ca6312a981a9c6981f1ff4e0a9dc8287019d7`.
+- apksigner on the public APK confirms signer certificate SHA-256 `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c` (CN=Vanishr Local Release).
+
 ## 0.4.8 (published)
 - Audited stage: `.tools/vercel-download-0.4.8`
 - APK: vanishr-0.4.8.apk
