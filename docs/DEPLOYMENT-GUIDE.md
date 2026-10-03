@@ -323,6 +323,10 @@ if ($Link.projectId -ne 'prj_IfkyrkIw1wZuxbjAryv3nj9bYcW3' -or
     $Link.orgId -ne 'team_vRp561kumEFCgFL9GP2x7gW1') {
     throw 'The stage is not linked to the approved Vanishr project/team.'
 }
+if (@(Get-ChildItem -LiteralPath $Stage -Recurse -Force -File |
+        Where-Object { $_.Name -like '.env*' }).Count -gt 0) {
+    throw 'Linking added an environment file. Remove only the generated stage file and re-audit before uploading.'
+}
 $LocalFeed = Get-Content -LiteralPath "$Stage\updates.json" -Raw | ConvertFrom-Json
 $Published = Invoke-RestMethod -Uri "$Origin/updates.json" `
     -Headers @{ 'Cache-Control' = 'no-cache' } -MaximumRedirection 0 -TimeoutSec 30
@@ -341,6 +345,12 @@ the expected values to make an unrelated deployment pass.
 CLI-created `.vercel` link metadata is not a public website file; do not add
 credentials to it or include it in the source archive.
 
+Some CLI versions download a credential-bearing `.env.local` while linking.
+Being Git-ignored does not make that file safe for a static upload. When reusing
+an existing release's link, copy **only** `.vercel\project.json` into the new
+stage and rerun the project/team ID checks above; never copy its environment
+files. Recheck the complete stage inventory after linking.
+
 **The `--cwd $Stage` and `--prod` arguments matter.** Do not run an unscoped
 deployment from the repository root, upload the raw `download` templates, deploy
 only the APK, or stop after a preview deployment.
@@ -349,6 +359,21 @@ Wait for the deployment to be **Ready**, and confirm its production domain is
 `vanishr-download.vercel.app`. Record the deployment URL and ID from the CLI or
 dashboard. A random deployment URL is not proof that the app's fixed domain
 serves that release.
+
+If deployment only updates `vanishr-download-vanishr.vercel.app`, explicitly
+move the existing canonical alias to the **new** Ready deployment URL printed
+by the CLI:
+
+```powershell
+# Set this to the new deployment's URL, not an older release or the canonical alias.
+$DeploymentUrl = 'https://<new-deployment>.vercel.app'
+& $Vercel alias set $DeploymentUrl vanishr-download.vercel.app --scope vanishr --cwd $Stage
+if ($LASTEXITCODE -ne 0) { throw 'The public update alias was not moved.' }
+```
+
+Allow a short time for alias propagation, then perform section 7 against the
+exact canonical URL. Do not change the app's fixed update host or disable
+project-wide deployment protection to work around a stale alias.
 
 If the CLI hangs or you interrupt it, inspect the project's Deployments page
 before retrying; a server-side deployment may already exist. Never mark a

@@ -5,9 +5,31 @@ not a production security assessment or independent audit.
 
 ## Release 0.5.0 / active-chat responsiveness
 
-- Release candidate: versionName `0.5.0`, versionCode `31`. Signed packaging and
-  public publication are pending; the regression evidence below covers the
-  tested responsiveness changes before this version-only metadata bump.
+- Published direct-download release: versionName `0.5.0`, versionCode `31`.
+  The regression evidence below covers the tested responsiveness changes before
+  the version-only metadata bump; the final signed release also passed R8,
+  compilation, release lint and APK signature verification.
+- Release source commit: `e5b16a0d754a440f5ae3fcb7656d7d705d2d59b7`.
+  The APK is 44,438,025 bytes, SHA-256
+  `17345ce26c31a3bebeaf061cde4aad04cd651b01b52e56c53313aeab43e7a76f`.
+  Its existing release certificate SHA-256 is
+  `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`.
+- Deployed only the inspected static stage to `vanishr/vanishr-download` on the
+  existing Hobby team: `dpl_5iitogZ8tVcUSELcbjGWAbPsP4UA`. Explicitly assigned
+  the public alias <https://vanishr-download.vercel.app> to this deployment.
+  Anonymous verification completed at `2026-10-03T10:02:03Z`, after alias
+  propagation: the exact update-feed URL returns `0.5.0`/`31` with `no-store`;
+  the downloaded APK's checksum, embedded version and signer all match.
+- The inspected stage contains 31 files / 59,615,517 bytes, including the Vercel
+  configuration. All 30 public artifacts were downloaded anonymously and
+  matched their audited hashes, including six pages, source, notices and assets.
+  The 437-entry source ZIP matches the explicit packaging allowlist and its
+  inspected source; no private paths or credential-content markers were found.
+  Source ZIP SHA-256:
+  `9c6bf506d5df21ccb64fbf6ed1cde9c2088d5445338d58267c2f56720bcc7d1f`.
+  Local distribution and public-verification JSON records were saved outside
+  the upload folder for subsequent website-only releases. Only the validated
+  public project-link JSON was reused; no CLI environment file was uploaded.
 
 - Receipt and message updates previously rebuilt the conversation and called
   protected-content decryption/read persistence on the main thread. Protected
