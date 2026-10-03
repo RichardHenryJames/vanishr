@@ -46,6 +46,12 @@ Google compromise or account takeover can replace a device but cannot recover ol
 private keys; contacts must independently verify the replacement identity. Google
 learns that the user signs into this app, which is an additional metadata tradeoff.
 
+Signed release packaging requires validated Android Google client settings unless
+the operator explicitly selects a Google-free build. Missing, ambiguous or
+wrong-package/certificate configuration fails before building; a server
+service-account credential is never accepted as client configuration. The opt-out
+changes provider availability, not the account/peer trust rules or retained keys.
+
 Device access tokens last one hour. Enrolled Google and password accounts also
 receive a separate 256-bit renewal credential, stored only in the phone-unlocked
 encrypted vault and as a digest-keyed record on the relay. Successful renewal

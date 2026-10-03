@@ -3,6 +3,32 @@
 Evidence refreshed on Windows, 2026-10-03. This is a development foundation,
 not a production security assessment or independent audit.
 
+## Release 0.5.1 / restore Google sign-in configuration
+
+- Candidate `0.5.1` / code `32` restores the existing Google/Firebase Android
+  client settings omitted from the 0.5.0 APK and Play bundle. The earlier
+  "Google sign-in is not configured for this build yet" message was triggered
+  locally by the empty compiled Web OAuth client ID, before contacting Google.
+  Existing encrypted accounts, signing keys, relay identity checks and the
+  separate website/Play update channels are not changed.
+- The saved client configuration passed the existing package, release-certificate,
+  Web/Android OAuth client and Firebase-field validation. A real HTTPS relay
+  challenge matched the configured Web OAuth audience and its bounded shape/
+  deadline. No Google ID token, challenge value or client key was printed.
+  This preflight is not a completed Google account login or FCM delivery test.
+- Release packaging now loads an explicitly selected or unambiguous local
+  client configuration and fails if it is missing/invalid. A Google-free build
+  requires explicit `-NoGoogleServices`; that choice clears inherited provider
+  settings only for the build and warns about losing Google account access.
+  Unknown command parameters are rejected. Low-level debug/QA builds retain
+  their existing configuration behavior.
+- Thirteen local packaging regressions passed: default and explicit selection,
+  APK/Play settings, missing/ambiguous/malformed configuration, wrong certificate,
+  missing Web OAuth, rejected server credentials, misspelled/conflicting options
+  and environment restoration. The fixtures use no real signing credentials,
+  network requests or Android builds.
+- Signed builds, bundle verification and public publication are pending.
+
 ## Release 0.5.0 / active-chat responsiveness
 
 - Published direct-download release: versionName `0.5.0`, versionCode `31`.

@@ -153,11 +153,14 @@ existing verified libsignal notice/source downloads in `.tools`. On a fresh
 machine, restore those public dependencies from the documented upstream sources;
 do not bypass missing-notice checks.
 
-If Google sign-in/FCM is required, pass the valid **Android client**
-`-GoogleServicesFile` to every APK/AAB packaging invocation, following
-[GOOGLE-SETUP.md](GOOGLE-SETUP.md). Do not substitute a server service-account
-JSON. Without the required client values those features are not configured;
-do not accidentally remove working provider configuration in an update.
+Signed packaging requires a validated **Android client** configuration by default.
+Pass `-GoogleServicesFile` to every APK/AAB invocation, or keep exactly one
+`google-services.json` in the repository root or `.secrets\firebase\`.
+Missing or ambiguous configuration stops the build. Follow
+[GOOGLE-SETUP.md](GOOGLE-SETUP.md); never substitute a server service-account JSON.
+The explicit `-NoGoogleServices` opt-out creates an intentionally unconfigured
+build and must not be used for releases that need to retain Google account
+access. Run `.\scripts\test-google-config.ps1` when changing these packaging rules.
 
 [package-apk.ps1](../scripts/package-apk.ps1) checks relay HTTPS health, reuses
 the existing signer, builds the release, runs release lint and verifies the

@@ -1,6 +1,21 @@
 #requires -Version 7.4
-param([Parameter(Mandatory)][string]$Path)
+[CmdletBinding()]
+param([string]$Path)
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($Path)) {
+    $root = Split-Path $PSScriptRoot -Parent
+    $candidates = @(
+        (Join-Path $root '.secrets\firebase\google-services.json'),
+        (Join-Path $root 'google-services.json')
+    ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+    if (@($candidates).Count -eq 0) {
+        throw 'Google client configuration is required. Supply -GoogleServicesFile to packaging, or explicitly choose -NoGoogleServices for a build without Google sign-in and push.'
+    }
+    if (@($candidates).Count -ne 1) {
+        throw 'Multiple Google client configuration files exist. Select one explicitly with -GoogleServicesFile when packaging or -Path when validating.'
+    }
+    $Path = @($candidates)[0]
+}
 try {
     if ((Get-Item -LiteralPath $Path).Length -gt 1MB) { throw 'Configuration is too large.' }
     $configuration = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -ErrorAction Stop

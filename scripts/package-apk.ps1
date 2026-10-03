@@ -1,9 +1,11 @@
 #requires -Version 7.4
+[CmdletBinding()]
 param([switch]$InitializeSigningKey, [uri]$RelayOrigin, [switch]$WithInstrumentation, [string]$GoogleServicesFile,
-    [switch]$Bundle, [switch]$PlayStore)
+    [switch]$Bundle, [switch]$PlayStore, [switch]$NoGoogleServices)
 $ErrorActionPreference = 'Stop'
 if ($PlayStore -and -not $Bundle) { throw 'Use -Bundle with -PlayStore; Play installs must use Play-managed updates.' }
 if ($Bundle -and $WithInstrumentation) { throw 'Build instrumentation separately from the signed app bundle.' }
+if ($NoGoogleServices -and $GoogleServicesFile) { throw 'Choose either -GoogleServicesFile or -NoGoogleServices, not both.' }
 $root = Split-Path $PSScriptRoot -Parent
 & (Join-Path $PSScriptRoot 'prepare-brand-assets.ps1') -Verify
 $signingDirectory = Join-Path $root '.secrets/android-signing'
@@ -16,9 +18,13 @@ $googleEnvironmentNames = @('GOOGLE_WEB_CLIENT_ID', 'FIREBASE_APP_ID', 'FIREBASE
 $oldGoogleEnvironment = @{}
 foreach ($name in $googleEnvironmentNames) { $oldGoogleEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
 try {
-    if ($GoogleServicesFile) {
+    if ($NoGoogleServices) {
+        foreach ($name in $googleEnvironmentNames) { [Environment]::SetEnvironmentVariable($name, $null, 'Process') }
+        Write-Warning 'Explicitly building without Google sign-in or FCM. Do not use this option for an update that must retain Google account access.'
+    } else {
         $googleSettings = & (Join-Path $PSScriptRoot 'read-google-config.ps1') -Path $GoogleServicesFile
         foreach ($name in $googleEnvironmentNames) { [Environment]::SetEnvironmentVariable($name, $googleSettings[$name], 'Process') }
+        Write-Output 'Validated Google sign-in and Firebase client configuration for the release package and certificate.'
     }
     if ($null -ne $RelayOrigin) {
         if (-not $RelayOrigin.IsAbsoluteUri -or $RelayOrigin.Scheme -ne 'https' -or $RelayOrigin.UserInfo -or

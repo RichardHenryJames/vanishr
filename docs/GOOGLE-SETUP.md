@@ -171,10 +171,26 @@ not the application archive or command arguments. Temporary local request and
 remote staging files are removed after use. Publication remains restricted to
 the existing approved dev/test resource group.
 
+Signed APK and AAB packaging now requires this validated client configuration
+by default. Supply `-GoogleServicesFile` explicitly, or keep exactly one
+`google-services.json` in the repository root or `.secrets\firebase\`.
+Missing files stop the build; multiple default files require an explicit choice.
+Inherited environment values alone do not substitute for that validation.
+Misspelled packaging parameters are rejected instead of being silently ignored.
+
+`-NoGoogleServices` is an explicit opt-out for intentionally Google-free builds.
+It clears Google/Firebase values for that build and prints a warning; it cannot
+be combined with `-GoogleServicesFile`. Never use it for an update that needs
+to preserve Google account access. It does not erase saved account keys/data.
+The normal low-level debug/QA Gradle workflows remain unchanged.
+Run `.\scripts\test-google-config.ps1` to verify selection, validation,
+explicit opt-out and environment restoration using synthetic local fixtures.
+
 ```powershell
 $endpoint = Get-Content .\.secrets\azure\endpoint.json -Raw | ConvertFrom-Json
 $origin = "https://$($endpoint.hostname)"
 .\scripts\package-apk.ps1 -GoogleServicesFile .\google-services.json -RelayOrigin $origin -WithInstrumentation
+.\scripts\package-apk.ps1 -GoogleServicesFile .\google-services.json -RelayOrigin $origin -Bundle -PlayStore
 .\scripts\publish-azure.ps1 -Action Publish -GoogleServicesFile .\google-services.json -FcmCredentialFile .\.secrets\firebase\fcm-sender.json
 ```
 
