@@ -1130,6 +1130,19 @@ rules remain unchanged. No personal phone data or relay infrastructure was reset
   inline profile and username saves, and retained account switching.
 - Published signed APK: version 0.2.7, code 10, 44,114,745 bytes, SHA-256
   `000d47824cb7fea6dda984cccfae5f8d03731c272aedeb053bef6d9869c1e96d`.
+
+## 0.4.8 (staged)
+- Prepared audited stage: `.tools/vercel-download-0.4.8`
+- APK: vanishr-0.4.8.apk
+- APK SHA-256: `7897efc9026d6ea3259d487e7d2516e603e4dfce9ec2d1717fd1c9c53b7baef4`
+- Signer certificate SHA-256: `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`
+- Default baked relay: `https://vanishr-dev-ec0d36067d.hhb5hebdbfagapbu.centralindia.sysgen.cloudapp.azure.com`
+- Stage created by packaging on: 2026-10-03T12:19:47+05:30 (local build)
+
+Notes:
+- The audited stage is ready for Vercel upload but the current runner lacks the Vercel CLI. Deploy the stage with `vercel link` + `vercel deploy --prod` from a machine authenticated to the `vanishr` team and project.
+- After deployment, verify production feed: `https://vanishr-download.vercel.app/updates.json` should match the above SHA and versionName.
+
 - Published on 2026-09-18 to the existing Vanishr Hobby static project at
   https://vanishr-download.vercel.app. All nine public release assets match
   audited hashes and sizes, the public APK has the original signing identity,
