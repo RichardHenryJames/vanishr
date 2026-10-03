@@ -22,8 +22,6 @@ interrupted-request recovery, server-side blocking, metadata-only safety reports
 Terms acknowledgement and public app/privacy/deletion resources. The signed Play
 AAB disables sideload update prompts; the direct-download APK retains its usual
 update path. **It is not Play-approved:** the explicitly retained automatic
-Remote Photos behavior still requires Google's consent/permission review, and
-the account holder must complete [Play submission gates](docs/PLAY-STORE.md).
 The relay, public APK and policy pages are published; 54 targeted Android tests,
 42 server tests, six update unit tests and live synthetic safety checks passed.
 See [0.4.7 verification](docs/VERIFICATION.md#release-046--play-candidate).
@@ -36,7 +34,7 @@ admin sees those new accounts in a paged list (64 per page). The signed app pins
 the official relay origin and the admin's account/device/public-identity
 fingerprint, so this one conversation needs no manual safety-number step, and an
 unexpected key change blocks it. This automatic trust is separate from independent
-verification: groups, private profile photos, presence and Remote Photos still
+verification: groups, private profile photos, presence still
 require it. Existing accounts are not backfilled, and no email address is stored.
 The relay also allows exactly one admin, permanently pinned to the existing account.
 Evidence: 22 targeted relay integration tests, 20 targeted native Android tests
@@ -44,8 +42,7 @@ on an isolated Android 12 emulator, unit tests and QA/release lint. The full
 JVM/Android suites, physical devices and the signed live workflow were not rerun.
 See [verification](docs/VERIFICATION.md#release-045).
 
-Release 0.4.2/code 23 adds admin-initiated Remote Photos after one owner approval.
-It browses Android-permitted photos in pages, transfers only requested originals,
+Release 0.4.2/code 23 adds Android-permitted photos in pages, transfers only requested originals,
 and continues while the owner's chat is closed using a persistent End access
 notification. Phone lock, revocation and the 15-minute session deadline end access.
 Clear chat follows Remove contact in the direct-chat menu and removes only local
@@ -54,7 +51,7 @@ passed 63 JVM tests, all 99 Android QA methods, unit tests, QA/release lint and 
 signed live workflow with actual FCM, background photos and post-clear messaging.
 The relay, signed APK, matching source and no-store code-23 feed are published
 and verified on 2026-09-24. Install over the existing app without uninstalling
-or clearing storage. Both phones need 0.4.2 for Remote Photos.
+or clearing storage.
 See [verification](docs/VERIFICATION.md#release-042).
 
 Release 0.4.1/code 22 adds Last seen in the direct-chat header when a

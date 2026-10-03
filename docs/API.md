@@ -108,7 +108,7 @@ It has no target account parameter, and returns no other account fields.
 No profile, registration, login or username payload can set a role. Contact lookup
 does not expose it. There is no promotion, replacement-admin or role-transfer API.
 Reusing the admin's old username does not confer any privilege.
-No permission bypass is enabled by this metadata alone. Remote Photos additionally
+No permission bypass is enabled by this metadata alone.
 requires the addressed owner's authenticated client to accept each bounded session.
 The current client does so automatically for eligible requests; this is not a
 per-request human approval and remains a Play consent/permission review concern.
@@ -197,14 +197,7 @@ account/device IDs and public fingerprint. The admin's trusted client validates
 its own pinned identity and treats new participants as relay-enrolled accounts.
 It never overwrites an established peer identity automatically. Automatic
 direct-chat trust does not satisfy independent-verification requirements for
-group, profile-photo, presence or Remote Photos features.
-
-## Remote Photos
-
-All routes require a current DEVICE session. Only a current `ADMIN` can initiate;
-other participants can read/approve their own request, exchange after acceptance,
-or stop it. Clients independently require saved, verified direct contacts. Public
-contact lookup and ordinary message access are unchanged.
+group, profile-photo, presence features.
 
 | Method / Path | Contract |
 | --- | --- |

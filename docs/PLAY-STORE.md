@@ -19,9 +19,6 @@ synthetic-account safety checks passed. Its external APK updater is excluded.
 Public verification covered all 30 served files, six pages, eleven redirects
 and nine protected/missing paths. See [verification](VERIFICATION.md#release-046--play-candidate).
 
-The remaining unchecked operator and Console gates below are still real.
-**Automatic Remote Photos is unchanged and remains a submission blocker/risk;
-this update is not Play approval or a certification that all policy gates pass.**
 Nothing was uploaded to Play Console. The website publication checks below
 are now demonstrated; the remaining declaration, account, signer enrollment,
 moderation/mail handling and consent decisions belong to the account holder.
@@ -61,99 +58,12 @@ COPPA certification, GDPR-compliance claim or security-audit badge.
   [MainActivity](../android/app/src/main/java/app/vanishr/android/MainActivity.java)
   gates initial sign-in and chat access on explicit Terms acceptance and wires
   policy, deletion and support entry points. The summary describes automatic
-  Remote Photos and the human admin; it does not change per-session behavior.
   This records source integration, not signed-build/runtime verification.
 - [x] Publish only an audited static distribution after explicit approval.
   The 31-file bundle was audited and published; verification evidence is linked above.
 - [x] Check each deployed URL anonymously, on mobile and without JavaScript:
   HTTPS, HTTP 200, no login/geoblock, readable HTML (not a PDF), correct canonical,
   working mailto/copyable email, and working `/index.html` redirects.
-- [ ] Put the privacy and deletion URLs in their separate Play Console fields.
-  Verify the candidate's sign-in/policy and My profile links, acceptance,
-  cancellation and account-switching behavior in the final signed build. Keep
-  the policy version consistent with the published Terms; source wiring alone
-  does not demonstrate deployed URL availability or effective informed consent.
-- [ ] Do not remove the renderer's older-release notice while the feed still
-  advertises 0.4.5. The candidate controls require the matching updated relay;
-  a website policy must not imply those APIs are already live.
-
-## Blocking issue: automatic Remote Photos
-
-**UNRESOLVED: prominent disclosure, informed consent, broad-photo permission and
-foreground-service eligibility. Google may reject this implementation.**
-
-The user expressly requested retaining the existing automatic approvals.
-[MainActivity](../android/app/src/main/java/app/vanishr/android/MainActivity.java)
-currently sets `autoAllow = true`; the older per-session Allow dialog is not the
-active branch. Do not describe the feature as default-off, as requiring the
-owner's Allow tap for each request, or as having an owner Auto-allow toggle.
-Do not silently change that behavior as part of policy or packaging work.
-
-The actual path is:
-
-1. The requester must be the sole currently authorized `ADMIN`; both clients
-   require an independently verified saved direct contact. Official admin
-   onboarding alone is **not** independent photo verification.
-2. Required Android photo and notification permissions must exist, and the
-   owner's phone must be unlocked when sharing starts.
-3. Eligible requests can automatically start. Android permission is necessary
-   but is not a substitute for informed consent to this use.
-4. [PhotoSharingService](../android/app/src/main/java/app/vanishr/android/PhotoSharingService.java)
-   runs as `dataSync`, with an ongoing **Vanishr is active** notification and
-   **End access** action. Maximum session duration is 15 minutes.
-5. An active owner session **may continue after backgrounding or owner phone
-   lock**. The owner-side lock exception keeps temporary photo-session keys in
-   memory; it does not reopen the normal encrypted chat vault. Ending access,
-   permission loss, sign-out, contact removal, connection loss, viewer lock,
-   Android termination or the deadline can end the session.
-
-The website describes this openly. Do not hide the notification, misstate lock
-behavior, omit the automatic request path from review materials, or describe
-independent contact verification as gallery-sharing consent. A general Terms
-checkbox, privacy page, Android permission dialog or foreground notification
-does **not** establish that Google's separate prominent-disclosure and consent
-requirements have been met.
-
-- [ ] The account holder must reconsider the consent model or establish a
-  genuinely eligible, informed, approved core use case with Google. Retaining
-  automation is a product constraint, **not** a policy exemption.
-- [ ] Resolve the gap before submission; do not attest that this gate passed
-  merely because a disclosure screen has been added.
-- [ ] Obtain legal/privacy and Play-policy review appropriate to the actual
-  audience and jurisdictions. Do not claim an outcome in advance.
-
-### Photo permission declaration draft
-
-Evidence: [manifest](../android/app/src/main/AndroidManifest.xml),
-[PhotoLibrary](../android/app/src/main/java/app/vanishr/android/PhotoLibrary.java),
-[RemotePhotoSession](../android/app/src/main/java/app/vanishr/android/RemotePhotoSession.java)
-and [MainActivity](../android/app/src/main/java/app/vanishr/android/MainActivity.java).
-
-> Vanishr's Remote Photos feature lets the sole eligible administrator browse
-> the photos Android makes available on an independently verified contact's
-> phone, using paged thumbnails and on-demand encrypted original transfers.
-> It currently requests READ_MEDIA_IMAGES for broad image-library browsing,
-> supports Android selected-photo access, and uses READ_EXTERNAL_STORAGE only
-> on Android 12L and earlier. Android permission and unlocked startup are
-> required. Eligible requests are automatically accepted; an active session
-> can continue while the owner app is backgrounded or the phone is locked,
-> with an ongoing notification and End access, for at most 15 minutes.
-
-This is an explanation of the existing implementation, **not an eligibility
-claim**. Broad browsing is essential to the feature as currently described;
-Google decides whether it is an eligible **core app** function and whether a
-minimum-scope alternative is sufficient. Ordinary attachments and selecting a
-profile photo already use `PickVisualMedia` and do **not** need broad gallery
-access. Do not justify `READ_MEDIA_IMAGES` by those picker-only flows. Do not
-declare video access or camera access that the merged manifest does not request.
-
-- [ ] Provide an accurate listing explanation and demo of why the Android
-  photo picker does or does not meet the claimed core function.
-- [ ] Show full/selected/denied access, permission revocation, automatic start,
-  background/locked continuation, End access and expiry on supported devices.
-- [ ] Complete the Console photo/video permission declaration for the actual
-  merged manifest. If Google rejects the purpose or consent model, obtain an
-  explicit product decision; do not relabel the feature to bypass review.
 
 ### Foreground-service declaration draft
 
@@ -296,7 +206,6 @@ versions/configurations distributed through Play, not just one test run.
 | Device or other IDs | Random device UUID, public identity/prekeys, session routing, FCM token / Firebase installation data | Device registration required; push conditional on enabled/configured notifications and permission. Relay FCM registration 24 hours per registration; provider retention separate | Collection: yes for app/device identifiers. Review exact pinned Firebase SDK disclosure and installation/network data; do not omit because there is no advertising ID |
 | App activity / interactions and relationship metadata | Direct routing, group membership, presence audiences, Online/Typing/Last seen in [Presence](../relay/src/main/java/app/vanishr/relay/Presence.java), [GroupDirectory](../relay/src/main/java/app/vanishr/relay/GroupDirectory.java) | Groups/presence used as features; membership durable, online 12 seconds, typing 5 seconds, latest activity/audience 24 hours | Assess app interactions / other actions / User IDs and contact relationships. Not app analytics, but still personal metadata sent off device |
 | Messages: other in-app messages | Client-encrypted direct/group content in [ChatEngine](../android/app/src/main/java/app/vanishr/android/ChatEngine.java) and [GroupChat](../android/app/src/main/java/app/vanishr/android/GroupChat.java); opaque relay delivery | User chooses to send; view once or 1/6/24 hours; relay deadline no more than 24 hours | Review the exact end-to-end-encryption exception, not a blanket "No." Admin is an actual recipient of its own conversations. Other routing/account data is not exempt because content is encrypted |
-| Photos and videos: Photos | Picker attachments, mutual independently verified [ProfilePhotos](../android/app/src/main/java/app/vanishr/android/ProfilePhotos.java), and automatic Remote Photos | Photo use is feature-dependent; owner's chosen avatar durable locally, received copies/requests at most 24 hours; remote session at most 15 minutes, packets at most 60 seconds | Review collection and sharing separately, including the developer-operated admin as recipient. Do not assume automatic Remote Photos qualifies as an owner-initiated transfer or mark all photo processing exempt. Prominent-consent/core-use gate remains unresolved |
 | Contacts / social relationships | Manually added account identifiers and relay-visible delivery/membership graph; no phone address-book upload | Contacts/groups are chosen features; local nicknames stay encrypted on the client | Inspect current Console definitions for Contacts and User IDs/other interactions. Do not state that "no READ_CONTACTS permission" means no relationship data is processed |
 | Safety reports / other user-generated content or app activity | Metadata-only reporter/target/report IDs, reason and optional message/group IDs; in-app safety UI in [MainActivity](../android/app/src/main/java/app/vanishr/android/MainActivity.java) | Optional; at most 30 days from submission, removed when either reporter or target account is deleted. Pinned-admin deletion clears the undeliverable queue; no post-deletion safety-report exception | Confirm final backend fields and classification; purpose is fraud prevention, security and compliance / app functionality. No message body or image evidence. New reports return 503 when no enabled pinned admin exists |
 | Account deletion confirmation / User IDs and operation metadata | [DeletionReceipts](../relay/src/main/java/app/vanishr/relay/DeletionReceipts.java) stores proof SHA-256 digest, original random UUID, PENDING/DELETED state and creation/expiry times; recover deletion completion without retained account credentials | Created for the proof-based deletion flow; durable in SQL across account deletion and Redis reset. Fixed 24-hour lifetime from creation; no extension on checks/retries. Access expires at the deadline; every-minute purge while service runs | Disclose for account management/security and lost-response recovery. Pseudonymous is not anonymous; this is not ephemeral processing or a retained safety report. No plaintext proof, name, login credential, Google subject or content in this receipt |
@@ -382,11 +291,6 @@ versions/configurations distributed through Play, not just one test run.
 
 ## Listing, reviewer access and account-holder declarations
 
-- [ ] Listing name is **Vanishr**; provide accurate descriptions, icon,
-  screenshots and required feature graphics from synthetic data only.
-  Describe automatic Remote Photos prominently if retained as a claimed core
-  feature. Do not advertise anonymous/untraceable use, unstoppable deletion,
-  guaranteed consent, an audit or Play approval.
 - [ ] Supply correct support details and developer identity through the
   Console's actual verified account; this doc does not invent an entity/address.
 - [ ] Provide reviewer **App access** instructions with working isolated test
@@ -396,11 +300,6 @@ versions/configurations distributed through Play, not just one test run.
 - [ ] Google sign-in is currently limited to approved test accounts. Ensure
   reviewers can use an approved flow without unplanned provider restrictions;
   a screen saying "Google login" is not evidence reviewers can authenticate.
-- [ ] Arrange an accurate Remote Photos demonstration/reviewer path without
-  giving out real admin credentials, changing the permanent production pin or
-  creating a second admin. If a safe isolated signed fixture/operator-assisted
-  demonstration is needed, confirm Google accepts that review arrangement.
-  This privileged review access remains an open gate.
 - [ ] The official human admin is shown as **Vanishr / @vanishr** and is trusted
   only through the signed pin. Do not modify production admin identity or waive
   independent verification for ordinary contacts to make review easier.

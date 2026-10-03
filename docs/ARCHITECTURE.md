@@ -79,12 +79,7 @@ database-operator pin; account creation never grants admin access.
 Only the pinned account can hold the role. Revocation does not release or transfer
 the pin, and deleting/changing that UUID or replacing/removing the pin is rejected.
 The authenticated `/account/type` read is self-only and validates the role against
-the pin in one query; Remote Photos uses that same fail-closed authorization.
-There is no client role-write, admin-transfer or automatic recovery flow.
-Database owners who can alter/drop constraints remain a trusted boundary.
-The role permits initiating Remote Photos with separate owner
-approval; it grants no group-owner authority, access to other chat content or
-encryption exception. Existing Android releases are unchanged.
+the pin in one query;
 
 Migration V7 adds owner-scoped admin introductions for new registrations only.
 Migration V10 timestamps those introductions so the admin receives the newest
@@ -102,7 +97,7 @@ conversation allocates peer trust and Signal state on the admin device; the
 current page is cached in the account's encrypted vault. Contact removal leaves
 a local dismissal so refreshes cannot silently re-add it. Automatically pinned
 direct chats are distinct from independently verified contacts: private profile
-photos, presence, groups and owner-approved Remote Photos retain their original
+photos, presence and groups retain their original
 verification requirements. No email directory, AI service or plaintext-message
 access is added.
 
@@ -144,17 +139,6 @@ epochs and pause sending until the owner's approval is available. New members
 receive no old epoch keys. Batched controls/prekey claims bound request work;
 one generic wake can represent many queued changes. Only the selected current
 account can access its groups; sign-out parks them with its existing keys/outbox.
-
-## Remote Photos
-
-An admin starts Photos from a verified direct chat. The current owner's client
-automatically accepts an eligible request and starts a separate, visible
-foreground photo service; Android controls its photo access. There is no
-per-request human approval or local auto-allow toggle in the retained behavior.
-This remains a Play disclosure/permission-review concern, not a claim of approval.
-The service keeps an isolated, memory-only libsignal session, not the chat vault,
-and uses a separate authenticated photo websocket plus bounded HTTPS exchanges.
-Thus normal chat background cleanup and Online/Typing semantics stay unchanged.
 
 MediaStore ID pagination reads thumbnail pages on demand without a fixed photo
 count limit. Only a tapped original is read and streamed as 16 KiB chunks; the

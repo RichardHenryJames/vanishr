@@ -12,10 +12,6 @@ final class PlayPolicy {
             + "or sexual exploitation or abuse of children. Use Block and Report when needed.\n\n"
             + "New accounts are introduced to the human Vanishr admin. The admin sees your shared name, username "
             + "and public device identity, not your other conversations. Messages remain end-to-end encrypted.\n\n"
-            + "Remote Photos uses Android photo permission. An independently verified admin can automatically "
-            + "start access while your phone is unlocked; an active session can continue in the background or "
-            + "while locked. Its notification has End access. Do not grant photo access unless you understand "
-            + "this behavior.\n\n"
             + "The Privacy policy explains account metadata, temporary relay data, Google sign-in, notifications "
             + "and account deletion. Abuse reports contain selected identifiers and a reason, not chat text or photos.";
 

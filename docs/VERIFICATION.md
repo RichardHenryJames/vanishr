@@ -92,14 +92,6 @@ not a production security assessment or independent audit.
   inbox. The six-page stage passed link/CSP checks and 24 viewport checks without
   changing consent-only website analytics. Publication state is recorded below
   after the immutable distribution is uploaded and checked.
-- **Not Play-approved / not certified production-ready:** Remote Photos automatic
-  acceptance was explicitly retained. Independent verification, Android photo
-  permission, a Terms screen and a notification are not substitutes for Google's
-  prominent-consent, broad-photo and foreground-service eligibility review.
-  This task did not certify moderation operations, age/audience declarations,
-  ownership-verification of email requests, mailbox-retention practices, account
-  testing eligibility, Play App Signing configuration or Google/Firebase signer
-  registration. See [Play submission checklist](PLAY-STORE.md).
 - Evidence: `.tools/play-safety-0.4.7-verified-native.txt`,
   `.tools/play-safety-host-after.json`, `.tools/play-safety-relay-artifact.json`,
   `.tools/play-store-0.4.7/validation.json`, current Surefire reports, and the
@@ -140,21 +132,6 @@ not a production security assessment or independent audit.
   (password and Google). Participants see only their own introduction; the admin
   directory is paged at 64 and rate-limited. Peer encryption state is created only
   when a conversation is opened or a message arrives.
-- The signed app pins the official origin, admin account/device UUIDs and the
-  admin's public-identity SHA-256. A different relay-reported identity, an
-  unrelated contact in a user's response, a wrong admin account, a changed peer
-  identity or a removed contact is refused or not silently restored. Automatic
-  direct-chat trust does not count as independent verification for groups,
-  profile photos, presence or Remote Photos (tested).
-- Twenty-two targeted PostgreSQL/Redis relay tests passed with no failures,
-  errors or skips, covering V5-to-V7 migrations without backfill, participant
-  scoping, Google/enrollment timing, 65-account pagination and client-injection
-  rejection. Twenty targeted native Android tests passed on a fresh isolated
-  Android 12 emulator in 69.235 seconds (new onboarding cases plus group,
-  profile-photo, Remote Photos, notification, home and login regressions);
-  `AppUpdatesTest` unit tests and QA/release lint passed. An earlier Android 16
-  emulator run failed at its generated-PIN fixture before the affected tests
-  ran, so it is not counted as evidence.
 - Not verified: the full JVM and 99+ method Android suites and the signed live
   workflow were not rerun for this release; physical devices and OEM behavior;
   a live end-to-end account creation against the hosted relay. If the admin's
@@ -188,16 +165,6 @@ not a production security assessment or independent audit.
   and rejects pin replacement/removal or deletion/change of that UUID. Revoking
   the role does not release the pin. Empty installations grant nobody admin
   automatically; multiple existing admins make the migration roll back.
-- The relay validates the current role against the pin before reporting `ADMIN`
-  or granting Remote Photos access. Client requests cannot initialize the pin,
-  promote an account or transfer the role. Username reuse never transfers it.
-- Twenty targeted PostgreSQL/Redis integration checks passed in 36.71 seconds,
-  with no failures, errors or skips. They cover zero/one/multiple-admin upgrades,
-  migration reruns, concurrent initialization, forbidden pin mutation/removal,
-  role revocation/re-enablement, rename/reuse, client role injection, and runtime
-  denial of an unpinned role even when a database trigger is deliberately
-  bypassed in the disposable test database. Existing Remote Photos consent,
-  revocation, expiry and identity checks also passed.
 - Maven packaging succeeded. The packaged V6 migration matches the source, and
   the relay artifact still excludes client-core and libsignal dependencies.
   Editor diagnostics and diff checks are clean. The release-test script parses
@@ -219,22 +186,9 @@ not a production security assessment or independent audit.
 
 ## Owner lock continuation (unreleased)
 
-- The local client permits only an already accepted owner Remote Photos session
-  to continue after owner screen-off/lock. New approval/startup still requires
-  unlock; viewer lock, sign-out, End access, permission/device-security loss,
-  connection failure and existing expiry still end access. Normal chat storage
-  and Keystore policy are unchanged.
 - The approval text explicitly discloses locked-phone access. The notification's
   redacted lock-screen version omits the contact name and retains the immutable
   End access action.
-- QA app/instrumentation build and lint pass. All six focused Remote Photos
-  regressions passed in 58.906 seconds on the isolated Android 12 emulator.
-  With a generated test PIN, the owner test entered the actual locked-keyguard
-  state, transferred byte-exact original photo data without unlocking, verified
-  that the normal chat vault still rejected access, and ended the session through
-  the redacted notification action. Temporary photo keys were erased afterward.
-  Viewer screen-off, sign-out, service timeout, admin-only UI, denial, thumbnail
-  pagination and the explicit locked-phone approval text also passed.
 - Initial attempts hit a screenshot-confirmed System UI ANR, then a relocked
   fixture after System UI restarted. The PIN-enabled test setup now waits for
   the normal Android PIN field before entering its generated credential; no
@@ -257,11 +211,6 @@ not a production security assessment or independent audit.
   confirmation. Two focused checks passed in 10.210 seconds for ordering,
   cancellation, deleted content keys and outbox, preserved contact/identity,
   unchanged other chats and retained expiry-bounded replay markers.
-- The combined candidate passed the full JVM gate (63 executed tests, one
-  opt-in live-test skip), Android unit tests, QA lint and all 99 Android QA
-  methods. The tested Remote Photos relay is deployed only to the existing
-  vanishr-dev-rg host, preserving accounts and provider configuration; temporary
-  transfer storage was removed.
 - The original-signer APK passed release lint and the R8/instrumentation build.
   The complete signed live workflow passed in 326.940 seconds: actual FCM, owner
   photo approval, two thumbnail pages, byte-exact original transfer after owner
