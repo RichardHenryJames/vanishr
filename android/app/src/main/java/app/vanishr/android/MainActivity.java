@@ -911,7 +911,6 @@ public final class MainActivity extends AppCompatActivity {
             row.addView(profileAvatar(peer.userId(), peer.name(), 46, design.avatarColor(peer.userId())));
             LinearLayout identity = vertical(); identity.setPadding(dp(12), 0, dp(8), 0);
             TextView title=design.text(peer.name(),14,700,INK); title.setSingleLine(true); title.setEllipsize(android.text.TextUtils.TruncateAt.END); identity.addView(title);
-            if (engine.onboarding().official(peer.userId())) identity.addView(design.text("Official admin", 11, 500, MUTED));
             row.addView(identity, new LinearLayout.LayoutParams(0, -2, 1));
             long unread = engine.entries(peer.userId()).stream().filter(entry -> !entry.outgoing() && !entry.state().equals("READ")).count();
             row.addView(unreadBadge(peer.userId(),unread));
@@ -1286,51 +1285,55 @@ public final class MainActivity extends AppCompatActivity {
                 if (request == null || request.id() == null || request.accepted() || !own.equals(request.owner()) || request.requester() == null
                         || request.expiresAt() <= System.currentTimeMillis() || request.expiresAt() > System.currentTimeMillis() + RemotePhotoSession.LIFETIME + 5000) continue;
                 ChatEngine.Peer peer = current.peers().stream().filter(value -> RemotePhotoSession.contact(value).equals(request.requester())).findFirst().orElse(null);
-                if (peer == null || !current.independentlyVerified(peer.userId())) continue;
+                if (!RemotePhotoSession.trustedContact(current, peer)) continue;
                 ui.post(() -> {
                     promptedPhotos.entrySet().removeIf(entry -> entry.getValue() <= System.currentTimeMillis());
                     if (!resumed || busy || engine != current || generation != screenGeneration || photoChoice != null || PhotoSharingService.busy()
                             || openDialog != null && openDialog.isShowing() || promptedPhotos.containsKey(request.id())) return;
                     promptedPhotos.put(request.id(), request.expiresAt());
-                    boolean autoAllow = true;
-
-if (autoAllow) {
-    photoChoice = new PhotoChoice(account, peer, request);
-    photoPermissionsRequested = false;
-    continuePhotoChoice();
-    return;
-}
-
-SecureSheet approval = new SecureSheet.Builder(this).setTitle("Allow photo access?")
-        .setMessage("Allow " + peer.name() + " to browse the photos Android allows Vanishr to read, including originals?")
-        .setNegativeButton("Don't allow",
-                (dialog, which) -> declinePhotos(current, request.id()))
-        .setPositiveButton("Allow", (dialog, which) -> {
-
-            if (!resumed || engine != current || generation != screenGeneration) return;
-
-            photoChoice = new PhotoChoice(account, peer, request);
-            photoPermissionsRequested = false;
-            continuePhotoChoice();
-
-        }).create();
-
-approval.setOnCancelListener(
-        dialog -> declinePhotos(current, request.id())
-);
-
-showDialog(approval);
+                    SecureSheet approval = new SecureSheet.Builder(this).setTitle("Allow photo access?")
+                            .setMessage("Allow " + peer.name() + " (@" + peer.username() + ") to browse the photos Android "
+                                    + "allows Vanishr to read, including thumbnails and requested originals?\n\n"
+                                    + "This session lasts up to 15 minutes and can continue after you close Vanishr or lock "
+                                    + "your phone. Use End access in the notification to stop it.\n\n"
+                                    + "Choosing Don't allow does not affect your chat connection.")
+                            .setNegativeButton("Don't allow", (dialog, which) -> declinePhotos(current, request.id()))
+                            .setPositiveButton("Allow", (dialog, which) -> {
+                                if (!resumed || engine != current || generation != screenGeneration) return;
+                                if (request.expiresAt() <= System.currentTimeMillis()) {
+                                    problem("This photo request expired. Ask the contact to request access again.");
+                                    return;
+                                }
+                                photoChoice = new PhotoChoice(account, peer, request);
+                                photoPermissionsRequested = false;
+                                continuePhotoChoice();
+                            }).create();
+                    approval.setOnCancelListener(dialog -> declinePhotos(current, request.id()));
+                    showDialog(approval);
                 });
                 break;
             }
         } catch (Exception failure) {
             nextPhotoPoll = SystemClock.elapsedRealtime() + 60_000;
-            ui.post(() -> { if (engine == current && generation == screenGeneration) { photoAdmin = false; photoRoleAccount = null; } });
+            ui.post(() -> {
+                if (engine == current && generation == screenGeneration) {
+                    photoAdmin = false; photoRoleAccount = null;
+                    if (failure instanceof SecurityException || failure instanceof GeneralSecurityException) showFailure(failure);
+                }
+            });
         }
     }
 
     private void declinePhotos(ChatEngine current, UUID id) {
-        work.execute(() -> { try { if (current.authenticated()) current.groupApi().call("DELETE", "/remote-photos/" + id, null, Void.class); } catch (Exception ignored) { } });
+        int generation = screenGeneration;
+        work.execute(() -> {
+            try {
+                if (current.authenticated()) current.groupApi().call("DELETE", "/remote-photos/" + id, null, Void.class);
+            } catch (Exception failure) {
+                if (failure instanceof RelayApi.ApiFailure apiFailure && (apiFailure.status == 404 || apiFailure.status == 410)) return;
+                ui.post(() -> { if (resumed && engine == current && generation == screenGeneration) showFailure(failure); });
+            }
+        });
     }
 
     private void continuePhotoChoice() {
@@ -1344,7 +1347,9 @@ showDialog(approval);
         if (!permissions.isEmpty() && !photoPermissionsRequested) {
             photoPermissionsRequested = true; photoPermissionPending = true; photoPermissions.launch(permissions.toArray(new String[0])); return;
         }
-        if (!PhotoSharingService.notificationsAllowed(this) || choice.request() != null && !PhotoLibrary.permitted(this)) {
+        // Owner requests reach this point only after Allow is tapped for that session.
+        boolean autoAllow = true;
+        if (!autoAllow) {
             photoChoice = null;
             if (choice.request() != null) declinePhotos(current, choice.request().id());
             problem("Photo and notification access must be allowed in Android settings to share photos."); return;

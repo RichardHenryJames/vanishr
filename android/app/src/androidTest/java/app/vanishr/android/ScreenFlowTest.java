@@ -213,7 +213,9 @@ public class ScreenFlowTest {
             scenario.onActivity(this::inject);
             snapshot(scenario, "80-official-admin-in-chats");
             scenario.onActivity(activity -> {
-                assertNotNull(text(root(activity), "Official admin"));
+                assertNotNull(text(root(activity), "Vanishr"));
+                assertFalse(descendants(root(activity)).stream().anyMatch(view ->
+                    view instanceof TextView label && "Official admin".contentEquals(label.getText())));
                 setField(activity, "selectedPeer", peerId); invoke(activity, "render");
                 assertNull(dialog(activity));
                 assertNotNull(text(root(activity), "Official admin"));
@@ -309,6 +311,164 @@ public class ScreenFlowTest {
         adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
         assertThrows(SecurityException.class, () -> engine.onboarding().refresh());
         assertTrue(engine.peers().isEmpty());
+    }
+
+    @Test public void automaticPhotoRequestsRequireCurrentPinnedIntroductionsWithoutGrantingOtherTrust() throws Exception {
+        SignalClient own = new SignalClient(userId, vault);
+        signedInFixture(adminPin(userId, deviceId, own));
+        var official = new ChatEngine.Contact(userId, deviceId, Base64.getEncoder().encodeToString(own.publicIdentity()));
+        SignalClient newcomer = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        var introduced = introduction(peerId, peerDevice, newcomer, "newcomer");
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId, official, List.of(introduced), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        engine.onboarding().refresh();
+        assertTrue(engine.entries(peerId).isEmpty());
+        assertTrue(RemotePhotoSession.trustedContact(engine, introduced.peer()));
+        try (RemotePhotoSession.Prepared request = new RemotePhotoSession.Prepared(engine, introduced.peer(), null)) {
+            assertFalse(request.owner); assertNotNull(request.key);
+            assertEquals(RemotePhotoSession.contact(introduced.peer()), request.peer);
+            assertTrue(request.deadline <= System.currentTimeMillis() + RemotePhotoSession.LIFETIME);
+        }
+        assertFalse(engine.independentlyVerified(peerId));
+        engine.presence().foreground(true);
+        assertTrue(engine.presence().update(android.os.SystemClock.elapsedRealtime()).contacts().isEmpty());
+        engine.photos().sync();
+        assertTrue(vault.names("profile-photo-request/").isEmpty());
+        assertFalse(PhotoSharingService.busy());
+
+        directory.set(new AdminOnboarding.Page(userId, official, List.of(), null));
+        assertThrows(SecurityException.class, () -> new RemotePhotoSession.Prepared(engine, introduced.peer(), null));
+        SignalClient changed = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        directory.set(new AdminOnboarding.Page(userId, official, List.of(introduction(peerId, peerDevice, changed, "newcomer")), null));
+        assertThrows(SecurityException.class, () -> new RemotePhotoSession.Prepared(engine, introduced.peer(), null));
+        directory.set(new AdminOnboarding.Page(userId, official, List.of(introduction(peerId, UUID.randomUUID(), newcomer, "newcomer")), null));
+        assertThrows(SecurityException.class, () -> new RemotePhotoSession.Prepared(engine, introduced.peer(), null));
+        assertEquals(introduced.peer(), engine.peers().get(0));
+
+        directory.set(new AdminOnboarding.Page(userId, official, List.of(introduced), null));
+        ChatEngine.Account account = engine.account();
+        setField(engine, "account", new ChatEngine.Account(account.origin(), account.handle(), userId, UUID.randomUUID(),
+                account.accessToken(), account.expiresAt(), true));
+        assertThrows(SecurityException.class, () -> RemotePhotoSession.trustedContact(engine, introduced.peer()));
+        setField(engine, "account", account);
+        engine.forget(introduced.peer());
+        assertFalse(RemotePhotoSession.trustedContact(engine, introduced.peer()));
+        engine.onboarding().first();
+        assertTrue(engine.peers().isEmpty());
+    }
+
+    private void automaticAdminPhotoFixture(java.util.concurrent.atomic.AtomicReference<RemotePhotoSession.Session> request,
+                                           java.util.concurrent.atomic.AtomicInteger declined) throws Exception {
+        SignalClient admin = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(adminPin(peerId, peerDevice, admin));
+        var introduced = introduction(peerId, peerDevice, admin, "vanishr");
+        peer = introduced.peer();
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(
+                userId, RemotePhotoSession.contact(peer), List.of(introduced), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        engine.onboarding().refresh();
+        var own = new ChatEngine.Contact(userId, deviceId, Base64.getEncoder().encodeToString(engine.groupSignal().publicIdentity()));
+        request.set(new RemotePhotoSession.Session(UUID.randomUUID(), RemotePhotoSession.contact(peer), own, false,
+                System.currentTimeMillis() + 300_000, admin.generatePreKey(Instant.now())));
+        var builder = ((okhttp3.OkHttpClient) readField(engine.groupApi(), "client")).newBuilder();
+        builder.interceptors().add(0, chain -> {
+            String path = chain.request().url().encodedPath();
+            if (path.equals("/remote-photos")) return syntheticResponse(chain.request(), 200, List.of(request.get()));
+            if (path.startsWith("/remote-photos/") && chain.request().method().equals("DELETE")) {
+                declined.incrementAndGet(); return syntheticResponse(chain.request(), 204, null);
+            }
+            return chain.proceed(chain.request());
+        });
+        setField(engine.groupApi(), "client", builder.build());
+    }
+
+    private void pollPhotoRequest(ActivityScenario<MainActivity> scenario) {
+        scenario.onActivity(activity -> ((java.util.concurrent.ExecutorService) readField(activity, "work"))
+                .execute(() -> invoke(activity, "photoRequestsOnce")));
+    }
+
+    @Test public void automaticPhotoOwnerCanDeclineAndCancelWithoutLosingTheChatConnection() throws Exception {
+        var request = new java.util.concurrent.atomic.AtomicReference<RemotePhotoSession.Session>();
+        var declined = new java.util.concurrent.atomic.AtomicInteger();
+        automaticAdminPhotoFixture(request, declined);
+        assertFalse(engine.independentlyVerified(peerId));
+        try (RemotePhotoSession.Prepared owner = new RemotePhotoSession.Prepared(engine, peer, request.get())) {
+            assertTrue(owner.owner); assertEquals(request.get().id(), owner.id);
+        }
+        assertThrows(SecurityException.class, () -> new RemotePhotoSession.Prepared(engine, peer, null));
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            for (boolean cancel : List.of(false, true)) {
+                RemotePhotoSession.Session previous = request.get();
+                request.set(new RemotePhotoSession.Session(UUID.randomUUID(), previous.requester(), previous.owner(), false,
+                        previous.expiresAt(), previous.key()));
+                pollPhotoRequest(scenario);
+                awaitMainCondition(scenario, activity -> dialog(activity) != null && dialog(activity).isShowing());
+                scenario.onActivity(activity -> {
+                    SecureSheet approval = dialog(activity);
+                    assertNotNull(text(approval.getWindow().getDecorView(), "Allow photo access?"));
+                    String explanation = ((TextView) approval.findViewById(android.R.id.message)).getText().toString();
+                    assertTrue(explanation.contains("Vanishr (@vanishr)"));
+                    assertTrue(explanation.contains("requested originals"));
+                    assertTrue(explanation.contains("lock your phone"));
+                    assertTrue(explanation.contains("End access"));
+                    assertTrue((approval.getWindow().getAttributes().flags & WindowManager.LayoutParams.FLAG_SECURE) != 0);
+                    assertNull(readField(activity, "photoChoice"));
+                    assertFalse((boolean) readField(activity, "photoPermissionPending"));
+                    assertFalse(PhotoSharingService.busy());
+                    if (cancel) approval.cancel(); else approval.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+                });
+                int expected = cancel ? 2 : 1;
+                awaitPhotoCondition(() -> declined.get() == expected);
+                assertFalse(PhotoSharingService.busy());
+                assertEquals(List.of(peer), engine.peers());
+                assertTrue(engine.groupSignal().isVerified(peerId));
+                assertFalse(engine.independentlyVerified(peerId));
+            }
+        }
+    }
+
+    @Test public void automaticPhotoApprovalIsExplicitAndDiscardedWhenItsOwnerScreenCloses() throws Exception {
+        var request = new java.util.concurrent.atomic.AtomicReference<RemotePhotoSession.Session>();
+        automaticAdminPhotoFixture(request, new java.util.concurrent.atomic.AtomicInteger());
+        photoFixturePermission();
+        var blocked = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.ExecutorService[] worker = new java.util.concurrent.ExecutorService[1];
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject); pollPhotoRequest(scenario);
+            awaitMainCondition(scenario, activity -> dialog(activity) != null && dialog(activity).isShowing());
+            scenario.onActivity(activity -> {
+                assertTrue(PhotoLibrary.permitted(activity));
+                assertTrue(PhotoSharingService.notificationsAllowed(activity));
+                assertNotNull(text(dialog(activity).getWindow().getDecorView(), "Allow photo access?"));
+                assertFalse("Android permissions alone must not approve a photo request", PhotoSharingService.busy());
+                assertNull(readField(activity, "photoChoice"));
+                worker[0] = (java.util.concurrent.ExecutorService) readField(activity, "work");
+                worker[0].execute(() -> {
+                    blocked.countDown();
+                    try { release.await(10, java.util.concurrent.TimeUnit.SECONDS); }
+                    catch (InterruptedException failure) { Thread.currentThread().interrupt(); }
+                });
+            });
+            try {
+                assertTrue(blocked.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                scenario.onActivity(activity -> {
+                    dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+                    Object choice = readField(activity, "photoChoice");
+                    assertNotNull("Only the owner's Allow action may prepare this request", choice);
+                    assertEquals(request.get(), readField(choice, "request"));
+                    assertEquals(userId, readField(choice, "account"));
+                    assertTrue((boolean) readField(activity, "preparingPhotos"));
+                    assertFalse(PhotoSharingService.busy());
+                });
+                scenario.moveToState(Lifecycle.State.STARTED);
+                scenario.onActivity(activity -> assertNull(readField(activity, "photoChoice")));
+            } finally { release.countDown(); }
+            worker[0].submit(() -> { }).get(10, java.util.concurrent.TimeUnit.SECONDS);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            assertFalse("A stale approval must not open a photo session", PhotoSharingService.busy());
+        }
     }
 
     @Test public void adminOnboardingAcceptsAnEnrolledFirstMessageButNeverReplacesItsPinnedIdentity() throws Exception {

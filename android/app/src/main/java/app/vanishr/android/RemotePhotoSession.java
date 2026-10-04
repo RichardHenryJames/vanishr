@@ -27,6 +27,12 @@ final class RemotePhotoSession implements AutoCloseable {
     }
 
     static ChatEngine.Contact contact(ChatEngine.Peer peer) { return new ChatEngine.Contact(peer.userId(), peer.deviceId(), peer.identityKey()); }
+    static boolean trustedContact(ChatEngine engine, ChatEngine.Peer peer) throws Exception {
+        if (!engine.authenticated() || peer == null || !engine.groupSignal().isVerified(peer.userId())
+                || engine.peers().stream().noneMatch(saved -> contact(saved).equals(contact(peer)))) return false;
+        engine.onboarding().requireOfficial(peer);
+        return engine.independentlyVerified(peer.userId()) || engine.onboarding().permitsPhotoRequest(peer);
+    }
     static boolean administrator(ChatEngine engine) throws Exception {
         AccountType result = engine.groupApi().call("GET", "/account/type", null, AccountType.class);
         return result != null && engine.account().userId().equals(result.userId()) && "ADMIN".equals(result.userType());
@@ -44,8 +50,7 @@ final class RemotePhotoSession implements AutoCloseable {
         final RelayApi api;
         final Session request;
         Prepared(ChatEngine engine, ChatEngine.Peer peer, Session request) throws Exception {
-            if (!engine.authenticated() || !engine.independentlyVerified(peer.userId())
-                    || engine.peers().stream().noneMatch(saved -> contact(saved).equals(contact(peer))))
+            if (!trustedContact(engine, peer))
                 throw new SecurityException("Verify this contact before sharing photos");
             if (request == null && !administrator(engine)) throw new SecurityException("Only administrators can request photos");
             ChatEngine.Contact current = engine.groupApi().call("GET", "/users/id/" + peer.userId(), null, ChatEngine.Contact.class);

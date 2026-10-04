@@ -187,6 +187,15 @@ final class AdminOnboarding {
         return true;
     }
 
+    boolean permitsPhotoRequest(ChatEngine.Peer peer) throws Exception {
+        if (!eligible(peer.userId()) || !automatic(peer.userId())) return false;
+        requireOfficial(peer);
+        ChatEngine.Peer current = lookup(peer.userId());
+        if (current == null || !RemotePhotoSession.contact(current).equals(RemotePhotoSession.contact(peer)))
+            throw new Failure("The automatic connection could not be verified for this photo request.");
+        return true;
+    }
+
     void prepare(ChatEngine.Peer peer) throws Exception {
         if (!engine.authenticated()) throw new SecurityException("Sign in before messaging");
         if (engine.safety().isBlocked(peer.userId())) throw new SecurityException("This account is blocked");
@@ -205,7 +214,7 @@ final class AdminOnboarding {
     }
 
     private void store(ChatEngine.Peer peer) throws Exception {
-        // Automatic direct-chat trust must not confer independently verified sharing permissions.
+        // Introductions never grant photo access; that requires separate per-session owner approval.
         requireOfficial(peer);
         ChatEngine.Peer previous = read("contact/" + peer.userId(), ChatEngine.Peer.class);
         if (previous != null && !RemotePhotoSession.contact(previous).equals(RemotePhotoSession.contact(peer)))
