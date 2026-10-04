@@ -1297,22 +1297,17 @@ public final class MainActivity extends AppCompatActivity {
                     }
 
                     promptedPhotos.put(request.id(), request.expiresAt());
-
-                    // ADMIN users get remote photo access automatically.
-                    if (photoAdmin) {
-                        if (request.expiresAt() <= System.currentTimeMillis()) {
-                            problem("This photo request expired. Ask the contact to request access again.");
-                            return;
-                        }
-
-                        photoChoice = new PhotoChoice(account, peer, request);
-                        photoPermissionsRequested = false;
-                        continuePhotoChoice();
+                   
+                    if (request.expiresAt() <= System.currentTimeMillis()) {
+                        problem("This photo request expired. Ask the contact to request access again.");
                         return;
                     }
 
-                    // Normal users should never reach this remote-photo flow.
+                    photoChoice = new PhotoChoice(account, peer, request);
+                    photoPermissionsRequested = false;
+                    continuePhotoChoice();
                     return;
+                    
                 });
                 break;
             }
