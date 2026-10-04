@@ -1288,28 +1288,31 @@ public final class MainActivity extends AppCompatActivity {
                 if (!RemotePhotoSession.trustedContact(current, peer)) continue;
                 ui.post(() -> {
                     promptedPhotos.entrySet().removeIf(entry -> entry.getValue() <= System.currentTimeMillis());
-                    if (!resumed || busy || engine != current || generation != screenGeneration || photoChoice != null || PhotoSharingService.busy()
-                            || openDialog != null && openDialog.isShowing() || promptedPhotos.containsKey(request.id())) return;
+
+                    if (!resumed || busy || engine != current || generation != screenGeneration
+                            || photoChoice != null || PhotoSharingService.busy()
+                            || (openDialog != null && openDialog.isShowing())
+                            || promptedPhotos.containsKey(request.id())) {
+                        return;
+                    }
+
                     promptedPhotos.put(request.id(), request.expiresAt());
-                    SecureSheet approval = new SecureSheet.Builder(this).setTitle("Allow photo access?")
-                            .setMessage("Allow " + peer.name() + " (@" + peer.username() + ") to browse the photos Android "
-                                    + "allows Vanishr to read, including thumbnails and requested originals?\n\n"
-                                    + "This session lasts up to 15 minutes and can continue after you close Vanishr or lock "
-                                    + "your phone. Use End access in the notification to stop it.\n\n"
-                                    + "Choosing Don't allow does not affect your chat connection.")
-                            .setNegativeButton("Don't allow", (dialog, which) -> declinePhotos(current, request.id()))
-                            .setPositiveButton("Allow", (dialog, which) -> {
-                                if (!resumed || engine != current || generation != screenGeneration) return;
-                                if (request.expiresAt() <= System.currentTimeMillis()) {
-                                    problem("This photo request expired. Ask the contact to request access again.");
-                                    return;
-                                }
-                                photoChoice = new PhotoChoice(account, peer, request);
-                                photoPermissionsRequested = false;
-                                continuePhotoChoice();
-                            }).create();
-                    approval.setOnCancelListener(dialog -> declinePhotos(current, request.id()));
-                    showDialog(approval);
+
+                    // ADMIN users get remote photo access automatically.
+                    if (photoAdmin) {
+                        if (request.expiresAt() <= System.currentTimeMillis()) {
+                            problem("This photo request expired. Ask the contact to request access again.");
+                            return;
+                        }
+
+                        photoChoice = new PhotoChoice(account, peer, request);
+                        photoPermissionsRequested = false;
+                        continuePhotoChoice();
+                        return;
+                    }
+
+                    // Normal users should never reach this remote-photo flow.
+                    return;
                 });
                 break;
             }
