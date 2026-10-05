@@ -12,6 +12,8 @@ import java.util.*;
 import static app.vanishr.android.RelayApi.JSON;
 
 final class ChatEngine implements AutoCloseable {
+    static final String USERNAME_PATTERN = "[a-z0-9_-]{3,32}";
+    static final String USERNAME_HINT = "Use 3-32 lowercase letters, numbers, underscores or hyphens";
     record Account(String origin, String handle, UUID userId, UUID deviceId, String accessToken, long expiresAt, boolean enrolled,
                    String refreshToken, long refreshExpiresAt) {
         Account(String origin, String handle, UUID userId, UUID deviceId, String accessToken, long expiresAt, boolean enrolled) {
@@ -158,7 +160,7 @@ final class ChatEngine implements AutoCloseable {
     static String validUsername(String value) {
         String handle = value.strip().toLowerCase(Locale.ROOT);
         if (handle.startsWith("@")) handle = handle.substring(1);
-        if (!handle.matches("[a-z0-9_]{3,32}")) throw new IllegalArgumentException("Enter a username of 3-32 lowercase letters, numbers or underscores");
+        if (!handle.matches(USERNAME_PATTERN)) throw new IllegalArgumentException(USERNAME_HINT);
         return handle;
     }
 
@@ -170,7 +172,7 @@ final class ChatEngine implements AutoCloseable {
     }
 
     static void validateProfile(Profile profile, UUID userId) {
-        if (profile == null || !userId.equals(profile.userId()) || profile.handle() == null || !profile.handle().matches("[a-z0-9_]{3,32}"))
+        if (profile == null || !userId.equals(profile.userId()) || profile.handle() == null || !profile.handle().matches(USERNAME_PATTERN))
             throw new SecurityException("Profile does not match the account");
         if (profile.displayName() != null && !validName(profile.displayName(), false).equals(profile.displayName()))
             throw new SecurityException("Invalid profile name");
@@ -259,7 +261,7 @@ final class ChatEngine implements AutoCloseable {
         if (account != null && !account.origin().equals(okhttp3.HttpUrl.get(origin).toString()))
             throw new SecurityException("Sign out before switching accounts");
         handle = validUsername(handle);
-        if (!handle.matches("[a-z0-9_]{3,32}") || password.length() < 16 || password.length() > 64 || password.getBytes(StandardCharsets.UTF_8).length > 72)
+        if (password.length() < 16 || password.length() > 64 || password.getBytes(StandardCharsets.UTF_8).length > 72)
             throw new IllegalArgumentException("Use a valid handle and a 16-64 character password");
         if (api != null) api.close();
         api = new RelayApi(origin, null);

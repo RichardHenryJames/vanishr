@@ -276,7 +276,8 @@ public class ScreenFlowTest {
         ChatEngine.Contact official = new ChatEngine.Contact(userId, deviceId, Base64.getEncoder().encodeToString(own.publicIdentity()));
         SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
         List<AdminOnboarding.Introduction> contacts = new ArrayList<>();
-        for (int index = 1; index <= 65; index++) contacts.add(introduction(new UUID(0, index), UUID.randomUUID(), remote, "new_account_" + index));
+        for (int index = 1; index <= 65; index++) contacts.add(introduction(new UUID(0, index), UUID.randomUUID(), remote,
+                index == 1 ? "quiet-otter-4827" : "new_account_" + index));
         var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId, official, contacts.subList(0, 64), null));
         adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
         engine.onboarding().refresh();
@@ -2977,6 +2978,73 @@ public class ScreenFlowTest {
         assertEquals("new_alex", engine.account().handle());
         assertEquals(identity, engine.identityCode());
         Arrays.fill(content, (byte) 0);
+    }
+
+    @Test public void readableUsernamesPreserveProfileIdentityAndValidateGroupMembers() throws Exception {
+        signedInFixture(); conversationsFixture();
+        String identity = engine.identityCode();
+        ChatEngine.Account original = engine.account();
+        byte[] body = vault.get("body/" + once.id());
+        assertEquals("quiet-otter-4827", ChatEngine.validUsername(" @QUIET-OTTER-4827 "));
+        for (String legacy : List.of("g_0123456789abcdef0123456789ab", "alex", "custom_name123"))
+            assertEquals(legacy, ChatEngine.validUsername(legacy));
+        for (String invalid : List.of("quiet otter", "quiet/otter", "quiet.otter", "quiet%otter", "ab", "x".repeat(33)))
+            assertThrows(IllegalArgumentException.class, () -> ChatEngine.validUsername(invalid));
+        engine.applyProfile(new ChatEngine.Profile(userId, "quiet-otter-4827", null));
+        assertEquals("quiet-otter-4827", engine.account().handle());
+        assertEquals(original.userId(), engine.account().userId());
+        assertEquals(original.deviceId(), engine.account().deviceId());
+        assertEquals(original.accessToken(), engine.account().accessToken());
+        assertEquals(identity, engine.identityCode());
+        assertArrayEquals(body, vault.get("body/" + once.id()));
+        engine.applyContactProfile(peerId, new ChatEngine.Profile(peerId, "calm-panda-1934", "Aarav"));
+        ChatEngine.Peer updated = engine.peers().stream().filter(contact -> contact.userId().equals(peerId)).findFirst().orElseThrow();
+        assertEquals(peer.deviceId(), updated.deviceId());
+        assertEquals(peer.identityKey(), updated.identityKey());
+        assertEquals("calm-panda-1934", updated.username());
+        UUID groupId = UUID.randomUUID(), epoch = UUID.randomUUID();
+        GroupChat.Snapshot group = new GroupChat.Snapshot(groupId, userId, 1, epoch, false, List.of(
+                new GroupChat.Member(userId, deviceId, Base64.getEncoder().encodeToString(engine.groupSignal().publicIdentity()),
+                        "quiet-otter-4827", null, "ACTIVE", 0),
+                new GroupChat.Member(peerId, peerDevice, peer.identityKey(), "calm-panda-1934", null, "ACTIVE", 0)));
+        invoke(engine.groups(), "snapshot", new Class<?>[]{GroupChat.Snapshot.class}, group);
+        assertEquals(group, engine.groups().get(groupId).snapshot());
+        assertFalse("Readable usernames must not bypass membership approval", engine.groups().ready(engine.groups().get(groupId)));
+        assertThrows(SecurityException.class, () -> ChatEngine.validateProfile(
+                new ChatEngine.Profile(UUID.randomUUID(), "quiet-otter-4827", null), userId));
+        engine.close(); vault.unlock(); engine = new ChatEngine(vault);
+        assertEquals("quiet-otter-4827", engine.account().handle());
+        assertEquals(identity, engine.identityCode());
+        Arrays.fill(body, (byte) 0);
+    }
+
+    @Test public void readableUsernameCanBeFoundFromTheAddContactDialog() throws Exception {
+        signedInFixture(); conversationsFixture(); notificationTransport(reference -> null);
+        var requested = new java.util.concurrent.CountDownLatch(1);
+        var builder = ((okhttp3.OkHttpClient) readField(engine.groupApi(), "client")).newBuilder();
+        builder.interceptors().add(0, chain -> {
+            String path = chain.request().url().encodedPath();
+            if (path.equals("/users/quiet-otter-4827")) {
+                requested.countDown();
+                return syntheticResponse(chain.request(), 200, new ChatEngine.Contact(peerId, peerDevice, peer.identityKey()));
+            }
+            if (path.equals("/users/id/" + peerId + "/profile"))
+                return syntheticResponse(chain.request(), 200, new ChatEngine.Profile(peerId, "quiet-otter-4827", "Aarav"));
+            return chain.proceed(chain.request());
+        });
+        setField(engine.groupApi(), "client", builder.build());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                inject(activity);
+                invoke(activity, "addContactDialog", new Class<?>[]{String.class}, " @QUIET-OTTER-4827 ");
+            });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+            assertTrue("Hyphenated lookup must reach the existing verified-contact flow", requested.await(10, java.util.concurrent.TimeUnit.SECONDS));
+            var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+            assertTrue(device.wait(androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.text("Safety number")), 10_000));
+            scenario.onActivity(activity -> assertNotNull(text(dialog(activity).getWindow().getDecorView(), "@quiet-otter-4827")));
+        }
     }
 
     @Test public void profileInlineSavesPreserveOtherDraftAndRecoverFromFailure() throws Exception {

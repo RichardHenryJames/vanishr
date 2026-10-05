@@ -3,6 +3,7 @@ package app.vanishr.relay;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -12,13 +13,15 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.util.*;
+import java.util.function.Supplier;
 
 @Repository
 public class AccountDirectory {
+    static final String USERNAME_PATTERN = "[a-z0-9_-]{3,32}";
     public record Contact(UUID userId, UUID deviceId, String identityKey) { }
     public record GoogleAccount(UUID userId, String handle) { }
     public record Username(UUID userId, String handle) { }
-    public record UsernameChange(@NotNull @Pattern(regexp = "[a-z0-9_]{3,32}") String handle) { }
+    public record UsernameChange(@NotNull @Pattern(regexp = USERNAME_PATTERN) String handle) { }
     public record Profile(UUID userId, String handle, String displayName) { }
     public record ProfileChange(@NotBlank @Size(max = 40) String displayName) { }
     public enum UserType { USER, ADMIN }
@@ -41,11 +44,18 @@ public class AccountDirectory {
     private final JdbcTemplate database;
     private final ObjectMapper json;
     private final Clock clock;
+    private final Supplier<String> googleUsernames;
 
+    @Autowired
     public AccountDirectory(JdbcTemplate database, ObjectMapper json, Clock clock) {
+        this(database, json, clock, GoogleUsernames::next);
+    }
+
+    AccountDirectory(JdbcTemplate database, ObjectMapper json, Clock clock, Supplier<String> googleUsernames) {
         this.database = database;
         this.json = json;
         this.clock = clock;
+        this.googleUsernames = Objects.requireNonNull(googleUsernames);
     }
 
     public UUID create(String handle, String passwordHash) {
@@ -154,12 +164,25 @@ public class AccountDirectory {
     @Transactional
     public GoogleAccount googleAccount(String subject) {
         validateGoogleSubject(subject);
-        UUID userId = UUID.randomUUID();
-        String handle = "g_" + userId.toString().replace("-", "").substring(0, 28);
-        database.update("INSERT INTO accounts(id, handle, google_subject) VALUES (?, ?, ?) ON CONFLICT (google_subject) DO NOTHING",
-                userId, handle, subject);
-        return database.queryForObject("SELECT id, handle FROM accounts WHERE google_subject = ?",
-                (row, index) -> new GoogleAccount(row.getObject("id", UUID.class), row.getString("handle")), subject);
+        Optional<GoogleAccount> existing = findGoogleAccount(subject);
+        if (existing.isPresent()) return existing.get();
+        for (int attempt = 0; attempt < 16; attempt++) {
+            UUID userId = UUID.randomUUID();
+            String handle = googleUsernames.get();
+            // Ignore uniqueness conflicts without aborting the PostgreSQL transaction.
+            int inserted = database.update("INSERT INTO accounts(id, handle, google_subject) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+                    userId, handle, subject);
+            if (inserted == 1) return new GoogleAccount(userId, handle);
+            existing = findGoogleAccount(subject);
+            if (existing.isPresent()) return existing.get();
+        }
+        throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "google_sign_in_unavailable");
+    }
+
+    private Optional<GoogleAccount> findGoogleAccount(String subject) {
+        return database.query("SELECT id, handle FROM accounts WHERE google_subject = ?",
+                (row, index) -> new GoogleAccount(row.getObject("id", UUID.class), row.getString("handle")), subject)
+                .stream().findFirst();
     }
 
     public GoogleAccount existingGoogleAccount(String subject, UUID expectedUserId) {

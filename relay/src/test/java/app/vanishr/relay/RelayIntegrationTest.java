@@ -1278,6 +1278,163 @@ class RelayIntegrationTest {
         assertEquals(Base64.getEncoder().encodeToString(crypto.publicIdentity()), directory.contact(returning.userId()).identityKey());
     }
 
+    @Test void googleUsernamesRetryCollisionsWithoutTakingAnExistingAccountOrItsRole() throws Exception {
+        Device admin = device("quiet-otter-4827");
+        assignAdmin(admin);
+        var attempts = new java.util.concurrent.atomic.AtomicInteger();
+        AccountDirectory directory = new AccountDirectory(database, json, Clock.systemUTC(),
+                () -> attempts.getAndIncrement() == 0 ? "quiet-otter-4827" : "calm-panda-1934");
+        AccountDirectory.GoogleAccount created = new TransactionTemplate(transactions).execute(
+                transaction -> directory.googleAccount("readable-collision-fixture"));
+        assertNotNull(created);
+        assertEquals("calm-panda-1934", created.handle());
+        assertEquals(2, attempts.get());
+        assertNotEquals(admin.userId(), created.userId());
+        assertEquals("ADMIN", database.queryForObject("SELECT user_type FROM accounts WHERE id = ?", String.class, admin.userId()));
+        assertEquals("USER", database.queryForObject("SELECT user_type FROM accounts WHERE id = ?", String.class, created.userId()));
+        assertEquals(admin.userId(), database.queryForObject("SELECT admin_id FROM admin_introductions WHERE user_id = ?", UUID.class, created.userId()));
+        assertNull(database.queryForObject("SELECT google_subject FROM accounts WHERE id = ?", String.class, admin.userId()));
+        assertNull(database.queryForObject("SELECT password_hash FROM accounts WHERE id = ?", String.class, created.userId()));
+        assertEquals(created, directory.googleAccount("readable-collision-fixture"));
+        assertEquals(2, attempts.get(), "Returning users must not generate another username");
+    }
+
+    @Test void googleUsernamesConcurrentSignupsForOneSubjectCreateOnlyOneAccount() throws Exception {
+        AccountDirectory directory = new AccountDirectory(database, json, Clock.systemUTC(), () -> "gentle-fox-2048");
+        var ready = new java.util.concurrent.CountDownLatch(6);
+        var start = new java.util.concurrent.CountDownLatch(1);
+        Set<AccountDirectory.GoogleAccount> results = new HashSet<>();
+        try (var executor = java.util.concurrent.Executors.newFixedThreadPool(6)) {
+            List<java.util.concurrent.Future<AccountDirectory.GoogleAccount>> calls = new ArrayList<>();
+            for (int index = 0; index < 6; index++) calls.add(executor.submit(() -> {
+                ready.countDown();
+                assertTrue(start.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                return new TransactionTemplate(transactions).execute(transaction -> directory.googleAccount("same-readable-subject"));
+            }));
+            assertTrue(ready.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            start.countDown();
+            for (var call : calls) results.add(call.get(10, java.util.concurrent.TimeUnit.SECONDS));
+        }
+        assertEquals(1, results.size());
+        assertEquals("gentle-fox-2048", results.iterator().next().handle());
+        assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM accounts", Integer.class));
+    }
+
+    @Test void googleUsernamesConcurrentCollisionsAcrossSubjectsCreateDistinctAccounts() throws Exception {
+        var ready = new java.util.concurrent.CountDownLatch(6);
+        var start = new java.util.concurrent.CountDownLatch(1);
+        Set<UUID> users = new HashSet<>();
+        Set<String> handles = new HashSet<>();
+        try (var executor = java.util.concurrent.Executors.newFixedThreadPool(6)) {
+            List<java.util.concurrent.Future<AccountDirectory.GoogleAccount>> calls = new ArrayList<>();
+            for (int index = 0; index < 6; index++) {
+                int number = index;
+                calls.add(executor.submit(() -> {
+                    var attempt = new java.util.concurrent.atomic.AtomicInteger();
+                    AccountDirectory directory = new AccountDirectory(database, json, Clock.systemUTC(),
+                            () -> attempt.getAndIncrement() == 0 ? "quiet-otter-4827" : "bright-panda-" + (1000 + number));
+                    ready.countDown();
+                    assertTrue(start.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                    return new TransactionTemplate(transactions).execute(
+                            transaction -> directory.googleAccount("different-readable-subject-" + number));
+                }));
+            }
+            assertTrue(ready.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            start.countDown();
+            for (var call : calls) {
+                AccountDirectory.GoogleAccount result = call.get(10, java.util.concurrent.TimeUnit.SECONDS);
+                assertTrue(users.add(result.userId()));
+                assertTrue(handles.add(result.handle()));
+            }
+        }
+        assertEquals(6, users.size());
+        assertTrue(handles.contains("quiet-otter-4827"));
+        assertEquals(6, database.queryForObject("SELECT COUNT(*) FROM accounts WHERE user_type = 'USER'", Integer.class));
+    }
+
+    @Test void googleUsernamesExhaustionIsBoundedAndCannotReturnAnotherPersonsAccount() {
+        database.update("INSERT INTO accounts(id,handle,password_hash) VALUES (?,'quiet-otter-4827','synthetic')", UUID.randomUUID());
+        var attempts = new java.util.concurrent.atomic.AtomicInteger();
+        AccountDirectory directory = new AccountDirectory(database, json, Clock.systemUTC(),
+                () -> { attempts.incrementAndGet(); return "quiet-otter-4827"; });
+        ApiException failure = assertThrows(ApiException.class, () -> new TransactionTemplate(transactions).execute(
+                transaction -> directory.googleAccount("exhausted-readable-fixture")));
+        assertEquals(org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE, failure.status);
+        assertEquals("google_sign_in_unavailable", failure.getMessage());
+        assertEquals(16, attempts.get());
+        assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM accounts", Integer.class));
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM accounts WHERE google_subject IS NOT NULL", Integer.class));
+    }
+
+    @Test void googleUsernamesPreserveLegacyNamesAndStillAllowUserChosenRenames() {
+        UUID id = UUID.randomUUID();
+        database.update("INSERT INTO accounts(id,handle,google_subject) VALUES (?,'g_0123456789abcdef0123456789ab','legacy-readable-fixture')", id);
+        AccountDirectory directory = new AccountDirectory(database, json, Clock.systemUTC(),
+                () -> { throw new AssertionError("An existing account must not allocate a username"); });
+        AccountDirectory.GoogleAccount original = directory.googleAccount("legacy-readable-fixture");
+        assertEquals(id, original.userId());
+        assertEquals("g_0123456789abcdef0123456789ab", original.handle());
+        directory.rename(id, new AccountDirectory.UsernameChange("my-chosen-name"));
+        assertEquals(new AccountDirectory.GoogleAccount(id, "my-chosen-name"), directory.googleAccount("legacy-readable-fixture"));
+        assertEquals("my-chosen-name", directory.existingGoogleAccount("legacy-readable-fixture", id).handle());
+        assertThrows(ApiException.class, () -> directory.existingGoogleAccount("legacy-readable-fixture", UUID.randomUUID()));
+        assertThrows(ApiException.class, () -> directory.googleAccount("invalid subject"));
+        assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM accounts", Integer.class));
+    }
+
+    @Test void hyphenatedUsernamesWorkForRegistrationLoginLookupAndRename() throws Exception {
+        Device owner = device("quiet-otter-4827");
+        Device reader = device("reader_old_name");
+        request(get("/users/quiet-otter-4827"), reader).andExpect(status().isOk())
+                .andExpect(jsonPath("$.userId").value(owner.userId().toString()));
+        request(body(post("/auth/login"), new AuthService.Login("quiet-otter-4827", "test-only-password-12345", owner.deviceId())), null)
+                .andExpect(status().isOk()).andExpect(jsonPath("$.userId").value(owner.userId().toString()));
+        request(body(patch("/account/username"), Map.of("handle", "gentle-panda-2098")), owner).andExpect(status().isOk());
+        request(get("/users/gentle-panda-2098"), reader).andExpect(status().isOk())
+                .andExpect(jsonPath("$.deviceId").value(owner.deviceId().toString()));
+        request(get("/users/id/" + owner.userId() + "/profile"), reader).andExpect(status().isOk())
+                .andExpect(jsonPath("$.handle").value("gentle-panda-2098"));
+        request(body(patch("/account/username"), Map.of("handle", "gentle-panda-2098")), reader).andExpect(status().isConflict());
+        request(body(patch("/account/username"), Map.of("handle", "invalid.name")), reader).andExpect(status().isBadRequest());
+        request(body(patch("/account/username"), Map.of("handle", "invalid name")), reader).andExpect(status().isBadRequest());
+        request(get("/account/type"), owner).andExpect(status().isOk()).andExpect(jsonPath("$.userType").value("USER"));
+        assertEquals("reader_old_name", database.queryForObject("SELECT handle FROM accounts WHERE id = ?", String.class, reader.userId()));
+    }
+
+    @Test void hyphenatedUsernameMigrationPreservesAccountsDevicesAndAdminPin() {
+        var configuration = org.flywaydb.core.Flyway.configure().dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
+                .schemas("username_upgrade_fixture").defaultSchema("username_upgrade_fixture").locations("classpath:db/migration");
+        try {
+            configuration.target("10").load().migrate();
+            UUID admin = UUID.randomUUID(), user = UUID.randomUUID(), device = UUID.randomUUID();
+            database.update("INSERT INTO username_upgrade_fixture.accounts(id,handle,password_hash) VALUES (?,'legacy_admin','synthetic')", admin);
+            database.update("INSERT INTO username_upgrade_fixture.admin_identity(user_id) VALUES (?)", admin);
+            database.update("UPDATE username_upgrade_fixture.accounts SET user_type='ADMIN' WHERE id=?", admin);
+            database.update("INSERT INTO username_upgrade_fixture.accounts(id,handle,google_subject) VALUES (?,'g_legacy_username','legacy-google-subject')", user);
+            database.update("INSERT INTO username_upgrade_fixture.devices(id,user_id,identity_key,auth_version) VALUES (?,?,?,?)",
+                    device, user, Base64.getEncoder().encodeToString(new byte[33]), UUID.randomUUID());
+            var accounts = database.queryForList("SELECT * FROM username_upgrade_fixture.accounts ORDER BY id");
+            var devices = database.queryForList("SELECT * FROM username_upgrade_fixture.devices");
+            var links = database.queryForList("SELECT * FROM username_upgrade_fixture.admin_introductions");
+            assertThrows(DataIntegrityViolationException.class, () -> database.update(
+                    "UPDATE username_upgrade_fixture.accounts SET handle='quiet-otter-4827' WHERE id=?", user));
+            assertEquals(1, configuration.target("11").load().migrate().migrationsExecuted);
+            assertEquals(accounts, database.queryForList("SELECT * FROM username_upgrade_fixture.accounts ORDER BY id"));
+            assertEquals(devices, database.queryForList("SELECT * FROM username_upgrade_fixture.devices"));
+            assertEquals(links, database.queryForList("SELECT * FROM username_upgrade_fixture.admin_introductions"));
+            assertEquals(admin, database.queryForObject("SELECT user_id FROM username_upgrade_fixture.admin_identity", UUID.class));
+            assertEquals(1, database.update("UPDATE username_upgrade_fixture.accounts SET handle='quiet-otter-4827' WHERE id=?", user));
+            for (String invalid : List.of("ab", "x".repeat(33), "quiet otter", "quiet.otter", "Quiet-otter", "quiet/otter"))
+                assertThrows(DataIntegrityViolationException.class, () -> database.update(
+                        "UPDATE username_upgrade_fixture.accounts SET handle=? WHERE id=?", invalid, user));
+            assertThrows(DataIntegrityViolationException.class, () -> database.update(
+                    "UPDATE username_upgrade_fixture.accounts SET handle='legacy_admin' WHERE id=?", user));
+            assertThrows(DataIntegrityViolationException.class, () -> database.update(
+                    "UPDATE username_upgrade_fixture.accounts SET user_type='ADMIN' WHERE id=?", user));
+            assertEquals(0, configuration.load().migrate().migrationsExecuted);
+        } finally { database.execute("DROP SCHEMA IF EXISTS username_upgrade_fixture CASCADE"); }
+    }
+
     @Test void signOutRemainsAvailableWhenAuthenticationAttemptsAreRateLimited() throws Exception {
         Device signedIn = device("signed_in");
         for (int attempt = 0; attempt < 9; attempt++) {
@@ -1378,6 +1535,7 @@ class RelayIntegrationTest {
     @Test void googleIdentityMappingIsStableSeparateAndDoesNotImportGoogleProfileData() throws Exception {
         AccountDirectory directory = new AccountDirectory(database, json, Clock.systemUTC());
         AccountDirectory.GoogleAccount first = directory.googleAccount("google-subject-fixture");
+        assertTrue(first.handle().matches("[a-z]+-[a-z]+-[1-9][0-9]{3}"));
         AccountDirectory.GoogleAccount returning = directory.googleAccount("google-subject-fixture");
         assertEquals(first, returning);
         assertNotEquals(first.userId(), directory.googleAccount("other-google-subject-fixture").userId());

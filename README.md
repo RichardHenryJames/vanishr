@@ -296,10 +296,18 @@ Unlock the phone normally, open Vanishr, create an account, and repeat
 on a second device/account. Tap your avatar on the Chats screen to open My profile
 and edit your shared display name or unique username. Only your authenticated
 account can change either field.
-Usernames use 3-32 lowercase letters, numbers or underscores; duplicate names are
+Usernames use 3-32 lowercase letters, numbers, underscores or hyphens; duplicate names are
 rejected even under simultaneous claims. The old username becomes available again,
 but existing contacts and encrypted messages remain attached to your stable account
 ID and keys, not to the reusable username. Use the new username for password login.
+
+From 0.5.3, new Google accounts receive a random `word-word-1234` username
+using two 512-word English lists and a four-digit number (1000-9999).
+The database enforces uniqueness and collisions are retried. Existing usernames,
+including older `g_...` names, stay unchanged; My profile still supports renaming.
+The readable name is not a password, identity proof or admin designation.
+Both participants, including the official admin, should update to 0.5.3:
+older clients can reject hyphenated profiles, contact searches or group members.
 
 The profile display name is separate, need not be unique, and is visible through
 authenticated account lookup. Older local profile names are not uploaded until

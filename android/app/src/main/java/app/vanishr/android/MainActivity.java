@@ -637,7 +637,7 @@ public final class MainActivity extends AppCompatActivity {
             username.layout().setError(null); secretField.layout().setError(null);
             String accountHandle;
             try { accountHandle = ChatEngine.validUsername(handle.getText().toString()); }
-            catch (IllegalArgumentException failure) { username.layout().setError("Use 3-32 lowercase letters, numbers or underscores"); return; }
+            catch (IllegalArgumentException failure) { username.layout().setError(ChatEngine.USERNAME_HINT); return; }
             String secret = password.getText().toString();
             if (secret.length() < 16 || secret.length() > 64 || secret.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 72) {
                 secretField.layout().setError("Use 16-64 characters, up to 72 UTF-8 bytes"); return;
@@ -1601,8 +1601,9 @@ public final class MainActivity extends AppCompatActivity {
         SecureSheet dialog = new SecureSheet.Builder(this).setTitle("Add contact").setView(scroll).setNegativeButton("Cancel", null)
                 .setPositiveButton("Find", null).create();
         dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
-            String handle = username.input().getText().toString().strip().toLowerCase(Locale.ROOT);
-            if (!handle.matches("@?[a-z0-9_]{3,32}")) { username.layout().setError("Enter a username of 3-32 letters, numbers or underscores"); return; }
+            String handle;
+            try { handle = ChatEngine.validUsername(username.input().getText().toString()); }
+            catch (IllegalArgumentException failure) { username.layout().setError(ChatEngine.USERNAME_HINT); return; }
             username.layout().setError(null);
             var found = new java.util.concurrent.atomic.AtomicReference<ChatEngine.Peer>();
             submit(() -> found.set(current.findPeer(handle)), () -> { dialog.dismiss(); verifyContactDialog(found.get()); });
@@ -1850,7 +1851,7 @@ public final class MainActivity extends AppCompatActivity {
         design.inlineSave(username, "Save username", () -> {
             String handle;
             try { handle = ChatEngine.validUsername(username.input().getText().toString()); }
-            catch (IllegalArgumentException failure) { username.layout().setError("Use 3-32 lowercase letters, numbers or underscores"); return; }
+            catch (IllegalArgumentException failure) { username.layout().setError(ChatEngine.USERNAME_HINT); return; }
             saveProfileField(username, () -> current.renameUsername(handle), () -> {
                 profileUsername.setText("@" + current.account().handle()); username.input().setText(current.account().handle());
             });

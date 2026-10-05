@@ -1,7 +1,53 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-10-03. This is a development foundation,
+Evidence refreshed on Windows, 2026-10-05. This is a development foundation,
 not a production security assessment or independent audit.
+
+## Release 0.5.3 / readable Google usernames
+
+- Candidate `0.5.3` / code `34` gives first-time Google accounts usernames such
+  as `quiet-otter-4827`. Each position has **512 distinct English words**;
+  an independent random number from 1000 through 9999 gives
+  **2,359,296,000 candidates**. Selection uses `SecureRandom`, not the Google
+  profile/email or a substring of the account UUID.
+- Existing `g_...` and user-chosen handles remain unchanged on sign-in. Internal
+  account UUIDs, device identities, Signal keys, admin roles and the permanent
+  single-admin pin are unchanged. A username remains public metadata, not an
+  authentication secret or verification proof.
+- PostgreSQL enforces global handle/Google-subject uniqueness. Creation retries
+  collisions without aborting the transaction, returns the already-created
+  account for concurrent requests on the same subject, and fails explicitly
+  after at most 16 attempts. It cannot claim a pre-existing password/admin
+  account just because a generated handle collides.
+- V11 expands only the handle CHECK constraint to accept hyphens, keeping the
+  3-32-character bound and previous lowercase/digit/underscore names. Relay
+  registration/login/rename and Android input, lookup, profile, admin-directory
+  and group-member validation accept the new format.
+- **Compatibility:** both participants, the admin and group members should
+  update to 0.5.3. Earlier clients may reject new hyphenated handles, including
+  those returned by a first Google sign-in; this is not fixed by changing only
+  the website. No existing user is forcibly renamed.
+- Sixteen targeted JVM tests passed with zero failures/errors/skips: three
+  vocabulary/format tests, three Google-authentication tests and ten PostgreSQL/
+  Redis integration tests. Coverage includes the >=500-words-per-list threshold,
+  every word-pair's length, exact numeric boundaries, 10,000 sampled names,
+  deterministic collisions, concurrent same/different subjects, bounded
+  exhaustion, old/custom-name preservation, API lookup/login/rename, admin
+  onboarding and a V10-to-V11 migration preserving accounts/devices/admin state.
+- Eight focused Android instrumentation tests passed with no failures/skips
+  on the isolated Android 12 `Vanishr_Onboarding_Test` emulator and separate QA
+  package (45.36 seconds). They cover hyphenated lookup from the real dialog,
+  profile/account persistence, identity retention, group validation, admin
+  onboarding, legacy usernames and Google reauthentication. The six existing
+  update-parser unit tests and QA compilation/lint also passed. Synthetic QA
+  account data and its generated screen-lock credential were removed.
+- The tested relay JAR contains V11 and the generator, with no production
+  dependency on client-core/libsignal. SHA-256:
+  `fbb22ae4b718268a061a54c196efdc40078fc93047038effc1ab6f892d300efe`.
+- Signed APK/AAB packaging, relay deployment and static publication are pending.
+  The release retains the existing Google/Firebase settings and separate
+  website/Play updater channels. No real Google-account login or Play Console
+  upload is claimed by the local tests.
 
 ## Release 0.5.1 / restore Google sign-in configuration
 

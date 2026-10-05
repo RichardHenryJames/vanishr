@@ -346,13 +346,29 @@ Do not log or paste token responses into bug reports.
 
 Username/profile update bodies contain no target user ID. Unknown fields are
 rejected; ownership is derived from the authenticated session. Usernames must
-match `[a-z0-9_]{3,32}` and are globally unique; an unavailable username returns
+match `[a-z0-9_-]{3,32}` and are globally unique; an unavailable username returns
 409 `account_unavailable`. Renaming does not alter account UUIDs, device generation,
 public keys or queued ciphertext. The old username becomes available; clients must
 keep existing contacts bound to immutable UUIDs rather than resolving that old name.
 Display names are trimmed, bounded to 40 characters and reject control characters.
 They are shared, server-visible metadata and may be duplicated. A private contact
 name is strictly local client data and is not accepted by any relay endpoint.
+
+From relay schema V11 / client 0.5.3, first-time Google authentication generates
+`word-word-dddd` handles: one independently random word from each of two
+512-entry English lists, followed by a random integer from 1000 through 9999.
+This gives 2,359,296,000 candidates. PostgreSQL uniqueness applies to Google and
+password users alike. Conflicts retry within a bounded 16-attempt creation
+transaction; concurrent requests for one Google subject return the same
+persisted account. Exhaustion returns 503 `google_sign_in_unavailable`, not
+someone else's account or an unpersisted handle. Returning accounts keep their
+current handle, including legacy and user-renamed handles. No Google name/email
+or account UUID is used to construct the readable handle.
+
+V11 only broadens the username CHECK constraint to accept hyphens; it does not
+rename data or change account UUIDs, keys, admin pins or roles. Clients before
+0.5.3 do not support hyphenated handles consistently; update both participants,
+especially the admin and group members, before relying on these names.
 
 PublicBundle:
 `{registrationId,preKeyId,preKey,signedPreKeyId,signedPreKey,signedPreKeySignature,identityKey,kyberPreKeyId,kyberPreKey,kyberPreKeySignature}`.

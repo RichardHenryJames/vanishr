@@ -92,7 +92,7 @@ final class GroupChat {
     private Approval approval(UUID group,UUID epoch) { return read("group-approval/"+epochKey(group,epoch),Approval.class); }
     private void snapshot(Snapshot value) throws Exception {
         if (value==null || value.members()==null || value.members().size()>200 || value.members().stream().anyMatch(Objects::isNull)) throw new SecurityException("Invalid group membership");
-        if (value.members().stream().anyMatch(member -> !Set.of("ACTIVE","INVITED").contains(member.state()) || member.handle()==null || !member.handle().matches("[a-z0-9_]{3,32}")))
+        if (value.members().stream().anyMatch(member -> !Set.of("ACTIVE","INVITED").contains(member.state()) || member.handle()==null || !member.handle().matches(ChatEngine.USERNAME_PATTERN)))
             throw new SecurityException("Invalid group member metadata");
         new GroupRoster(value.id(),value.ownerId(),value.epoch(),value.revision(),value.members().stream().map(Member::identity).toList());
         value.roster();

@@ -19,7 +19,7 @@ import static app.vanishr.relay.RelayTypes.*;
 
 @Service
 public class AuthService {
-    public record Login(@NotNull @Pattern(regexp = "[a-z0-9_]{3,32}") String handle,
+    public record Login(@NotNull @Pattern(regexp = AccountDirectory.USERNAME_PATTERN) String handle,
                         @NotNull @Size(min = 16, max = 64) String password, UUID deviceId) {
         @Override public String toString() { return "Login[redacted]"; }
     }

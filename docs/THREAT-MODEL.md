@@ -93,6 +93,16 @@ claims. Usernames may be reused after renaming, so existing contacts and session
 remain bound to immutable account UUIDs and pinned keys. Names are not identity
 proofs. Google names, email addresses and photos are not imported automatically.
 
+New Google account handles use two independently selected words from 512-word
+English lists and a four-digit random number, generated with `SecureRandom`.
+They are public, guessable identifiers, never authentication secrets or proof
+of a person's identity. The Google subject/account UUID and any existing handle
+remain unchanged on returning sign-in. PostgreSQL enforces handle and subject
+uniqueness, with bounded conflict retries rather than stealing a colliding name
+or silently returning another account. V11 accepts hyphens without rewriting
+existing account records. Earlier clients must upgrade to understand these
+handles across profile, contact and group validation.
+
 Account type is server-controlled metadata attached to the immutable account UUID.
 The PostgreSQL `accounts.user_type` column permits only `USER` or `ADMIN`, defaults
 to `USER` for existing and new accounts, and is not accepted by any client write

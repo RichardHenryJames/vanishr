@@ -6,6 +6,14 @@ account login or delivered FCM push.
 
 ## Current dev/test setup
 
+From 0.5.3, newly created Google accounts use readable random usernames such as
+`quiet-otter-4827`, drawn from two 512-word lists and 9000 four-digit numbers.
+The username is not derived from the Google email, profile name or account UUID.
+Existing `g_...` and custom usernames are retained, and users can still rename
+their account from My profile. Deploy the V11 relay migration together with the
+0.5.3 client validation update. Older clients may reject hyphenated profiles,
+lookups and group members; the admin and other contacts should also upgrade.
+
 On 2026-09-17, project `vanishr-b7616` was configured on the no-cost Spark plan.
 The release Android package and signing certificate match the saved client
 configuration. OAuth consent remains in Testing with explicitly allowed users.
