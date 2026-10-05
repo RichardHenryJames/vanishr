@@ -5,9 +5,10 @@ not a production security assessment or independent audit.
 
 ## Release 0.5.4 / startup and foreground recovery investigation
 
-- Candidate `0.5.4` / code `35` packages the tested fixes below. Signed
-  APK/AAB verification and website publication are pending. The backend and
-  account records do not require a change for this Android-only release.
+- Published direct-download `0.5.4` / code `35` packages the tested fixes below.
+  The matching signed Play AAB is prepared separately for manual submission.
+  No backend deployment, account reset or provider configuration change was
+  needed for this Android-only release.
 
 - A user reported slow opening, crashes and an Android "not responding" state
   on an unspecified Motorola Edge device running 0.5.3. No affected phone,
@@ -55,6 +56,34 @@ not a production security assessment or independent audit.
   the existing signing identity, Google/Firebase configuration and the separate
   website/Play updater channels. This is not a confirmed fix for the reported
   physical Motorola device without its crash/ANR evidence and retest.
+- Source commit: `5e00f7119a262defb6aa423d2c32d2c56e45a40b`. Both final artifacts
+  passed compilation, R8, release lint and signature checks. APK:
+  44,438,029 bytes, SHA-256
+  `b251ed1558eaa7e56f16c25cef94a39ca3aeac60a567f7f33b7bf4f4e5c239f3`.
+  Play AAB: 45,749,719 bytes, SHA-256
+  `08a70cc31d85c062a9646296ef74efc4452b6cfafe4621f1876eda19534a00d5`.
+  The original release/upload certificate SHA-256 remains
+  `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`.
+- The AAB passed checksum-verified official bundletool validation, actual
+  package/version/minimum-28/target-36 checks, original signer, matching notices,
+  16-KiB bundle packaging and load-segment checks for all four 64-bit native
+  libraries. Its actual DEX includes the configured Google/Firebase values and
+  Play listing action, with the external APK updater absent. It is saved at
+  `.tools/play-store-0.5.4/vanishr-0.5.4.aab` alongside verification evidence.
+- Inspected 31 static files / 59,637,603 bytes and the 441-entry corresponding-
+  source ZIP against the explicit allowlist. No private artifact paths or
+  credential-content markers were found. Source ZIP SHA-256:
+  `589334fbfebd926e90625a37dfe3b2264960174065b703ff0ecd95d969107d12`.
+- Published only that distribution to the existing Vanishr Hobby project:
+  `dpl_8LWQj87EwC4DeiGLnY1fLrwpcmiT`. The canonical public alias was explicitly
+  moved to the Ready deployment. At `2026-10-05T07:12:52Z`, all 30 public
+  artifacts matched their audited hashes anonymously, including six pages and
+  the actual APK. Public APK manifest/signature and embedded Google settings
+  matched; the exact app feed serves `0.5.4` / `35` with `no-store`.
+- Distribution, Play and public verification records are saved outside the
+  upload folder. No Play Console upload, Play signing enrollment verification
+  or real Google-account login was performed. Existing Play policy/consent and
+  production-readiness limitations are unchanged.
 
 ## Release 0.5.3 / readable Google usernames
 
