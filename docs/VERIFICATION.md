@@ -5,7 +5,7 @@ not a production security assessment or independent audit.
 
 ## Release 0.5.3 / readable Google usernames
 
-- Candidate `0.5.3` / code `34` gives first-time Google accounts usernames such
+- Published `0.5.3` / code `34` gives first-time Google accounts usernames such
   as `quiet-otter-4827`. Each position has **512 distinct English words**;
   an independent random number from 1000 through 9999 gives
   **2,359,296,000 candidates**. Selection uses `SecureRandom`, not the Google
@@ -44,10 +44,39 @@ not a production security assessment or independent audit.
 - The tested relay JAR contains V11 and the generator, with no production
   dependency on client-core/libsignal. SHA-256:
   `fbb22ae4b718268a061a54c196efdc40078fc93047038effc1ab6f892d300efe`.
-- Signed APK/AAB packaging, relay deployment and static publication are pending.
-  The release retains the existing Google/Firebase settings and separate
-  website/Play updater channels. No real Google-account login or Play Console
-  upload is claimed by the local tests.
+- Source commit: `15ae9f835fd3b6a95ba64e99ac815757616f263b`. Final signed APK
+  and Play AAB compilation, R8, release lint and signature checks passed.
+  APK: 44,438,025 bytes, SHA-256
+  `68f3dc7a478c2a58ad7d6ac5d10ccf3ce19670df65888c00dfb6563dba81bdd0`.
+  AAB: 45,740,959 bytes, SHA-256
+  `9cc3fcb3913255144e976f65fc668e1b26c1025667df27c43e3113362ce5b9ef`.
+  Both contain the existing Google/Firebase settings and hyphen-compatible
+  validation; the direct APK retains its website updater, while the Play AAB
+  contains the Play listing action and no external APK updater.
+- The AAB passed checksum-verified official bundletool validation, actual
+  package/version/minimum-28/target-36 checks, the original upload signer,
+  matching notices, 16-KiB bundle packaging and load-segment alignment checks
+  for all four 64-bit native libraries. It is preserved separately at
+  `.tools/play-store-0.5.3/vanishr-0.5.3.aab`.
+- Deployed the tested relay only to `vanishr-dev-rg` in the approved subscription.
+  A read-only check of the running container matched the JAR hash above and
+  verified applied schema 11 and the hyphenated-handle constraint. Public
+  HTTPS health and the existing Google audience/challenge checks passed.
+  Temporary transfer storage was removed; no VM sizing or provider credentials
+  were changed, and the subscription spending limit remained On.
+- Inspected 31 static files / 59,633,311 bytes and a 441-entry source archive
+  against the explicit source allowlist. No private artifact paths or
+  credential-content markers were found. Source ZIP SHA-256:
+  `8ae0a4f8016fe4f9d211572f5db530421cc9e7139be11bc39441db6d37315f6e`.
+  Vercel deployment `dpl_BGbSDqyNRc8z6HGvhHnBafSGcQcc` is Ready on the existing
+  Vanishr Hobby project; the canonical public alias was explicitly updated.
+  At `2026-10-05T03:20:55Z`, all 30 served artifacts matched their audited
+  hashes anonymously, including the signed APK and all six website pages.
+  The exact update-feed URL serves `0.5.3` / `34` with `no-store`.
+- Distribution, relay, Play-bundle and public-verification JSON evidence is
+  saved outside the upload directory. No real Google-account login or Play
+  Console upload is claimed. Existing Play review/consent/production-readiness
+  concerns are not resolved or reclassified by this username-only release.
 
 ## Release 0.5.1 / restore Google sign-in configuration
 
