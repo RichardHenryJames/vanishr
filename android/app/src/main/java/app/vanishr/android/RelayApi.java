@@ -80,6 +80,8 @@ final class RelayApi implements AutoCloseable {
             .connectionSpecs(Collections.singletonList(ConnectionSpec.MODERN_TLS)).followRedirects(false).followSslRedirects(false)
             .connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).callTimeout(30, TimeUnit.SECONDS).build();
     private final HttpUrl origin;
+    private final Set<Call> pendingCalls = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private volatile boolean cancelled;
     private volatile String token;
     @FunctionalInterface interface SessionRefresh { void refresh(boolean rejected) throws Exception; }
     private SessionRefresh sessionRefresh;
@@ -110,6 +112,7 @@ final class RelayApi implements AutoCloseable {
     }
 
     private byte[] execute(Request request, int maximum) throws Exception {
+        if (cancelled) throw new IOException("Relay connection closed");
         boolean renewal = request.url().encodedPath().equals("/auth/refresh");
         if (renewal) request = request.newBuilder().removeHeader("Authorization").build();
         else if (sessionRefresh != null) { sessionRefresh.refresh(false); request = authorize(request); }
@@ -122,7 +125,8 @@ final class RelayApi implements AutoCloseable {
     }
 
     private byte[] executeOnce(Request request, int maximum) throws IOException {
-        try (Response response = client.newCall(request).execute()) {
+        Call call = newCall(request);
+        try (Response response = call.execute()) {
             if (!response.isSuccessful()) {
                 byte[] error = new byte[0];
                 try { if (response.body() != null) error = AndroidVault.boundedRead(response.body().byteStream(), 4096); }
@@ -133,7 +137,16 @@ final class RelayApi implements AutoCloseable {
             if (response.body() == null) return new byte[0];
             if (response.body().contentLength() > maximum) throw new IOException("Response size limit exceeded");
             return AndroidVault.boundedRead(response.body().byteStream(), maximum);
-        }
+        } finally { pendingCalls.remove(call); }
+    }
+
+    private Call newCall(Request request) throws IOException {
+        if (cancelled) throw new IOException("Relay connection closed");
+        Call call = client.newCall(request);
+        pendingCalls.add(call);
+        // Cancellation can race with registration, even before execute() starts.
+        if (cancelled) call.cancel();
+        return call;
     }
 
     <Result> Result call(String method, String path, Object body, Class<Result> type) throws Exception {
@@ -155,9 +168,10 @@ final class RelayApi implements AutoCloseable {
     byte[] groupMedia(UUID group,UUID message) throws Exception { return execute(request("/groups/"+group+"/messages/"+message+"/media").get().build(),app.vanishr.crypto.ImageCipher.MAX_IMAGE_BYTES+16); }
 
     ContactPresence.Status[] presence(ContactPresence.Update update) throws Exception {
+        if (cancelled) throw new IOException("Relay connection closed");
         if (sessionRefresh != null) sessionRefresh.refresh(false);
         RequestBody body = RequestBody.create(JSON.toJson(update).getBytes(StandardCharsets.UTF_8), MediaType.get("application/json"));
-        Call call = client.newCall(request("/presence").post(body).build());
+        Call call = newCall(request("/presence").post(body).build());
         call.timeout().timeout(3, TimeUnit.SECONDS);
         try (Response response = call.execute()) {
             if (!response.isSuccessful()) throw new ApiFailure(response.code());
@@ -166,12 +180,12 @@ final class RelayApi implements AutoCloseable {
             try { return JSON.fromJson(new String(bytes, StandardCharsets.UTF_8), ContactPresence.Status[].class); }
             catch (JsonParseException failure) { throw new IOException("Invalid presence response"); }
             finally { Arrays.fill(bytes, (byte) 0); }
-        }
+        } finally { pendingCalls.remove(call); }
     }
 
     <Result> Result photoCall(String method, String path, Object body, Class<Result> type) throws Exception {
         RequestBody content = body == null ? null : RequestBody.create(JSON.toJson(body).getBytes(StandardCharsets.UTF_8), MediaType.get("application/json"));
-        Call call = client.newCall(request(path).method(method, content).build());
+        Call call = newCall(request(path).method(method, content).build());
         call.timeout().timeout(5, TimeUnit.SECONDS);
         try (Response response = call.execute()) {
             if (response.body() == null) throw new IOException("Photo service unavailable");
@@ -180,7 +194,7 @@ final class RelayApi implements AutoCloseable {
                 if (!response.isSuccessful()) throw failure(response.code(), bytes);
                 return JSON.fromJson(new String(bytes, StandardCharsets.UTF_8), type);
             } finally { Arrays.fill(bytes, (byte) 0); }
-        }
+        } finally { pendingCalls.remove(call); }
     }
 
     WebSocket events(Runnable wake, java.util.function.Consumer<Boolean> state) { return events("/events", client, wake, state); }
@@ -188,19 +202,28 @@ final class RelayApi implements AutoCloseable {
         return events("/photo-events", client.newBuilder().pingInterval(10, TimeUnit.SECONDS).build(), wake, state);
     }
     private WebSocket events(String path, OkHttpClient transport, Runnable wake, java.util.function.Consumer<Boolean> state) {
-        return transport.newWebSocket(request(path).build(), new WebSocketListener() {
+        if (cancelled) throw new IllegalStateException("Relay connection closed");
+        WebSocket socket = transport.newWebSocket(request(path).build(), new WebSocketListener() {
             @Override public void onOpen(WebSocket socket, Response response) { state.accept(true); wake.run(); }
             @Override public void onMessage(WebSocket socket, String text) { if (text.equals("{\"event\":\"new_message\"}")) wake.run(); }
             @Override public void onClosing(WebSocket socket, int code, String reason) { state.accept(false); socket.close(code, null); }
             @Override public void onClosed(WebSocket socket, int code, String reason) { state.accept(false); }
             @Override public void onFailure(WebSocket socket, Throwable failure, Response response) { state.accept(false); }
         });
+        if (cancelled) socket.cancel();
+        return socket;
+    }
+
+    void cancelRequests() {
+        cancelled = true;
+        for (Call call : pendingCalls) call.cancel();
+        client.dispatcher().cancelAll();
     }
 
     @Override public void close() {
+        cancelRequests();
         token = null;
         sessionRefresh = null;
-        client.dispatcher().cancelAll();
         client.connectionPool().evictAll();
         client.dispatcher().executorService().shutdown();
     }

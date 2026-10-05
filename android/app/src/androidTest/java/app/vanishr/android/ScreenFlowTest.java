@@ -874,6 +874,184 @@ public class ScreenFlowTest {
         }
     }
 
+    @Test public void homeAvatarRefreshDoesNotBlockOnBusySecureStorage() throws Exception {
+        signedInFixture(); conversationsFixture(); notificationTransport(reference -> null);
+        var locked = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertFalse(((List<?>) readField(activity, "photoAvatars")).isEmpty());
+                ((java.util.concurrent.ExecutorService) readField(activity, "work")).execute(() -> {
+                    synchronized (vault) {
+                        locked.countDown();
+                        try { release.await(2, java.util.concurrent.TimeUnit.SECONDS); }
+                        catch (InterruptedException failure) { Thread.currentThread().interrupt(); }
+                    }
+                });
+            });
+            try {
+                assertTrue(locked.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                scenario.onActivity(activity -> {
+                    setField(activity, "shownPhotoGeneration", -1L);
+                    long started = android.os.SystemClock.elapsedRealtime();
+                    invoke(activity, "refreshProfileAvatars");
+                    long elapsed = android.os.SystemClock.elapsedRealtime() - started;
+                    assertTrue("Home avatar refresh must take <100ms while storage is busy; took " + elapsed + "ms", elapsed < 100);
+                    android.os.Bundle metrics = new android.os.Bundle(); metrics.putLong("homeAvatarRefreshMillis", elapsed);
+                    InstrumentationRegistry.getInstrumentation().sendStatus(0, metrics);
+                });
+            } finally { release.countDown(); }
+        }
+    }
+
+    @Test public void backgroundingCancelsBlockedNetworkBeforeQueuedVaultClose() throws Exception {
+        signedInFixture(); notificationTransport(reference -> null);
+        var started = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var finished = new java.util.concurrent.CountDownLatch(1);
+        RelayApi api = engine.groupApi();
+        var builder = ((okhttp3.OkHttpClient) readField(api, "client")).newBuilder();
+        builder.interceptors().add(0, chain -> {
+            if (chain.request().url().encodedPath().equals("/slow-fixture")) {
+                started.countDown();
+                try {
+                    while (!chain.call().isCanceled() && !release.await(10, java.util.concurrent.TimeUnit.MILLISECONDS)) { }
+                } catch (InterruptedException failure) { Thread.currentThread().interrupt(); }
+                throw new IOException("Synthetic cancelled request");
+            }
+            return chain.proceed(chain.request());
+        });
+        setField(api, "client", builder.build());
+        java.util.concurrent.ExecutorService[] worker = new java.util.concurrent.ExecutorService[1];
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            try {
+                scenario.onActivity(activity -> {
+                    inject(activity);
+                    worker[0] = (java.util.concurrent.ExecutorService) readField(activity, "work");
+                    worker[0].execute(() -> {
+                        try { api.call("GET", "/slow-fixture", null, Void.class); }
+                        catch (Exception failure) { assertTrue(failure instanceof IOException); }
+                        finally { finished.countDown(); }
+                    });
+                });
+                assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                long pausedAt = android.os.SystemClock.elapsedRealtime();
+                scenario.moveToState(Lifecycle.State.STARTED);
+                assertTrue("Pausing must cancel network work within 1s instead of waiting for its timeout",
+                        finished.await(1, java.util.concurrent.TimeUnit.SECONDS));
+                android.os.Bundle metrics = new android.os.Bundle();
+                metrics.putLong("backgroundRequestCancellationMillis", android.os.SystemClock.elapsedRealtime() - pausedAt);
+                InstrumentationRegistry.getInstrumentation().sendStatus(0, metrics);
+                assertThrows(IOException.class, () -> api.call("GET", "/must-not-restart", null, Void.class));
+            } finally { release.countDown(); }
+            worker[0].submit(() -> { }).get(10, java.util.concurrent.TimeUnit.SECONDS);
+        }
+        vault.unlock();
+        ChatEngine.Account saved = RelayApi.JSON.fromJson(new String(vault.get("account"), StandardCharsets.UTF_8), ChatEngine.Account.class);
+        assertEquals(userId, saved.userId());
+        assertEquals(deviceId, saved.deviceId());
+        assertEquals("synthetic-fixture", saved.accessToken());
+    }
+
+    @Test public void avatarStorageFailureIsReportedWithoutEscapingTheUiCallback() throws Exception {
+        signedInFixture(); notificationTransport(reference -> null);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                vault.close();
+                setField(activity, "shownPhotoGeneration", -1L);
+                invoke(activity, "refreshProfileAvatars");
+            });
+            awaitMainCondition(scenario, activity -> readField(activity, "engine") == null
+                    && "Secure storage is unavailable. Your encrypted data has not been cleared.".equals(readField(activity, "storageError")));
+        }
+        vault.unlock();
+        assertNotNull("A display failure must not clear the saved account", vault.get("account"));
+    }
+
+    @Test public void queuedExplicitSignOutStillClearsSessionWhenBackgrounding() throws Exception {
+        signedInFixture(); notificationTransport(reference -> null);
+        String identity = engine.identityCode();
+        var started = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.ExecutorService[] worker = new java.util.concurrent.ExecutorService[1];
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                inject(activity);
+                worker[0] = (java.util.concurrent.ExecutorService) readField(activity, "work");
+                worker[0].execute(() -> {
+                    started.countDown();
+                    try { release.await(10, java.util.concurrent.TimeUnit.SECONDS); }
+                    catch (InterruptedException failure) { Thread.currentThread().interrupt(); }
+                });
+                invoke(activity, "signOutDialog");
+            });
+            try {
+                assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                scenario.onActivity(activity -> dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+                scenario.moveToState(Lifecycle.State.STARTED);
+            } finally { release.countDown(); }
+            worker[0].submit(() -> { }).get(10, java.util.concurrent.TimeUnit.SECONDS);
+        }
+        vault.unlock();
+        assertNull(vault.get("account"));
+        ChatEngine.Account saved = RelayApi.JSON.fromJson(new String(
+                vault.get(AndroidVault.savedAccountPrefix(userId) + "account"), StandardCharsets.UTF_8), ChatEngine.Account.class);
+        assertEquals(userId, saved.userId()); assertEquals(deviceId, saved.deviceId());
+        assertEquals("", saved.accessToken()); assertNull(saved.refreshToken());
+        vault.transaction(() -> { assertTrue(vault.restoreAccount(userId)); return null; });
+        engine = new ChatEngine(vault);
+        assertEquals(identity, engine.identityCode());
+        assertFalse(engine.authenticated());
+    }
+
+    @Test public void queuedAvatarCannotReappearAfterBackgrounding() throws Exception {
+        signedInFixture(); notificationTransport(reference -> null);
+        byte[] image = SafeImages.profilePhoto(photo);
+        try { engine.photos().update(image); }
+        finally { Arrays.fill(image, (byte) 0); }
+        var started = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.ExecutorService[] worker = new java.util.concurrent.ExecutorService[1];
+        List<Object> avatars = new ArrayList<>();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            awaitMainCondition(scenario, activity -> ((List<?>) readField(activity, "photoAvatars")).stream()
+                    .anyMatch(avatar -> readField(avatar, "bitmap") != null));
+            scenario.onActivity(activity -> {
+                avatars.addAll((List<?>) readField(activity, "photoAvatars"));
+                worker[0] = (java.util.concurrent.ExecutorService) readField(activity, "work");
+                worker[0].execute(() -> {
+                    started.countDown();
+                    try { release.await(10, java.util.concurrent.TimeUnit.SECONDS); }
+                    catch (InterruptedException failure) { Thread.currentThread().interrupt(); }
+                });
+            });
+            try {
+                assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                scenario.onActivity(activity -> {
+                    setField(activity, "shownPhotoGeneration", -1L);
+                    invoke(activity, "refreshProfileAvatars");
+                });
+                scenario.moveToState(Lifecycle.State.STARTED);
+            } finally { release.countDown(); }
+            worker[0].submit(() -> { }).get(10, java.util.concurrent.TimeUnit.SECONDS);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertTrue(((List<?>) readField(activity, "photoAvatars")).isEmpty());
+                for (Object avatar : avatars) {
+                    assertNull(readField(avatar, "bitmap"));
+                    assertNull(((ImageView) readField(avatar, "image")).getDrawable());
+                }
+            });
+        }
+        vault.unlock();
+        assertNotNull("Backgrounding must retain the encrypted owner photo", vault.get("profile-photo"));
+    }
+
     @Test public void chatTypingAndSendDoNotWaitForBusyEncryptedStorage() throws Exception {
         signedInFixture(); conversationsFixture();
         var locked = new java.util.concurrent.CountDownLatch(1);
@@ -1990,15 +2168,19 @@ public class ScreenFlowTest {
                                 && picture.getDrawable() instanceof android.graphics.drawable.BitmapDrawable));
                 invoke(activity, "dismissContent");
             });
+            awaitMainCondition(scenario, activity -> ((List<?>) readField(activity, "photoAvatars")).stream()
+                    .anyMatch(avatar -> peerId.equals(readField(avatar, "userId")) && readField(avatar, "bitmap") != null));
             snapshot(scenario, "63-saved-contact-photo");
             scenario.onActivity(activity -> {
-                assertTrue(descendants(root(activity)).stream().anyMatch(view -> view instanceof ImageView picture
-                        && picture.getDrawable() instanceof android.graphics.drawable.BitmapDrawable));
+                Object avatar = ((List<?>) readField(activity, "photoAvatars")).stream()
+                        .filter(value -> peerId.equals(readField(value, "userId")) && ((View) readField(value, "frame")).isAttachedToWindow())
+                        .findFirst().orElseThrow();
+                assertNotNull(readField(avatar, "bitmap"));
                 try { vault.transaction(() -> { engine.photos().purge("", System.currentTimeMillis() + 120_000); return null; }); }
                 catch (Exception failure) { throw new AssertionError(failure); }
                 invoke(activity, "refreshProfileAvatars");
-                assertFalse(descendants(root(activity)).stream().anyMatch(view -> view instanceof ImageView picture
-                        && picture.getDrawable() instanceof android.graphics.drawable.BitmapDrawable));
+                assertNull("An expired contact avatar must be cleared immediately", readField(avatar, "bitmap"));
+                assertNull(((ImageView) readField(avatar, "image")).getDrawable());
             });
         } finally { Arrays.fill(image, (byte) 0); }
     }

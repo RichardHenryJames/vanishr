@@ -70,7 +70,8 @@ final class ChatEngine implements AutoCloseable {
     private final AdminOnboarding onboarding;
     private final AccountSafety safety;
     private Account account;
-    private RelayApi api;
+    private volatile RelayApi api;
+    private volatile boolean cancelled;
     private SignalClient signal;
     private WebSocket socket;
     private volatile boolean realtimeReady;
@@ -110,7 +111,7 @@ final class ChatEngine implements AutoCloseable {
         if (safety.deletionCompleted()) return;
         account = read("account", Account.class);
         if (account != null) {
-            api = new RelayApi(account.origin(), account.accessToken());
+            useApi(new RelayApi(account.origin(), account.accessToken()));
             if (!authenticated() && account.accessToken() != null && !account.accessToken().isEmpty()) invalidateToken();
             if (account.enrolled()) api.sessionRefresh(this::refreshSession);
             signal = new SignalClient(account.userId(), vault.accountVault(account));
@@ -139,6 +140,10 @@ final class ChatEngine implements AutoCloseable {
     void prepareConversation(Peer peer) throws Exception { safety.requireAllowed(peer.userId()); onboarding.prepare(peer); }
     boolean realtimeReady() { return realtimeReady; }
     RelayApi groupApi() { return api; }
+    private void useApi(RelayApi next) {
+        api = next;
+        if (cancelled) next.cancelRequests();
+    }
     SignalClient groupSignal() { return signal; }
     private boolean accessReady() { return !safety.deletionPending() && account != null && account.enrolled() && account.accessToken() != null && !account.accessToken().isEmpty() && account.expiresAt() > System.currentTimeMillis() + 5000; }
     private boolean remembered() { return !safety.deletionPending() && account != null && account.enrolled() && account.refreshToken() != null && account.refreshToken().matches("[A-Za-z0-9_-]{43}") && account.refreshExpiresAt() > System.currentTimeMillis() + 5000; }
@@ -264,7 +269,7 @@ final class ChatEngine implements AutoCloseable {
         if (password.length() < 16 || password.length() > 64 || password.getBytes(StandardCharsets.UTF_8).length > 72)
             throw new IllegalArgumentException("Use a valid handle and a 16-64 character password");
         if (api != null) api.close();
-        api = new RelayApi(origin, null);
+        useApi(new RelayApi(origin, null));
         UUID existingDevice = account == null ? null : account.deviceId();
         Token token;
         try { token = api.call("POST", register ? "/auth/register" : "/auth/login", new Login(handle, password, existingDevice), Token.class); }
@@ -283,7 +288,7 @@ final class ChatEngine implements AutoCloseable {
             throw new SecurityException("Google sign-in challenge expired");
         if (account != null && !account.origin().equals(okhttp3.HttpUrl.get(origin).toString())) throw new SecurityException("Relay changed");
         if (api != null) api.close();
-        api = new RelayApi(origin, null);
+        useApi(new RelayApi(origin, null));
         GoogleResponse response = api.call("POST", "/auth/google", new GoogleRequest(challenge.id(), idToken), GoogleResponse.class);
         finishGoogleLogin(response, replaceExisting);
     }
@@ -784,7 +789,7 @@ final class ChatEngine implements AutoCloseable {
     void connect(Runnable wake) { this.wake = wake; reconnect(); }
     void reconnect() {
         long now = android.os.SystemClock.elapsedRealtime();
-        if (wake == null || !accessReady() || realtimeReady || now < nextConnect) return;
+        if (cancelled || wake == null || !accessReady() || realtimeReady || now < nextConnect) return;
         nextConnect = now + 10_000;
         long generation = ++connectionGeneration;
         if (socket != null) socket.cancel();
@@ -938,10 +943,17 @@ final class ChatEngine implements AutoCloseable {
         wake = null;
     }
 
-    @Override public void close() {
+    void cancelPendingRequests() {
+        cancelled = true;
         connectionGeneration++; realtimeReady = false;
         presence.foreground(false);
         if (socket != null) socket.cancel();
+        RelayApi current = api;
+        if (current != null) current.cancelRequests();
+    }
+
+    @Override public void close() {
+        cancelPendingRequests();
         if (api != null) api.close();
         socket = null;
         wake = null;

@@ -382,6 +382,20 @@ edits do not hold a lock across protected-storage or network operations. Realtim
 wakes arriving during a sync request one coalesced follow-up instead of being
 discarded; Signal and vault mutations remain serialized.
 
+Profile-avatar reads and decoding also run on the serialized worker. Results
+are bound to the current engine, screen, photo revision and individual view
+request, with expiry rechecked before display. Backgrounding invalidates these
+requests and clears bitmaps; secure-storage failures are surfaced through the
+storage screen instead of escaping a UI timer callback.
+
+Foreground cleanup immediately cancels that engine's in-flight relay requests
+and rejects new requests on its retired connection, then queues vault closure
+behind the current storage operation. It does not sign out, erase credentials,
+replace identities or reset encrypted records. An explicit queued sign-out still
+performs its local credential cleanup; network cancellation cannot prove remote
+revocation. Independently established photo-sharing services use their own
+transport and retain their existing consent/lifetime rules.
+
 Vanishr has no separate app lock or repeated credential prompt. While Android
 reports the phone unlocked, foreground startup opens the encrypted vault
 automatically after any system-accepted unlock method, including fingerprint or

@@ -197,10 +197,12 @@ public final class MainActivity extends AppCompatActivity {
         final ImageView image;
         Bitmap bitmap;
         long expiresAt;
+        long request;
         PhotoAvatar(UUID userId, FrameLayout frame, TextView fallback, ImageView image) {
             this.userId = userId; this.frame = frame; this.fallback = fallback; this.image = image;
         }
         void clear() {
+            request++;
             image.setImageDrawable(null); image.setVisibility(View.GONE); fallback.setVisibility(View.VISIBLE);
             if (bitmap != null) bitmap.recycle(); bitmap = null;
         }
@@ -336,16 +338,47 @@ public final class MainActivity extends AppCompatActivity {
 
     private void bindProfileAvatar(PhotoAvatar avatar) {
         avatar.clear();
-        if (engine == null || engine.account() == null) return;
-        boolean own = engine.account().userId().equals(avatar.userId);
-        byte[] photo = own ? engine.photos().own() : engine.photos().contact(avatar.userId);
-        if (photo == null) return;
-        try {
-            avatar.bitmap = SafeImages.displayProfilePhoto(photo);
-            avatar.expiresAt = own ? Long.MAX_VALUE : engine.photos().expiresAt(avatar.userId);
-            avatar.image.setImageBitmap(avatar.bitmap); avatar.image.setVisibility(View.VISIBLE); avatar.fallback.setVisibility(View.GONE);
-        } catch (java.io.IOException failure) { avatar.clear(); }
-        finally { Arrays.fill(photo, (byte) 0); }
+        ChatEngine current = engine;
+        if (!resumed || current == null || current.account() == null) return;
+        boolean own = current.account().userId().equals(avatar.userId);
+        long request = avatar.request;
+        long photoGeneration = current.photos().generation();
+        int generation = screenGeneration;
+        work.execute(() -> {
+            byte[] photo = null;
+            Bitmap decoded = null;
+            try {
+                if (!resumed || engine != current || screenGeneration != generation) return;
+                photo = own ? current.photos().own() : current.photos().contact(avatar.userId);
+                long deadline = own ? Long.MAX_VALUE : current.photos().expiresAt(avatar.userId);
+                if (photo != null && deadline > System.currentTimeMillis()) decoded = SafeImages.displayProfilePhoto(photo);
+                Bitmap result = decoded;
+                ui.post(() -> {
+                    if (!resumed || engine != current || screenGeneration != generation || avatar.request != request
+                            || !avatar.frame.isAttachedToWindow() || current.photos().generation() != photoGeneration
+                            || deadline <= System.currentTimeMillis()) {
+                        if (result != null) result.recycle();
+                        return;
+                    }
+                    avatar.bitmap = result; avatar.expiresAt = deadline;
+                    if (result != null) {
+                        avatar.image.setImageBitmap(result); avatar.image.setVisibility(View.VISIBLE); avatar.fallback.setVisibility(View.GONE);
+                    }
+                });
+                decoded = null;
+            } catch (Exception failure) {
+                ui.post(() -> {
+                    if (!resumed || engine != current || screenGeneration != generation || avatar.request != request
+                            || !avatar.frame.isAttachedToWindow()) return;
+                    if (failure instanceof GeneralSecurityException || failure instanceof SecurityException) {
+                        hideContent(); storageFailure(failure);
+                    } else problem("Profile photo is unavailable. Try again from My profile.");
+                });
+            } finally {
+                if (photo != null) Arrays.fill(photo, (byte) 0);
+                if (decoded != null) decoded.recycle();
+            }
+        });
     }
 
     private void refreshProfileAvatars() {
@@ -2617,11 +2650,14 @@ public final class MainActivity extends AppCompatActivity {
         if (connection != null) connection.setText(R.string.working);
         homeStatus();
         work.execute(() -> {
-            try { action.run(); ui.post(() -> { busy = false; if (resumed && generation == screenGeneration) completed.run(); }); }
+            try { action.run(); ui.post(() -> {
+                if (!resumed || generation != screenGeneration) return;
+                busy = false; completed.run();
+            }); }
             catch (Exception failure) {
                 ui.post(() -> {
-                    busy = false;
                     if (!resumed || generation != screenGeneration) return;
+                    busy = false;
                     failed.accept(failure);
                 });
             }
@@ -2675,6 +2711,7 @@ public final class MainActivity extends AppCompatActivity {
         resetConversation();
         pushRegistrationRunning = false; pushRegistrationFailed = false; pushRegisteredAccount = null; notificationStatus = null;
         completingGoogle = false;
+        busy = false;
         clearProfileAvatars();
         dismissContent();
         for (PendingSend pending : pendingSends) pending.clear();
@@ -2689,7 +2726,7 @@ public final class MainActivity extends AppCompatActivity {
         messageScroll = null; shownEntries = java.util.List.of(); contactRows = null; contactSearch = null; actionError = null; unreadLabels.clear();
         connection = null;
         ChatEngine closing = engine; engine = null;
-        if (closing != null) { closing.presence().foreground(false); work.execute(closing::close); }
+        if (closing != null) { closing.cancelPendingRequests(); work.execute(closing::close); }
         storageError = null; phoneSecurityRequired = false; waitingForPhoneUnlock = false;
         storageState();
     }

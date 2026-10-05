@@ -3,6 +3,59 @@
 Evidence refreshed on Windows, 2026-10-05. This is a development foundation,
 not a production security assessment or independent audit.
 
+## Release 0.5.4 / startup and foreground recovery investigation
+
+- Candidate `0.5.4` / code `35` packages the tested fixes below. Signed
+  APK/AAB verification and website publication are pending. The backend and
+  account records do not require a change for this Android-only release.
+
+- A user reported slow opening, crashes and an Android "not responding" state
+  on an unspecified Motorola Edge device running 0.5.3. No affected phone,
+  exact model/Android version or crash/ANR trace was available. Username-based
+  lookup cannot provide these: device registration stores a random device ID
+  and public identity, not phone model, OS version or crash history. No real
+  account records, content or credentials were accessed for this investigation.
+- An unauthenticated public relay health check returned HTTPS 200 in 0.383
+  seconds from the workstation. This is not a measurement of the user's network.
+- Two failures were reproduced before changing production code in the isolated
+  Android 12 QA emulator:
+  - Home-avatar refresh blocked the main thread for **2,003 ms** while another
+    task held the vault lock (required callback bound: <100 ms).
+  - Backgrounding did not cancel an in-flight relay request within one second:
+    connection/vault closure was queued behind the blocked network task.
+- Avatar reads/decoding now run on the worker with engine, screen, request,
+  photo-revision and deadline checks. Stale results are recycled; failed storage
+  reads report a protected-storage error without deleting the account.
+  Cleanup cancels active network requests before queued vault closure, and
+  retired connections reject subsequent requests. Account data, refresh-recovery
+  state and explicit sign-out cleanup are preserved. Late completion callbacks
+  cannot reset the busy state of a different screen generation.
+- The final focused run passed **19 Android instrumentation tests** without
+  failures/skips in 81.129 seconds. Measured avatar-refresh callback time was
+  **2 ms** with the same held vault lock; background transition plus request
+  cancellation was **299 ms**, below the one-second bound. The existing busy-
+  storage typing/send batch remained within its <100 ms bound at **78 ms**.
+  These are deterministic emulator callback/cancellation measurements, not
+  physical-Motorola frame timing or real-network delivery guarantees.
+- Coverage includes storage failure reporting, expired/stale-avatar removal,
+  normal/Google/password account reopening, sign-out while backgrounding,
+  renewal recovery, pending-send/privacy cleanup, photo permissions/UI,
+  obsolete sync callbacks and the independent photo-service lifecycle.
+  QA compilation/lint and release compilation/lint passed.
+- An earlier unprecompiled run had a 137 ms timing overrun; the final run uses
+  precompiled QA packages without loosening the threshold. The avatar expiry
+  assertion now checks the contact avatar itself, not unrelated bitmap branding.
+- The affected user's exact crash cause remains **unconfirmed**. For a device-
+  specific conclusion, obtain the model and Android version from About phone,
+  installation source, approximate failure time and an app-scoped, sanitized
+  crash/ANR stack. Do not share a full bugreport/logcat containing accounts,
+  tokens, request headers or private content. Do not uninstall or clear app
+  data to collect diagnostics.
+- No production telemetry or account reset is introduced. The release retains
+  the existing signing identity, Google/Firebase configuration and the separate
+  website/Play updater channels. This is not a confirmed fix for the reported
+  physical Motorola device without its crash/ANR evidence and retest.
+
 ## Release 0.5.3 / readable Google usernames
 
 - Published `0.5.3` / code `34` gives first-time Google accounts usernames such
