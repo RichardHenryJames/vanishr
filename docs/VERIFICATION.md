@@ -76,6 +76,21 @@ not a production security assessment or independent audit.
   all four 64-bit native libraries have >=16-KiB load alignment. Matching notices
   and absence of the external APK updater were checked in the actual AAB.
   No Play Console upload, real Google-provider login or Motorola fix is claimed.
+- Publication is complete: Vercel deployment
+  `dpl_8Ki5MTb58GRTzn3yKcBdEpSDAsFg` is Ready and the exact canonical
+  `vanishr-download.vercel.app` alias was explicitly updated. All **30 public
+  artifacts** were downloaded anonymously and matched the audited hashes,
+  including APK, matching source, notices, six pages and assets. The feed
+  advertises **0.5.5/code 36** with `Cache-Control: no-store`; the downloaded APK
+  verifies with the original signer. Six private paths returned 404.
+  The audited static folder totals **59,650,150 bytes** and its source ZIP
+  matched **224** application/documentation files; no signing material, client
+  configuration, service credential or server environment file was staged.
+  The immutable published source matches commit
+  `4fc0083`; this later publication-evidence entry is intentionally not in it.
+  Local audit/public evidence: `.tools/distribution-audit-0.5.5.json`,
+  `.tools/public-release-verification-0.5.5.json`; Play bundle and verification:
+  `.tools/play-store-0.5.5/` (AAB **45,751,985 bytes**).
 
 ## Release 0.5.4 / startup and foreground recovery investigation
 
