@@ -53,6 +53,29 @@ not a production security assessment or independent audit.
   An initial emulator probe was obstructed by a confirmed **System UI** ANR;
   that is not evidence of the Motorola's cause. Do not uninstall, clear data,
   remove the phone lock, or claim this release fixes that report.
+- The final **signed 0.5.5 APK** completed the full existing live UI workflow
+  against the deployed HTTPS relay on the isolated **Android 16 / API 36**
+  emulator in **366.003 seconds**. It covered password registration, encrypted
+  text/photo and view-once handling, receipt/read cleanup, reopening, retained
+  account switching, session renewal/reauthentication, profile exchange and
+  invite-only group messaging. The six device checks were covered across the
+  secured run (five passes, one incompatible-fixture skip) and the separate
+  no-screen-lock rejection test (pass).
+  The legacy live test initially omitted the current Terms consent step; its
+  test-only click helper now accepts that visible checkbox for each synthetic
+  signup/sign-in. Production consent was not bypassed or changed. Earlier
+  incomplete live attempts are not counted as passes.
+  This supports Android 16 compatibility, not Motorola/OEM certification.
+- Direct APK: 44,438,021 bytes, SHA-256
+  `162cddf160bd880bd5bf28a59dfe1e9bf7dce39a88e6fd1b8ab7af11105e4c25`.
+  Separate Play AAB: SHA-256
+  `2c147f2fb3d11c778233fc03a76ed250cad0093b617e0c2bd038849ec379a790`.
+  Both retain the original signing certificate and validated Google/Firebase
+  client configuration. Official bundletool 1.18.3 validates the AAB; its
+  manifest is code 36/min 28/target 36, native packaging is 16-KiB aligned and
+  all four 64-bit native libraries have >=16-KiB load alignment. Matching notices
+  and absence of the external APK updater were checked in the actual AAB.
+  No Play Console upload, real Google-provider login or Motorola fix is claimed.
 
 ## Release 0.5.4 / startup and foreground recovery investigation
 
