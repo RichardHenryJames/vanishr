@@ -20,7 +20,10 @@ platform Keystore fallback; devices without a screen lock are rejected.
 Device registration sends the 33-byte public identity only. Public prekey batches
 contain registration ID, one-time EC prekey, signed EC prekey/signature, identity
 public key, and Kyber-1024 public prekey/signature. PostgreSQL holds public data
-only and consumes a bundle with one atomic `DELETE ... RETURNING` transaction.
+only and consumes one-time bundles with one atomic `DELETE ... RETURNING`
+transaction. Updated clients can also publish a bounded signed last-resort bundle;
+the relay returns it only when no one-time bundle remains and the sender explicitly
+advertises support.
 
 Users authenticate full `user UUID:base64 public identity` codes independently,
 for example in person or over an already authenticated channel. The contact UI
@@ -39,9 +42,21 @@ libsignal, not application code. `SessionCipher` handles subsequent encrypted
 messages and replies. The API's address ordering is verified in runtime tests.
 
 One-time EC and Kyber private prekeys are consumed on successful initial
-decryption. There is no last-resort reusable Kyber fallback. Exhausted prekeys
-block a new session until the recipient replenishes them. Test fixtures use
-ephemeral in-memory stores only; the Android production path uses the vault.
+decryption. From 0.5.5, the owner-approved availability policy also supports the
+[standard PQXDH last-resort prekey](https://signal.org/docs/specifications/pqxdh/).
+It contains a signed EC prekey and signed Kyber key, without a one-time EC key.
+libsignal still performs the handshake, signature validation and encryption.
+This is not a new encryption protocol or automatic trust for ordinary contacts.
+
+The protected store distinguishes reusable Kyber keys from one-time keys and
+records each successful `(Kyber ID, signed-key ID, sender base key)` tuple
+transactionally. Reusing a tuple fails even after its conversation session is
+removed. At most 1,024 retained fallback handshake markers per account are
+allowed; exhaustion fails explicitly rather than discarding replay protection.
+Markers have the key's fixed private-retention deadline and are pruned with it.
+Fallback reuse trades some prekey forward-secrecy isolation for offline
+availability; it does not offer the same per-handshake key erasure as one-time
+keys. Test fixtures use ephemeral in-memory stores only; Android uses the vault.
 
 ## 4. Message-key derivation
 
@@ -78,12 +93,27 @@ only in the Signal-authenticated encrypted envelope, never in upload metadata.
 
 Signal session keys ratchet as libsignal specifies. Prekeys are published in
 batches of up to 32 and expire on the relay after 24 hours. Direct-only clients
-target 16 keys and check on login/hourly sync. Group clients target 224 within
+target 16 keys and check on login/every 30 seconds of foreground sync. Group clients target 224 within
 the server's 256-key bound and replenish incrementally every 30 seconds while
 foregrounded, so large-group enrollment can take several sync cycles. Locally,
 obsolete signed/private prekeys
 are pruned after 48 hours, covering the maximum publication plus delivery
-window. The long-term identity is stable until explicit device replacement.
+window. Each updated recipient also publishes one fallback bundle with a fixed
+deadline of at most 30 days (the client leaves five minutes of clock margin),
+rotating after about seven days when foregrounded. Retries preserve the exact
+key and deadline. A newer key replaces the relay's previous fallback; older
+private keys remain only through their original publication deadline plus the
+24-hour maximum message window. Reads/claims never renew a deadline. Device
+replacement/account deletion cascades public fallback removal. The long-term
+identity is stable until explicit device replacement.
+
+Deploy schema V12 and update the receiving app before depending on fallback
+availability. The admin must update in place and open the app once to generate
+and publish its own fallback keys. New senders opt in with `fallback=true`;
+older senders retain one-time-only responses. Older relays ignore the claim
+flag and do not advertise publication support. No key is generated on the
+server, and an offline recipient with expired/missing fallback keys still
+cannot start a new session. Message expiry remains at most 24 hours, not 30 days.
 
 Vault mutations, ratchet changes, outboxes and acknowledgement queues commit
 using an encrypted `AtomicFile` in Android's no-backup directory. A failed

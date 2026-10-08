@@ -1,7 +1,58 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-10-05. This is a development foundation,
+Evidence refreshed on Windows, 2026-10-08 UTC. This is a development foundation,
 not a production security assessment or independent audit.
+
+## Release 0.5.5 / offline first-message support
+
+- The reporter confirmed `prekeys_unavailable` ("The contact needs to sign in
+  before a new encrypted conversation can start") when a new user messaged the
+  official admin. The existing relay consumed its one-time pool, expired keys
+  after 24 hours, and offered no fallback; direct clients checked replenishment
+  only hourly. The error does not mean the new account failed registration.
+- The owner explicitly approved standard libsignal PQXDH fallback support and
+  publication. The relay prefers one-time keys, then returns a recipient-published
+  signed EC/Kyber fallback only to capable senders. The client publishes a fixed
+  <=30-day fallback, rotates after about seven days and checks inventory every
+  30 seconds while foregrounded, before inbox processing. Private retention
+  covers the original deadline plus 24 hours. Successful fallback tuples are
+  remembered to reject replay, including after removing a conversation session.
+  Neither identity verification nor disappearing-message deadlines were relaxed.
+- Thirteen native JVM protocol tests and ten focused real-PostgreSQL/Redis relay
+  integration tests passed. They include twenty separate new accounts encrypting
+  and queuing messages for an offline-admin fixture after its one-time pool
+  expired; fallback remained usable without renewing its deadline. Legacy claims,
+  one-time preference, owner isolation, invalid/extended deadlines, rotation,
+  native decryption/replay, device deletion, permanent admin identity, blocks,
+  account erasure and the relay's no-client-crypto boundary were checked.
+- Sixteen Android 12 QA regressions passed in 28.266 seconds, including the exact
+  initial-key error followed by successful retry without another sign-in or
+  changing message ID/deadline; interrupted publication/reopening retained the
+  same private key and deadline. Identity-change rejection, admin introductions,
+  profile/group sessions, account partitioning and background cancellation passed.
+  The first run had a 140 ms overrun in the existing <100 ms busy-storage callback
+  test; the unchanged full focused batch passed without concurrent builds.
+  Existing Android unit tests and QA/release lint passed.
+- The V12 relay was deployed only to `vanishr-dev-rg`. HTTPS health is up, the
+  actual running JAR matches SHA-256
+  `8fd9c1c5e6d5fcc3a92b8b2a47717a9cbf689fad9d117a41bf04d08ea221d011`,
+  the database reports schema 12 and one admin, and Google configuration remains
+  present. Redis/PostgreSQL/HTTPS containers retained their existing uptime.
+  Temporary artifact storage was removed; the subscription spending limit was On.
+- Rollout requirement: the admin must update **in place** and open the app once
+  to publish keys; the relay cannot generate its private key. New senders also
+  need 0.5.5. Missing/expired fallback keys still fail closed. Publication does
+  not promise unlimited offline availability, immediate delivery or retention
+  beyond each message's original deadline.
+- Separately, the owner confirmed a Motorola Edge 50 Pro / Android 16 user still
+  sees a completely black screen on 0.5.4. No affected phone or sanitized app
+  crash/ANR stack is available. Startup/lifecycle inspection did not establish
+  another device-specific defect. Android 16 signed checks demonstrated visible
+  app controls, Keystore access, native protocol serialization and backup/network
+  protections (the complementary no-screen-lock check passed separately).
+  An initial emulator probe was obstructed by a confirmed **System UI** ANR;
+  that is not evidence of the Motorola's cause. Do not uninstall, clear data,
+  remove the phone lock, or claim this release fixes that report.
 
 ## Release 0.5.4 / startup and foreground recovery investigation
 

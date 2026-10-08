@@ -53,7 +53,8 @@ public class GroupController {
     }
     @DeleteMapping("/{id}") @ResponseStatus(HttpStatus.NO_CONTENT)
     public void close(@AuthenticationPrincipal Actor actor, @PathVariable UUID id, @RequestParam long revision) { groups.close(actor,id,revision); }
-    @PostMapping("/{id}/keys") public List<Claimed> keys(@AuthenticationPrincipal Actor actor, @PathVariable UUID id, @Valid @RequestBody Claims request) {
+    @PostMapping("/{id}/keys") public List<Claimed> keys(@AuthenticationPrincipal Actor actor, @PathVariable UUID id, @Valid @RequestBody Claims request,
+            @RequestParam(defaultValue = "false") boolean fallback) {
         rates.require("group-claims:"+actor.deviceId(),16,60);
         return groups.withGroup(actor,id,request.revision(),false,group -> {
             List<Claimed> result=new ArrayList<>();
@@ -63,7 +64,7 @@ public class GroupController {
                 if (!member.state().equals("ACTIVE") && !group.ownerId().equals(actor.userId())) throw new ApiException(HttpStatus.FORBIDDEN,"forbidden");
                 AccountDirectory.Contact current=accounts.contact(user);
                 if (!current.deviceId().equals(member.deviceId()) || !current.identityKey().equals(member.identityKey())) throw new ApiException(HttpStatus.CONFLICT,"group_identity_changed");
-                try { result.add(new Claimed(user,accounts.claim(user))); }
+                try { result.add(new Claimed(user,accounts.claim(user, fallback))); }
                 catch (ApiException failure) { if (!failure.getMessage().equals("prekeys_unavailable")) throw failure; }
             }
             return result;

@@ -270,7 +270,7 @@ final class GroupChat {
         List<Planned> batch=planned.subList(0,Math.min(budget,planned.size()));
         List<UUID> missing=batch.stream().map(Planned::recipient).map(Member::userId).distinct().filter(member -> !signal().hasSession(member)).toList();
         if (!missing.isEmpty()) {
-            Claimed[] claimed=api().call("POST",path(snapshot.id())+"/keys",new Claims(snapshot.revision(),missing),Claimed[].class);
+            Claimed[] claimed=api().call("POST",path(snapshot.id())+"/keys?fallback=true",new Claims(snapshot.revision(),missing),Claimed[].class);
             if (claimed!=null) for (Claimed item : claimed) {
                 Member member=snapshot.member(item.userId());
                 if (!missing.contains(item.userId()) || item.bundle()==null || !member.identityKey().equals(Base64.getEncoder().encodeToString(item.bundle().identityKey()))) throw new SecurityException("Group key identity changed");

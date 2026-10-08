@@ -12,6 +12,65 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class SignalRuntimeTest {
     @Test
+    void fallbackSupportsIndependentOfflineSendersAndRejectsReplayAfterSessionRemoval() throws Exception {
+        UUID recipientId = UUID.randomUUID();
+        TestVault vault = new TestVault();
+        SignalClient recipient = new SignalClient(recipientId, vault);
+        Instant now = Instant.now(), expiry = now.plusSeconds(30L * 86400);
+        PublicBundle fallback = recipient.generateFallbackPreKey(now, expiry);
+        assertEquals(0, fallback.preKeyId());
+        assertNull(fallback.preKey());
+        for (int index = 0; index < 20; index++) {
+            UUID senderId = UUID.randomUUID();
+            SignalClient sender = new SignalClient(senderId, new TestVault());
+            assertThrows(SecurityException.class, () -> sender.establish(recipientId, fallback, now));
+            sender.verifyPeer(recipientId, recipient.publicIdentity());
+            recipient.verifyPeer(senderId, sender.publicIdentity());
+            sender.establish(recipientId, fallback, now);
+            byte[] text = ("offline first message " + index).getBytes(StandardCharsets.UTF_8);
+            SignalClient.Packet sent = sender.encrypt(recipientId, text, now);
+            assertArrayEquals(text, recipient.decrypt(senderId, sent));
+            assertThrows(Exception.class, () -> recipient.decrypt(senderId, sent));
+            assertArrayEquals(text, sender.decrypt(recipientId, recipient.encrypt(senderId, text, now)));
+            recipient.forgetPeer(senderId);
+            recipient.verifyPeer(senderId, sender.publicIdentity());
+            assertThrows(Exception.class, () -> recipient.decrypt(senderId, sent));
+        }
+        assertEquals(20, vault.names("fallback-used/").size());
+        recipient.prunePreKeys(now.plusSeconds(3 * 86400), now.plusSeconds(5 * 86400));
+        assertNotNull(vault.get("kyber/" + fallback.kyberPreKeyId()));
+        recipient.prunePreKeys(expiry, expiry.plusSeconds(86400));
+        assertNull(vault.get("kyber/" + fallback.kyberPreKeyId()));
+        assertNull(vault.get("signed/" + fallback.signedPreKeyId()));
+        assertTrue(vault.names("fallback-used/").isEmpty());
+        assertTrue(vault.names("fallback/").isEmpty());
+    }
+
+    @Test
+    void fallbackRotationRetainsDelayedHandshakesAndOneTimeKeysStillConsume() throws Exception {
+        UUID recipientId = UUID.randomUUID(), senderId = UUID.randomUUID();
+        TestVault vault = new TestVault();
+        SignalClient recipient = new SignalClient(recipientId, vault);
+        SignalClient sender = new SignalClient(senderId, new TestVault());
+        Instant now = Instant.now();
+        PublicBundle old = recipient.generateFallbackPreKey(now, now.plusSeconds(86400));
+        PublicBundle rotated = recipient.generateFallbackPreKey(now, now.plusSeconds(2 * 86400));
+        assertNotEquals(old.kyberPreKeyId(), rotated.kyberPreKeyId());
+        sender.verifyPeer(recipientId, recipient.publicIdentity());
+        recipient.verifyPeer(senderId, sender.publicIdentity());
+        sender.establish(recipientId, old, now);
+        assertArrayEquals(new byte[]{1}, recipient.decrypt(senderId, sender.encrypt(recipientId, new byte[]{1}, now)));
+        PublicBundle once = recipient.generatePreKey(now);
+        sender.establish(recipientId, once, now);
+        assertArrayEquals(new byte[]{2}, recipient.decrypt(senderId, sender.encrypt(recipientId, new byte[]{2}, now)));
+        assertNull(vault.get("pre/" + once.preKeyId()));
+        assertNull(vault.get("kyber/" + once.kyberPreKeyId()));
+        assertNotNull(vault.get("kyber/" + old.kyberPreKeyId()));
+        assertThrows(IllegalArgumentException.class, () -> recipient.generateFallbackPreKey(now, now));
+        assertThrows(IllegalArgumentException.class, () -> recipient.generateFallbackPreKey(now, now.plusSeconds(31L * 86400)));
+    }
+
+    @Test
     void generatesIndependentDeviceIdentitiesWithTheOfficialNativeLibrary() throws Exception {
         IdentityKeyPair alice = IdentityKeyPair.generate();
         IdentityKeyPair bob = IdentityKeyPair.generate();

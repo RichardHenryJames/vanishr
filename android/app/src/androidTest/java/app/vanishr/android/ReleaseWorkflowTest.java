@@ -601,6 +601,11 @@ public class ReleaseWorkflowTest {
             fill("Username", handle);
             fill("Password", password);
             clickText("Create account");
+            awaitText("Before using Vanishr");
+            instrumentation.runOnMainSync(() -> visibleViews().stream()
+                    .filter(view -> view.isShown() && view instanceof CheckBox)
+                    .map(view -> (CheckBox) view).findFirst().orElseThrow().setChecked(true));
+            clickText("Continue");
             if (android.os.Build.VERSION.SDK_INT >= 33 && !BuildConfig.FIREBASE_APP_ID.isEmpty()
                     && context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 UiObject2 allow = device.wait(Until.findObject(By.res(java.util.regex.Pattern.compile(".*:id/permission_allow_button"))), 30_000);

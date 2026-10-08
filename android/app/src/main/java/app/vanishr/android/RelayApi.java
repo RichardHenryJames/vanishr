@@ -57,7 +57,7 @@ final class RelayApi implements AutoCloseable {
             if (status == 401) return "Sign-in failed or your session expired. Sign in again.";
             if (status == 409 && code.equals("device_already_registered")) return "This account has a different registered device. Replace it only if you intend to move the account here.";
             if (status == 409 && code.equals("account_unavailable")) return "That username is already taken. Choose another username.";
-            if (status == 409 && code.equals("prekeys_unavailable")) return "The contact needs to sign in before a new encrypted conversation can start.";
+            if (status == 409 && code.equals("prekeys_unavailable")) return "This contact has no available first-message keys. Ask them to update and open Vanishr, then retry. Do not clear app data.";
             if (status == 404) return "The requested account or item was not found.";
             if (status >= 500) return "The service is temporarily unavailable. Try again shortly.";
             return "The request could not be completed. Try again.";

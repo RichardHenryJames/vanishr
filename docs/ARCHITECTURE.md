@@ -112,7 +112,9 @@ content remain in the Android client's Keystore-protected encrypted vault.
 2. Users find each other by username and compare safety numbers over an independently
    authenticated channel. The app pins the public identity. No automatic TOFU.
 3. Sender claims a recipient prekey bundle and asks libsignal to establish a
-   session. Bundles are consumed atomically; absent prekeys fail closed.
+   session. One-time bundles are consumed atomically. Updated senders can use
+   a recipient-published, bounded PQXDH fallback if the one-time pool is empty;
+   absent/expired keys still fail closed. Identity verification is unchanged.
 4. An authenticated inner envelope binds sender/recipient/device IDs, message
    ID, expiry mode, sent timestamp, absolute deadline and any image descriptor.
 5. Signal encryption and the durable encrypted outbox commit together with
@@ -195,6 +197,12 @@ and bounded IP/account/device rate limits. Foreground polling every 15 seconds
 backs up WSS wake-ups. FCM is optional and generic; credentials must be supplied.
 An authenticated existing session can queue encrypted outgoing content offline.
 Starting a new session requires online public-prekey retrieval.
+Updated recipients publish a signed last-resort key for at most 30 days,
+rotating after about seven foreground days. The server never creates that key;
+the receiving app must first update and open to publish it. This permits
+first-contact encryption while the recipient is offline, not immediate delivery
+or unlimited offline availability. The protected store bounds fallback replay
+markers to 1,024 per account through their associated key deadline plus 24 hours.
 
 No background decryption occurs while the vault is closed. Notification
 navigation does not change that boundary: an opted-in FCM payload carries only
@@ -204,7 +212,9 @@ and conversation trust before opening the chat. Invalid/stale references return
 to the list, and view-once content still needs explicit Open. The relay keeps
 one bounded mapping per device, not a public chat identifier in the push.
 
-Devices offline for 24 hours lose pending content and may need to republish prekeys. Redis restart
+Devices offline for 24 hours lose expired pending content. One-time public keys
+also expire after 24 hours; the separate fallback can outlast that window but
+does not extend any message lifetime. Redis restart
 loses pending delivery and tokens by design. PostgreSQL persists only minimal
 accounts/devices/public keys and group membership metadata. There is no message
 recovery, history search, server-side media decoding, reactions, calls or cloud

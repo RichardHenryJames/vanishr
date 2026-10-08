@@ -10,7 +10,10 @@ public record PublicBundle(int registrationId, int preKeyId, byte[] preKey,
                            byte[] identityKey, int kyberPreKeyId, byte[] kyberPreKey,
                            byte[] kyberPreKeySignature) {
     public PreKeyBundle toSignal() throws Exception {
-        return new PreKeyBundle(registrationId, 1, preKeyId, new ECPublicKey(preKey),
+        if (preKeyId < 0 || (preKeyId == 0) != (preKey == null))
+            throw new SecurityException("Invalid one-time prekey");
+        return new PreKeyBundle(registrationId, 1, preKeyId == 0 ? PreKeyBundle.NULL_PRE_KEY_ID : preKeyId,
+                preKey == null ? null : new ECPublicKey(preKey),
                 signedPreKeyId, new ECPublicKey(signedPreKey), signedPreKeySignature,
                 new IdentityKey(identityKey), kyberPreKeyId, new KEMPublicKey(kyberPreKey),
                 kyberPreKeySignature);

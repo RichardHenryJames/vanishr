@@ -29,14 +29,16 @@ public class AccountDirectory {
     public record Introduction(UUID userId, UUID deviceId, String identityKey, String handle, String displayName) { }
     public record Introductions(UUID userId, Contact admin, List<Introduction> contacts, UUID nextAfter) { }
     public record DeviceRequest(@NotNull UUID deviceId, @NotNull @Size(min = 33, max = 33) byte[] identityKey, boolean replaceExisting) { }
-    public record PreKey(@Min(1) @Max(16380) int registrationId, @Positive int preKeyId,
-                         @NotNull @Size(min = 33, max = 33) byte[] preKey, @Positive int signedPreKeyId,
+    public record PreKey(@Min(1) @Max(16380) int registrationId, @PositiveOrZero int preKeyId,
+                         @Size(min = 33, max = 33) byte[] preKey, @Positive int signedPreKeyId,
                          @NotNull @Size(min = 33, max = 33) byte[] signedPreKey,
                          @NotNull @Size(min = 64, max = 64) byte[] signedPreKeySignature,
                          @NotNull @Size(min = 33, max = 33) byte[] identityKey, @Positive int kyberPreKeyId,
                          @NotNull @Size(min = 1569, max = 1569) byte[] kyberPreKey,
                          @NotNull @Size(min = 64, max = 64) byte[] kyberPreKeySignature) { }
     public record KeyUpload(@NotNull @Size(min = 1, max = 32) List<@Valid PreKey> keys) { }
+    public record FallbackUpload(@NotNull @Valid PreKey key, @Positive long expiresAt) { }
+    public record KeyCount(int remaining, boolean fallbackSupported, int fallbackKeyId, long fallbackExpiresAt) { }
     public record Credentials(UUID id, String passwordHash) {
         @Override public String toString() { return "Credentials[redacted]"; }
     }
@@ -293,7 +295,8 @@ public class AccountDirectory {
         int count = keyCount(actor.deviceId());
         if (count + upload.keys().size() > 256) throw new ApiException(HttpStatus.CONFLICT, "prekey_capacity");
         for (PreKey key : upload.keys()) {
-            if (!contact.identityKey().equals(Base64.getEncoder().encodeToString(key.identityKey()))
+            if (key.preKeyId() <= 0 || key.preKey() == null
+                    || !contact.identityKey().equals(Base64.getEncoder().encodeToString(key.identityKey()))
                     || key.preKeyId() != key.signedPreKeyId() || key.preKeyId() != key.kyberPreKeyId())
                 throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_public_bundle");
             try {
@@ -308,16 +311,63 @@ public class AccountDirectory {
         return count == null ? 0 : count;
     }
 
+    public KeyCount keyStatus(UUID deviceId) {
+        return database.query("SELECT id, expires_at FROM fallback_prekeys WHERE device_id = ? AND expires_at > now()",
+                (row, index) -> new KeyCount(keyCount(deviceId), true, row.getInt("id"), row.getTimestamp("expires_at").getTime()),
+                deviceId).stream().findFirst().orElseGet(() -> new KeyCount(keyCount(deviceId), true, 0, 0));
+    }
+
+    @Transactional
+    public void uploadFallback(RelayTypes.Actor actor, FallbackUpload upload) {
+        database.queryForObject("SELECT id FROM devices WHERE id = ? FOR UPDATE", UUID.class, actor.deviceId());
+        Contact contact = contact(actor.userId());
+        PreKey key = upload.key();
+        long now = clock.millis();
+        if (key.preKeyId() != 0 || key.preKey() != null || key.signedPreKeyId() != key.kyberPreKeyId()
+                || !contact.identityKey().equals(Base64.getEncoder().encodeToString(key.identityKey()))
+                || upload.expiresAt() <= now || upload.expiresAt() > now + 30L * 86400_000)
+            throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_public_bundle");
+        try {
+            int changed = database.update("""
+                    INSERT INTO fallback_prekeys(device_id, id, public_bundle, created_at, expires_at)
+                    VALUES (?, ?, ?::jsonb, ?, ?)
+                    ON CONFLICT (device_id) DO UPDATE SET id = EXCLUDED.id, public_bundle = EXCLUDED.public_bundle,
+                        created_at = EXCLUDED.created_at, expires_at = EXCLUDED.expires_at
+                    WHERE fallback_prekeys.id < EXCLUDED.id
+                    """, actor.deviceId(), key.kyberPreKeyId(), json.writeValueAsString(key),
+                    new java.sql.Timestamp(now), new java.sql.Timestamp(upload.expiresAt()));
+            if (changed == 0 && !Boolean.TRUE.equals(database.queryForObject("""
+                    SELECT EXISTS(SELECT 1 FROM fallback_prekeys
+                        WHERE device_id = ? AND id = ? AND public_bundle = ?::jsonb AND expires_at = ?)
+                    """, Boolean.class, actor.deviceId(), key.kyberPreKeyId(), json.writeValueAsString(key),
+                    new java.sql.Timestamp(upload.expiresAt()))))
+                throw new ApiException(HttpStatus.CONFLICT, "fallback_key_changed");
+        } catch (com.fasterxml.jackson.core.JsonProcessingException failure) {
+            throw new IllegalStateException("Public key serialization failed");
+        }
+    }
+
     @Transactional
     public PreKey claim(UUID recipientId) {
+        return claim(recipientId, false);
+    }
+
+    @Transactional
+    public PreKey claim(UUID recipientId, boolean fallback) {
         UUID device = contact(recipientId).deviceId();
         List<String> bundles = database.query("DELETE FROM prekeys WHERE (device_id, id) IN (SELECT device_id, id FROM prekeys WHERE device_id = ? AND expires_at > now() ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING public_bundle::text",
                 (row, index) -> row.getString(1), device);
+        if (bundles.isEmpty() && fallback)
+            bundles = database.query("SELECT public_bundle::text FROM fallback_prekeys WHERE device_id = ? AND expires_at > now()",
+                    (row, index) -> row.getString(1), device);
         if (bundles.isEmpty()) throw new ApiException(HttpStatus.CONFLICT, "prekeys_unavailable");
         try { return json.readValue(bundles.get(0), PreKey.class); }
         catch (Exception failure) { throw new IllegalStateException("Invalid stored public bundle"); }
     }
 
     @Scheduled(fixedDelay = 60_000)
-    public void expirePublicKeys() { database.update("DELETE FROM prekeys WHERE expires_at <= now()"); }
+    public void expirePublicKeys() {
+        database.update("DELETE FROM prekeys WHERE expires_at <= now()");
+        database.update("DELETE FROM fallback_prekeys WHERE expires_at <= now()");
+    }
 }

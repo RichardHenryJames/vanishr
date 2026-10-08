@@ -67,31 +67,53 @@ public final class SignalClient {
     }
 
     public PublicBundle generatePreKey(Instant now) throws Exception {
+        return generatePreKey(now, null);
+    }
+
+    public PublicBundle generateFallbackPreKey(Instant now, Instant expiresAt) throws Exception {
+        if (!expiresAt.isAfter(now) || expiresAt.isAfter(now.plusSeconds(30L * 86400)))
+            throw new IllegalArgumentException("Invalid fallback key lifetime");
+        return generatePreKey(now, expiresAt);
+    }
+
+    private PublicBundle generatePreKey(Instant now, Instant fallbackExpiresAt) throws Exception {
         return vault.transaction(() -> {
             int keyId = Math.addExact(ByteBuffer.wrap(vault.get("next-key")).getInt(), 1);
             vault.put("next-key", integer(keyId));
-            ECKeyPair preKey = ECKeyPair.generate();
+            ECKeyPair preKey = fallbackExpiresAt == null ? ECKeyPair.generate() : null;
             ECKeyPair signed = ECKeyPair.generate();
             KEMKeyPair kyber = KEMKeyPair.generate(KEMKeyType.KYBER_1024);
             IdentityKeyPair identity = store.getIdentityKeyPair();
             byte[] signature = identity.getPrivateKey().calculateSignature(signed.getPublicKey().serialize());
             byte[] kyberSignature = identity.getPrivateKey().calculateSignature(kyber.getPublicKey().serialize());
-            store.storePreKey(keyId, new PreKeyRecord(keyId, preKey));
+            if (preKey != null) store.storePreKey(keyId, new PreKeyRecord(keyId, preKey));
             store.storeSignedPreKey(keyId, new SignedPreKeyRecord(keyId, now.toEpochMilli(), signed, signature));
             store.storeKyberPreKey(keyId, new KyberPreKeyRecord(keyId, now.toEpochMilli(), kyber, kyberSignature));
-            return new PublicBundle(store.getLocalRegistrationId(), keyId, preKey.getPublicKey().serialize(),
+            if (fallbackExpiresAt != null)
+                vault.put("fallback/" + keyId, ByteBuffer.allocate(8).putLong(fallbackExpiresAt.plusSeconds(86400).toEpochMilli()).array());
+            return new PublicBundle(store.getLocalRegistrationId(), preKey == null ? 0 : keyId,
+                    preKey == null ? null : preKey.getPublicKey().serialize(),
                     keyId, signed.getPublicKey().serialize(), signature, publicIdentity(), keyId,
                     kyber.getPublicKey().serialize(), kyberSignature);
         });
     }
 
     public void prunePreKeys(Instant oldestAccepted) throws Exception {
+        prunePreKeys(oldestAccepted, Instant.now());
+    }
+
+    public void prunePreKeys(Instant oldestAccepted, Instant now) throws Exception {
         vault.transaction(() -> {
             for (SignedPreKeyRecord record : store.loadSignedPreKeys()) {
-                if (record.getTimestamp() < oldestAccepted.toEpochMilli()) {
+                byte[] fallback = vault.get("fallback/" + record.getId());
+                boolean expired = fallback == null ? record.getTimestamp() < oldestAccepted.toEpochMilli()
+                        : ByteBuffer.wrap(fallback).getLong() <= now.toEpochMilli();
+                if (expired) {
                     store.removeSignedPreKey(record.getId());
                     store.removePreKey(record.getId());
                     vault.remove("kyber/" + record.getId());
+                    vault.remove("fallback/" + record.getId());
+                    for (String name : vault.names("fallback-used/" + record.getId() + "/")) vault.remove(name);
                 }
             }
             return null;

@@ -374,6 +374,99 @@ public class ScreenFlowTest {
         assertFalse(engine.independentlyVerified(peerId));
     }
 
+    @Test public void newUserRetriesFirstAdminMessageWithFallbackWithoutSigningInAgain() throws Exception {
+        SignalClient admin = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(adminPin(peerId, peerDevice, admin));
+        var introduced = introduction(peerId, peerDevice, admin, "vanishr");
+        PublicBundle fallback = admin.generateFallbackPreKey(Instant.now(), Instant.now().plusSeconds(86400));
+        var available = new java.util.concurrent.atomic.AtomicBoolean();
+        List<ChatEngine.Send> outgoing = new ArrayList<>();
+        engine.groupApi().close();
+        setField(engine, "api", syntheticApi(chain -> {
+            var request = chain.request(); String path = request.url().encodedPath();
+            if (path.equals("/account/admin-contacts")) return syntheticResponse(request, 200,
+                    new AdminOnboarding.Page(userId, RemotePhotoSession.contact(introduced.peer()), List.of(introduced), null));
+            if (path.equals("/users/id/" + peerId)) return syntheticResponse(request, 200, RemotePhotoSession.contact(introduced.peer()));
+            if (path.equals("/keys/" + peerId + "/claim")) {
+                assertEquals("true", request.url().queryParameter("fallback"));
+                return available.get() ? syntheticResponse(request, 200, fallback)
+                        : syntheticResponse(request, 409, Map.of("error", "prekeys_unavailable"));
+            }
+            if (path.equals("/messages")) {
+                okio.Buffer body = new okio.Buffer(); request.body().writeTo(body);
+                ChatEngine.Send sent = RelayApi.JSON.fromJson(body.readUtf8(), ChatEngine.Send.class);
+                outgoing.add(sent);
+                return syntheticResponse(request, 201, new ChatEngine.Status(sent.id(), "QUEUED", sent.expiresAt()));
+            }
+            throw new AssertionError("Unexpected first-admin-message request");
+        }));
+        engine.onboarding().refresh();
+        assertEquals(List.of(introduced.peer()), engine.peers());
+        String identity = engine.identityCode();
+        UUID id = UUID.randomUUID(); long created = System.currentTimeMillis();
+        RelayApi.ApiFailure unavailable = assertThrows(RelayApi.ApiFailure.class, () ->
+                engine.send(introduced.peer(), "first admin message", null, ChatEnvelope.Expiry.HOUR_1, id, created, () -> { }));
+        assertEquals("prekeys_unavailable", unavailable.code);
+        assertTrue(outgoing.isEmpty()); assertTrue(engine.entries(peerId).isEmpty());
+        assertFalse(engine.groupSignal().hasSession(peerId));
+        available.set(true);
+        engine.send(introduced.peer(), "first admin message", null, ChatEnvelope.Expiry.HOUR_1, id, created, () -> { });
+        assertEquals(identity, engine.identityCode()); assertTrue(engine.authenticated());
+        assertEquals(1, outgoing.size());
+        ChatEngine.Send sent = outgoing.get(0);
+        assertEquals(id, sent.id()); assertEquals(created + ChatEnvelope.Expiry.HOUR_1.milliseconds, sent.expiresAt());
+        admin.verifyPeer(userId, engine.groupSignal().publicIdentity());
+        byte[] clear = admin.decrypt(userId, new SignalClient.Packet(sent.type(), sent.ciphertext()));
+        try { assertEquals("first admin message", RelayApi.JSON.fromJson(new String(clear, StandardCharsets.UTF_8), ChatEnvelope.class).text()); }
+        finally { Arrays.fill(clear, (byte) 0); }
+        assertFalse(engine.independentlyVerified(peerId));
+        assertTrue(vault.names("profile-photo-request/").isEmpty());
+    }
+
+    @Test public void fallbackPublicationRetriesAcrossReopeningWithoutReplacingPrivateKeysOrExtendingExpiry() throws Exception {
+        signedInFixture();
+        List<ChatEngine.FallbackKey> uploads = new ArrayList<>();
+        var accepted = new java.util.concurrent.atomic.AtomicReference<ChatEngine.FallbackKey>();
+        var loseResponse = new java.util.concurrent.atomic.AtomicBoolean(true);
+        okhttp3.Interceptor transport = chain -> {
+            var request = chain.request();
+            assertTrue(request.url().encodedPath().startsWith("/keys"));
+            if (request.method().equals("GET")) {
+                ChatEngine.FallbackKey current = accepted.get();
+                return syntheticResponse(request, 200, new ChatEngine.KeyCount(16, true,
+                        current == null ? 0 : current.key().kyberPreKeyId(), current == null ? 0 : current.expiresAt()));
+            }
+            assertEquals("PUT", request.method()); assertEquals("/keys/fallback", request.url().encodedPath());
+            okio.Buffer body = new okio.Buffer(); request.body().writeTo(body);
+            ChatEngine.FallbackKey upload = RelayApi.JSON.fromJson(body.readUtf8(), ChatEngine.FallbackKey.class);
+            uploads.add(upload);
+            if (loseResponse.getAndSet(false)) throw new IOException("Synthetic upload interrupted");
+            accepted.set(upload);
+            return syntheticResponse(request, 204, null);
+        };
+        engine.groupApi().close(); setField(engine, "api", syntheticApi(transport));
+        Method replenish = ChatEngine.class.getDeclaredMethod("replenishKeys"); replenish.setAccessible(true);
+        assertThrows(InvocationTargetException.class, () -> replenish.invoke(engine));
+        assertEquals(1, uploads.size());
+        String identity = engine.identityCode();
+        byte[] privateKey = vault.get("kyber/" + uploads.get(0).key().kyberPreKeyId());
+        engine.close(); vault.unlock(); engine = new ChatEngine(vault);
+        engine.groupApi().close(); setField(engine, "api", syntheticApi(transport));
+        replenish.invoke(engine);
+        assertEquals(2, uploads.size());
+        assertEquals(RelayApi.JSON.toJson(uploads.get(0)), RelayApi.JSON.toJson(uploads.get(1)));
+        assertArrayEquals(privateKey, vault.get("kyber/" + uploads.get(1).key().kyberPreKeyId()));
+        Arrays.fill(privateKey, (byte) 0);
+        assertEquals(identity, engine.identityCode());
+        replenish.invoke(engine); assertEquals(2, uploads.size());
+        assertEquals(0, uploads.get(0).key().preKeyId()); assertNull(uploads.get(0).key().preKey());
+        assertTrue(uploads.get(0).expiresAt() <= System.currentTimeMillis() + 30L * 86400_000);
+        vault.saveAccount(userId);
+        assertNull(vault.get("fallback-key"));
+        assertTrue(vault.restoreAccount(userId));
+        assertNotNull(vault.get("fallback-key"));
+    }
+
     private void conversationsFixture() throws Exception {
         SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
         peer = new ChatEngine.Peer(peerId, peerDevice, Base64.getEncoder().encodeToString(remote.publicIdentity()), "Aarav Mehta");

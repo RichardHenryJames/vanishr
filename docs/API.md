@@ -61,8 +61,9 @@ independent of login attempts. No access bearer is required or sent on renewal.
 | `DELETE /safety/reports/{reportId}` | Current ADMIN and permanent pin | Empty -> 204 | Removes a reviewed report idempotently |
 | `GET /users/id/{userId}/profile` | DEVICE | `{userId,handle,displayName}` | Shared account metadata; private nicknames are never returned |
 | `POST /keys` | DEVICE owner | `{keys:[PublicBundle,...]}` -> 204 | 1-32 per request, at most 256 available; 24h public-key TTL; cleanup every minute |
-| `GET /keys` | DEVICE owner | `{remaining}` | None added |
-| `POST /keys/{userId}/claim` | DEVICE, claim limit | Empty -> PublicBundle | Atomic consumption; 409 when exhausted; POST avoids cached/destructive GET |
+| `GET /keys` | DEVICE owner | `{remaining,fallbackSupported,fallbackKeyId,fallbackExpiresAt}` | One-time count plus active fallback ID/deadline; zeroes if absent; old clients ignore added fields |
+| `PUT /keys/fallback` | DEVICE owner, shared key-upload limit | `{key:PublicBundle,expiresAt}` -> 204 | One public fallback/device; fixed <=30-day TTL at creation; identical retries do not extend expiry; strictly newer IDs rotate |
+| `POST /keys/{userId}/claim?fallback=true` | DEVICE, claim limit | Empty -> PublicBundle | Atomically consumes one-time keys first; opted-in senders may receive active fallback without consuming it; absent/false flag preserves legacy behavior; 409 if no usable key |
 | `POST /messages` | DEVICE sender; active recipient | SendRequest -> Status, 201 | Atomic ciphertext + deadline; ID retries must match exactly; no lifetime extension |
 | `GET /messages/pending` | DEVICE recipient only | Array of at most 50 Message records | Does not consume; expired IDs are pruned |
 | `GET /messages/status?ids=id1,id2` | DEVICE sender only | Array of Status; at most 50 requested IDs | Receipts last only until original deadline; unauthorized IDs omitted |
@@ -376,6 +377,14 @@ Keys/signatures are Base64; registration ID 1-16380, positive key IDs, EC/identi
 keys 33 bytes, EC signatures 64 bytes, Kyber public key 1569 bytes. One bundle
 uses the same application key ID for all three prekeys. The recipient verifies
 signatures in libsignal; the server deliberately does not load client crypto.
+An opted-in fallback response instead has `preKeyId:0` and null/absent `preKey`;
+signed and Kyber IDs remain equal and positive. This shape is rejected by the
+one-time upload endpoint. `PUT /keys/fallback` requires this shape, the enrolled
+owner's identity and a future absolute deadline within 30 days. It cannot extend
+an existing key's deadline or replace a newer ID with an older one
+(`409 fallback_key_changed`). GET/claim operations do not renew retention.
+Group key-batch claims also accept `?fallback=true`; existing membership,
+revision, identity and block authorization still apply.
 
 SendRequest:
 `{id,recipientId,recipientDeviceId,expiry,expiresAt,type,ciphertext,mediaId?}`.
@@ -421,6 +430,12 @@ the restrictive foreign key prevents deleting or changing the pinned UUID.
 `devices(id UUID PK, user_id UUID UNIQUE FK, identity_key VARCHAR(64), auth_version UUID, registered_at TIMESTAMPTZ)`
 
 `prekeys(device_id UUID FK, id INTEGER, public_bundle JSONB, expires_at TIMESTAMPTZ, PK(device_id,id))`
+
+`fallback_prekeys(device_id UUID PK/FK, id INTEGER, public_bundle JSONB, created_at TIMESTAMPTZ, expires_at TIMESTAMPTZ)`
+
+V12 adds only the public fallback table. Its deadline is checked against creation
+time, expires within 30 days, and is deleted by the minute cleanup or the device's
+cascading deletion. No account, device, admin pin or existing key is rewritten.
 
 Google authentication retains a stable Google subject-to-account mapping, not
 Google email, name, photo, access tokens or refresh tokens. It does not merge

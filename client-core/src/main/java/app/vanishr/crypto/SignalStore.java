@@ -105,6 +105,9 @@ final class SignalStore implements IdentityKeyStore, PreKeyStore, SignedPreKeySt
     }
 
     @Override public KyberPreKeyRecord loadKyberPreKey(int id) throws InvalidKeyIdException {
+        byte[] fallback = vault.get("fallback/" + id);
+        if (fallback != null && ByteBuffer.wrap(fallback).getLong() <= System.currentTimeMillis())
+            throw new InvalidKeyIdException("Fallback prekey expired");
         try { return new KyberPreKeyRecord(required("kyber/" + id)); }
         catch (Exception failure) { throw new InvalidKeyIdException("Post-quantum prekey unavailable"); }
     }
@@ -120,7 +123,19 @@ final class SignalStore implements IdentityKeyStore, PreKeyStore, SignedPreKeySt
 
     @Override public void storeKyberPreKey(int id, KyberPreKeyRecord record) { vault.put("kyber/" + id, record.serialize()); }
     @Override public boolean containsKyberPreKey(int id) { return vault.get("kyber/" + id) != null; }
-    @Override public void markKyberPreKeyUsed(int id, int signedId, ECPublicKey baseKey) {
-        vault.remove("kyber/" + id);
+    @Override public void markKyberPreKeyUsed(int id, int signedId, ECPublicKey baseKey) throws ReusedBaseKeyException {
+        byte[] fallback = vault.get("fallback/" + id);
+        if (fallback == null) {
+            vault.remove("kyber/" + id);
+            return;
+        }
+        if (ByteBuffer.wrap(fallback).getLong() <= System.currentTimeMillis())
+            throw new ReusedBaseKeyException("Fallback prekey expired");
+        String tuple = "fallback-used/" + id + "/" + signedId + "/"
+                + java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(baseKey.serialize());
+        if (vault.get(tuple) != null) throw new ReusedBaseKeyException("Fallback base key was already used");
+        if (vault.names("fallback-used/").size() >= 1024)
+            throw new IllegalStateException("Fallback handshake capacity reached");
+        vault.put(tuple, fallback);
     }
 }

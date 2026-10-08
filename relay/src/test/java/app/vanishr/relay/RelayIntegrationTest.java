@@ -88,7 +88,12 @@ class RelayIntegrationTest {
     }
 
     private Device device(String handle) throws Exception {
-        String registration = request(body(post("/auth/register"), Map.of("handle", handle, "password", "test-only-password-12345")), null)
+        return device(handle, "127.0.0.1");
+    }
+
+    private Device device(String handle, String source) throws Exception {
+        String registration = request(body(post("/auth/register").with(request -> { request.setRemoteAddr(source); return request; }),
+                Map.of("handle", handle, "password", "test-only-password-12345")), null)
                 .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
         AuthService.Token bootstrap = json.readValue(registration, AuthService.Token.class);
         UUID deviceId = UUID.randomUUID();
@@ -115,6 +120,69 @@ class RelayIntegrationTest {
         String response = request(post("/keys/" + recipient.userId() + "/claim"), sender).andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString();
         sender.crypto().establish(recipient.userId(), json.readValue(response, PublicBundle.class), Instant.now());
+    }
+
+    @Test void fallbackLetsTwentyNewAccountsMessageTheOfflineAdminAfterOneTimeKeysExpire() throws Exception {
+        Device admin = device("fallback_admin");
+        assignAdmin(admin);
+        Instant now = Instant.now();
+        PublicBundle fallback = admin.crypto().generateFallbackPreKey(now, now.plusSeconds(30L * 86400 - 300));
+        long deadline = now.plusSeconds(30L * 86400 - 300).toEpochMilli();
+        request(body(put("/keys/fallback"), Map.of("key", fallback, "expiresAt", deadline)), admin).andExpect(status().isNoContent());
+        request(get("/keys"), admin).andExpect(status().isOk()).andExpect(jsonPath("$.fallbackSupported").value(true))
+                .andExpect(jsonPath("$.fallbackKeyId").value(fallback.kyberPreKeyId()))
+                .andExpect(jsonPath("$.fallbackExpiresAt").value(deadline));
+        database.update("UPDATE prekeys SET expires_at = now() - interval '1 second' WHERE device_id = ?", admin.deviceId());
+        for (int index = 0; index < 20; index++) {
+            Device newcomer = device("new_fallback_" + index, "192.0.2." + (index + 1));
+            request(get("/account/admin-contacts"), newcomer).andExpect(status().isOk())
+                    .andExpect(jsonPath("$.contacts[0].userId").value(admin.userId().toString()));
+            request(post("/keys/" + admin.userId() + "/claim"), newcomer).andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.error").value("prekeys_unavailable"));
+            String claimed = request(post("/keys/" + admin.userId() + "/claim").param("fallback", "true"), newcomer)
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.preKeyId").value(0))
+                    .andReturn().getResponse().getContentAsString();
+            newcomer.crypto().verifyPeer(admin.userId(), admin.crypto().publicIdentity());
+            admin.crypto().verifyPeer(newcomer.userId(), newcomer.crypto().publicIdentity());
+            newcomer.crypto().establish(admin.userId(), json.readValue(claimed, PublicBundle.class), Instant.now());
+            byte[] plaintext = ("new account " + index).getBytes(StandardCharsets.UTF_8);
+            SendRequest sent = encrypted(newcomer, admin, plaintext, Expiry.HOUR_1, System.currentTimeMillis() + 3_599_000, null);
+            request(body(post("/messages"), sent), newcomer).andExpect(status().isCreated());
+            assertArrayEquals(plaintext, admin.crypto().decrypt(newcomer.userId(), new SignalClient.Packet(sent.type(), sent.ciphertext())));
+        }
+        request(get("/messages/pending"), admin).andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(20));
+        assertEquals(deadline, database.queryForObject("SELECT expires_at FROM fallback_prekeys WHERE device_id = ?",
+                java.sql.Timestamp.class, admin.deviceId()).getTime());
+        assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM fallback_prekeys WHERE device_id = ?", Integer.class, admin.deviceId()));
+    }
+
+    @Test void fallbackPrefersOneTimeKeysAndKeepsPublicationRetriesBoundedAndOwnerScoped() throws Exception {
+        Device recipient = device("fallback_recipient"), sender = device("fallback_sender");
+        Instant now = Instant.now();
+        long deadline = now.plusSeconds(3600).toEpochMilli();
+        PublicBundle fallback = recipient.crypto().generateFallbackPreKey(now, Instant.ofEpochMilli(deadline));
+        var upload = Map.of("key", fallback, "expiresAt", deadline);
+        request(body(put("/keys/fallback"), upload), null).andExpect(status().isUnauthorized());
+        request(body(put("/keys/fallback"), upload), sender).andExpect(status().isBadRequest());
+        request(body(post("/keys"), Map.of("keys", List.of(fallback))), recipient).andExpect(status().isBadRequest());
+        request(body(put("/keys/fallback"), upload), recipient).andExpect(status().isNoContent());
+        request(body(put("/keys/fallback"), upload), recipient).andExpect(status().isNoContent());
+        request(body(put("/keys/fallback"), Map.of("key", fallback, "expiresAt", deadline + 1000)), recipient)
+                .andExpect(status().isConflict());
+        request(post("/keys/" + recipient.userId() + "/claim").param("fallback", "true"), sender)
+                .andExpect(status().isOk()).andExpect(jsonPath("$.preKeyId").value(org.hamcrest.Matchers.greaterThan(0)));
+        request(post("/keys/" + recipient.userId() + "/claim").param("fallback", "true"), sender)
+                .andExpect(status().isOk()).andExpect(jsonPath("$.preKeyId").value(0));
+        PublicBundle rotated = recipient.crypto().generateFallbackPreKey(now, Instant.ofEpochMilli(deadline));
+        request(body(put("/keys/fallback"), Map.of("key", rotated, "expiresAt", deadline)), recipient).andExpect(status().isNoContent());
+        request(body(put("/keys/fallback"), upload), recipient).andExpect(status().isConflict());
+        request(body(put("/keys/fallback"), Map.of("key", rotated, "expiresAt", now.plusSeconds(31L * 86400).toEpochMilli())), recipient)
+                .andExpect(status().isBadRequest());
+        database.update("UPDATE fallback_prekeys SET created_at = now() - interval '2 days', expires_at = now() - interval '1 second' WHERE device_id = ?", recipient.deviceId());
+        request(post("/keys/" + recipient.userId() + "/claim").param("fallback", "true"), sender)
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.error").value("prekeys_unavailable"));
+        database.update("DELETE FROM devices WHERE id = ?", recipient.deviceId());
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM fallback_prekeys", Integer.class));
     }
 
     private SendRequest encrypted(Device sender, Device recipient, byte[] plaintext, Expiry expiry, long deadline, UUID mediaId) throws Exception {
@@ -1521,7 +1589,7 @@ class RelayIntegrationTest {
             }
         }
         List<String> tables = database.queryForList("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name", String.class);
-        assertEquals(List.of("account_blocks", "account_deletion_receipts", "accounts", "admin_identity", "admin_introductions", "devices", "flyway_schema_history", "group_members", "prekeys", "private_groups"), tables);
+        assertEquals(List.of("account_blocks", "account_deletion_receipts", "accounts", "admin_identity", "admin_introductions", "devices", "fallback_prekeys", "flyway_schema_history", "group_members", "prekeys", "private_groups"), tables);
         assertEquals(List.of("singleton", "user_id"), database.queryForList(
             "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='admin_identity' ORDER BY ordinal_position", String.class));
         assertEquals(List.of("user_id", "admin_id", "introduced_at"), database.queryForList(

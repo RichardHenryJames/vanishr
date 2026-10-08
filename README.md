@@ -12,6 +12,15 @@ license notices at **https://vanishr-download.vercel.app**.
 The public [update feed](https://vanishr-download.vercel.app/updates.json), not
 the latest Git version, determines which release users can download and discover.
 
+Release **0.5.5/code 36** adds standard libsignal offline first-message fallback
+keys, fixing new-user sends blocked by an exhausted/expired recipient key pool.
+It requires relay schema 12 and an updated recipient app. **The official admin
+must update in place and open Vanishr once to publish its own fallback keys.**
+New senders must also update; ordinary contacts still need independent identity
+verification. Fallback keys have bounded lifetimes and do not extend disappearing
+messages. See [current verification and rollout status](docs/VERIFICATION.md#release-055--offline-first-message-support).
+The reported Motorola Edge 50 Pro / Android 16 black screen is not confirmed fixed.
+
 Release **0.4.8/code 28** keeps the 0.4.7 Play-safety controls and makes official
 administrator onboarding bilateral: every enrolled account appears in the
 administrator's chat list during background sync before either side sends a

@@ -104,7 +104,7 @@ final class ProfilePhotos {
     private void queue(ChatEngine.Peer peer, ProfileEnvelope.Action action, UUID requestId, long revision, byte[] image, long deadline) throws Exception {
         if (vault.names("profile-photo-out/").size() >= 64) throw new IllegalStateException("Profile update queue is full");
         if (!signal().hasSession(peer.userId())) {
-            PublicBundle bundle = api().call("POST", "/keys/" + peer.userId() + "/claim", null, PublicBundle.class);
+            PublicBundle bundle = engine.claimPreKey(peer.userId());
             if (bundle == null || !peer.identityKey().equals(Base64.getEncoder().encodeToString(bundle.identityKey()))) throw new SecurityException("Profile key identity changed");
             signal().establish(peer.userId(), bundle, Instant.now());
         }

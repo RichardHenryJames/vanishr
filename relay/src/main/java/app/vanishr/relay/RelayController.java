@@ -136,12 +136,19 @@ public class RelayController {
         rates.require("keys:" + actor.deviceId(), 10, 60);
         accounts.uploadKeys(actor, request);
     }
-    @GetMapping("/keys") public Map<String, Integer> keyCount(@AuthenticationPrincipal Actor actor) { return Map.of("remaining", accounts.keyCount(actor.deviceId())); }
+    @GetMapping("/keys") public AccountDirectory.KeyCount keyCount(@AuthenticationPrincipal Actor actor) { return accounts.keyStatus(actor.deviceId()); }
 
-    @PostMapping("/keys/{userId}/claim") public AccountDirectory.PreKey claim(@AuthenticationPrincipal Actor actor, @PathVariable UUID userId) {
+    @PutMapping("/keys/fallback") @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void fallbackKey(@AuthenticationPrincipal Actor actor, @Valid @RequestBody AccountDirectory.FallbackUpload request) {
+        rates.require("keys:" + actor.deviceId(), 10, 60);
+        accounts.uploadFallback(actor, request);
+    }
+
+    @PostMapping("/keys/{userId}/claim") public AccountDirectory.PreKey claim(@AuthenticationPrincipal Actor actor, @PathVariable UUID userId,
+            @RequestParam(defaultValue = "false") boolean fallback) {
         rates.require("claims:" + actor.deviceId(), 20, 60);
         accounts.requireInteraction(actor.userId(), userId);
-        return accounts.claim(userId);
+        return accounts.claim(userId, fallback);
     }
 
     private void recipient(UUID userId, UUID deviceId) {

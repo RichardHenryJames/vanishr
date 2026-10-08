@@ -42,7 +42,10 @@ final class ChatEngine implements AutoCloseable {
     record Profile(UUID userId, String handle, String displayName) { }
     record ProfileChange(String displayName) { }
     record Contact(UUID userId, UUID deviceId, String identityKey) { }
-    record KeyCount(int remaining) { }
+    record KeyCount(int remaining, boolean fallbackSupported, int fallbackKeyId, long fallbackExpiresAt) {
+        KeyCount(int remaining) { this(remaining, false, 0, 0); }
+    }
+    record FallbackKey(PublicBundle key, long expiresAt) { }
     record Send(UUID id, UUID recipientId, UUID recipientDeviceId, ChatEnvelope.Expiry expiry, long expiresAt,
                 int type, byte[] ciphertext, UUID mediaId) { }
     record Incoming(UUID id, UUID senderId, UUID senderDeviceId, UUID recipientId, UUID recipientDeviceId,
@@ -463,9 +466,12 @@ final class ChatEngine implements AutoCloseable {
 
     private void replenishKeys() throws Exception {
         signal.prunePreKeys(Instant.now().minusSeconds(172800));
+        KeyCount count = api.call("GET", "/keys", null, KeyCount.class);
+        if (count == null || count.remaining() < 0 || count.remaining() > 256)
+            throw new SecurityException("Invalid public key inventory");
+        if (count.fallbackSupported()) replenishFallback(count);
         byte[] pending = vault.get("public-upload");
         if (pending == null) {
-            KeyCount count = api.call("GET", "/keys", null, KeyCount.class);
             int target = groups.conversations().isEmpty() ? 16 : 224;
             if (count.remaining() >= target) return;
             int uploadCount = Math.min(32,target-count.remaining());
@@ -480,6 +486,25 @@ final class ChatEngine implements AutoCloseable {
         }
         api.call("POST", "/keys", JSON.fromJson(new String(pending, StandardCharsets.UTF_8), com.google.gson.JsonObject.class), Void.class);
         vault.transaction(() -> { vault.remove("public-upload"); return null; });
+    }
+
+    private void replenishFallback(KeyCount count) throws Exception {
+        long now = System.currentTimeMillis();
+        FallbackKey saved = read("fallback-key", FallbackKey.class);
+        if (saved == null || saved.expiresAt() - now <= 23L * 86400_000) {
+            Instant expiresAt = Instant.ofEpochMilli(now + 30L * 86400_000 - 300_000);
+            saved = vault.transaction(() -> {
+                FallbackKey generated = new FallbackKey(signal.generateFallbackPreKey(Instant.ofEpochMilli(now), expiresAt), expiresAt.toEpochMilli());
+                write("fallback-key", generated);
+                return generated;
+            });
+        }
+        if (count.fallbackKeyId() != saved.key().kyberPreKeyId() || count.fallbackExpiresAt() != saved.expiresAt())
+            api.call("PUT", "/keys/fallback", saved, Void.class);
+    }
+
+    PublicBundle claimPreKey(UUID peerId) throws Exception {
+        return api.call("POST", "/keys/" + peerId + "/claim?fallback=true", null, PublicBundle.class);
     }
 
     void send(Peer peer, String text, byte[] image, ChatEnvelope.Expiry expiry) throws Exception {
@@ -506,7 +531,7 @@ final class ChatEngine implements AutoCloseable {
             if (!signal.hasSession(peer.userId())) throw failure;
         }
         if (!signal.hasSession(peer.userId())) {
-            PublicBundle bundle = api.call("POST", "/keys/" + peer.userId() + "/claim", null, PublicBundle.class);
+            PublicBundle bundle = claimPreKey(peer.userId());
             signal.establish(peer.userId(), bundle, Instant.now());
         }
         Instant now = Instant.now();
@@ -749,6 +774,7 @@ final class ChatEngine implements AutoCloseable {
         }
         try {
             safety.refresh();
+            if (System.currentTimeMillis() >= nextKeyCheck) { replenishKeys(); nextKeyCheck = System.currentTimeMillis() + 30_000; }
             flushAcks();
             flushOutgoing();
             unverifiedIncoming = false;
@@ -774,7 +800,6 @@ final class ChatEngine implements AutoCloseable {
             boolean hadGroups=!groups.conversations().isEmpty();
             groups.sync();
             if (!hadGroups && !groups.conversations().isEmpty()) nextKeyCheck=0;
-            if (System.currentTimeMillis() >= nextKeyCheck) { replenishKeys(); nextKeyCheck = System.currentTimeMillis() + (groups.conversations().isEmpty() ? 3_600_000 : 30_000); }
             refreshProfiles();
             photos.sync();
             online = true;

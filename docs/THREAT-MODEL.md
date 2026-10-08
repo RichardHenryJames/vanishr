@@ -158,6 +158,26 @@ Previously pinned keys/devices are never silently replaced. An admin identity
 change requires a reviewed signed-app pin update and explicit re-onboarding,
 not a username rule, remote configuration update or verification bypass.
 
+From 0.5.5, the explicitly approved offline-first-message policy supports
+libsignal's standard PQXDH last-resort prekeys. A recipient publishes a signed
+EC/Kyber fallback without a one-time EC key. Only capable senders receive it,
+and only after the one-time pool is exhausted/expired. Publication is bounded
+to 30 days, normally rotates after about seven days, and is never renewed by
+claims or retries. Private fallback material and bounded replay tuples remain
+only until that key's original deadline plus the 24-hour delivery window.
+Native libsignal checks signatures and establishes sessions; the client store
+rejects a repeated signed-key/base-key tuple rather than consuming the fallback.
+One-time keys remain preferred and continue to be deleted after use.
+
+This changes the former one-use-only availability policy: reusable prekeys
+provide less per-handshake forward-secrecy isolation until rotation/erasure.
+The permanent admin pin, ordinary-contact independent verification, block rules
+and encrypted-content deadlines are unchanged. The admin must install the
+updated app in place and open it to publish its own public fallback. Missing or
+expired keys, unavailable relay/storage, rate limits and the 1,024 retained
+fallback-handshake bound still fail explicitly. This is not unlimited offline
+availability, guaranteed immediate delivery, or a fix for device-specific ANRs.
+
 Only one directory page of at most 64 contacts is cached in the owning account's
 encrypted vault. The admin can browse further pages using More new accounts;
 opened conversations remain saved normally. This avoids allocating encryption
