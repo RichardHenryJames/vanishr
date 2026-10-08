@@ -64,6 +64,24 @@ not a production security assessment or independent audit.
   The full live messaging workflow was not repeated for this client-only
   release; its prior 0.5.5 evidence remains separate. No Motorola-specific
   resolution or real Google-provider deletion is inferred from these checks.
+- **Published and verified:** Vercel deployment
+  `dpl_EnEubtEkE7e45CDq36pzW78qnEbi` is Ready; the exact canonical
+  `vanishr-download.vercel.app` alias was explicitly updated. All **30 public
+  artifacts** were anonymously downloaded and matched the audited hashes.
+  The exact app feed advertises **0.5.6/code 37** with `Cache-Control: no-store`;
+  the public APK verifies with the original release signer. Six private paths
+  returned 404. The first check immediately after alias assignment retrieved
+  the previous 0.5.5 home-page hash; after propagation, the complete unchanged
+  verification passed without accepting stale content.
+- The audited static folder totals **59,656,164 bytes**, with **224** exact
+  matching application/documentation source files. Public source matches
+  release-source commit `bde4b2d`; this later publication-evidence entry is
+  intentionally not in the immutable archive. Evidence is saved locally in
+  `.tools/distribution-audit-0.5.6.json`,
+  `.tools/public-release-verification-0.5.6.json`,
+  `.tools/release-verification-0.5.6/` and `.tools/play-store-0.5.6/`.
+  No backend/Azure changes were made for this release; Play Console submission
+  remains manual.
 
 ## Release 0.5.5 / offline first-message support
 
