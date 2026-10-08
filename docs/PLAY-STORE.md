@@ -1,8 +1,12 @@
 # Google Play readiness: candidate 0.4.8
 
-## Current artifact note: 0.5.5 / code 36
+## Current artifact note: 0.5.6 / code 37
 
 The historical candidate labels below are not the current artifact version.
+0.5.6 corrects fresh Google/password account-deletion confirmation at the
+phone/server clock boundary and adds explicit confirmation retry/success UI.
+No relay update is needed. Google-provider responses were synthetic in the
+deletion regressions; actual affected-phone provider acceptance is unverified.
 0.5.5 adds bounded standard-libsignal offline first-message keys and requires
 schema 12. Both senders and the receiving admin need the updated client; the
 admin must open it once to publish its own public fallback. The separate
@@ -10,7 +14,7 @@ Play-only bundle retains Google configuration and excludes the website updater.
 Its build/verification does not submit it to Play or resolve the existing
 remote-photo consent, reviewer access, signing, teen-safety or policy gates.
 The Motorola Android 16 black-screen report remains an unverified device outcome.
-See [current release evidence](VERIFICATION.md#release-055--offline-first-message-support).
+See [current release evidence](VERIFICATION.md#release-056--google-and-password-account-deletion-confirmation).
 
 Status: **DRAFT / NOT READY TO SUBMIT**. Reviewed against the working tree and
 official Google guidance on 2 October 2026. The candidate is **0.4.8, code 28**;

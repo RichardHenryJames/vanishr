@@ -25,6 +25,21 @@ final class AccountSafety {
     private record DeletionProof(String deletionProof) {
         @Override public String toString() { return "DeletionProof[redacted]"; }
     }
+    static final class DeletionAuthorizationException extends SecurityException {
+        enum Reason { DIFFERENT_ACCOUNT, EXPIRED, INVALID }
+        final Reason reason;
+        DeletionAuthorizationException(Reason reason) {
+            super("Deletion authorization was rejected");
+            this.reason = reason;
+        }
+        String userMessage() {
+            return switch (reason) {
+                case DIFFERENT_ACCOUNT -> "That sign-in belongs to a different account. Choose the Google account used to create this Vanishr account.";
+                case EXPIRED -> "Deletion confirmation expired. Try again to get a fresh sign-in.";
+                case INVALID -> "A fresh account-only sign-in could not be verified. Check that your phone's date and time are automatic, then try again.";
+            };
+        }
+    }
     static final class DeletionPendingException extends IOException {
         final boolean serverConfirmed;
         final int status;
@@ -294,30 +309,36 @@ final class AccountSafety {
         ChatEngine.Account owner = owner(false);
         if (!engine.usesGoogle()) throw new SecurityException("Confirm deletion with your password");
         long now = System.currentTimeMillis();
+        if (challenge != null && challenge.expiresAt() <= now)
+            throw new DeletionAuthorizationException(DeletionAuthorizationException.Reason.EXPIRED);
         if (challenge == null || challenge.id() == null || !challenge.id().matches("[A-Za-z0-9_-]{43}")
                 || challenge.nonce() == null || !challenge.nonce().matches("[A-Za-z0-9_-]{43}")
                 || !BuildConfig.GOOGLE_WEB_CLIENT_ID.equals(challenge.clientId())
-                || challenge.expiresAt() <= now || challenge.expiresAt() > now + 300_000
+                || challenge.expiresAt() > now + GoogleSignIn.AUTHORIZATION_LIFETIME + GoogleSignIn.CLOCK_SKEW
                 || idToken == null || idToken.isBlank() || idToken.length() > 16_384)
-            throw new SecurityException("Obtain a fresh Google sign-in challenge to confirm deletion");
+            throw new DeletionAuthorizationException(DeletionAuthorizationException.Reason.INVALID);
         try (RelayApi temporary = temporaryApis.apply(owner.origin())) {
             ChatEngine.GoogleResponse response = temporary.call("POST", "/auth/google",
                     new ChatEngine.GoogleRequest(challenge.id(), idToken), ChatEngine.GoogleResponse.class);
-            if (response == null) throw new SecurityException("Invalid deletion authorization");
+            if (response == null) throw new DeletionAuthorizationException(DeletionAuthorizationException.Reason.INVALID);
             deleteAuthorized(owner, temporary, response.session());
         }
     }
 
     private void deleteAuthorized(ChatEngine.Account owner, RelayApi temporary, ChatEngine.Token token) throws Exception {
         long now = System.currentTimeMillis();
-        if (token == null || !owner.userId().equals(token.userId()) || token.deviceId() != null
+        if (token != null && !owner.userId().equals(token.userId()))
+            throw new DeletionAuthorizationException(DeletionAuthorizationException.Reason.DIFFERENT_ACCOUNT);
+        if (token != null && token.expiresAt() <= now)
+            throw new DeletionAuthorizationException(DeletionAuthorizationException.Reason.EXPIRED);
+        if (token == null || token.deviceId() != null
                 || token.accessToken() == null || !token.accessToken().matches("[A-Za-z0-9_-]{43}")
                 || token.accessToken().equals(owner.accessToken()) || token.accessToken().equals(owner.refreshToken())
                 || token.refreshToken() != null || token.refreshExpiresAt() != 0
-                || token.expiresAt() <= now || token.expiresAt() > now + 300_000
+                || token.expiresAt() > now + GoogleSignIn.AUTHORIZATION_LIFETIME + GoogleSignIn.CLOCK_SKEW
                 || !temporary.origin().equals(owner.origin()) || engine.account() == null
                 || !owner.userId().equals(engine.account().userId()) || !Objects.equals(owner.deviceId(), engine.account().deviceId()))
-            throw new SecurityException("Deletion requires fresh authorization for this account, without an enrolled device");
+            throw new DeletionAuthorizationException(DeletionAuthorizationException.Reason.INVALID);
         serverDeleted = false;
         byte[] entropy = new byte[32];
         new java.security.SecureRandom().nextBytes(entropy);
@@ -326,7 +347,9 @@ final class AccountSafety {
         finally { Arrays.fill(entropy, (byte) 0); }
         if (proof.equals(owner.accessToken()) || proof.equals(owner.refreshToken()) || proof.equals(token.accessToken()))
             throw new SecurityException("Deletion recovery needs a separate proof");
-        vault.beginAccountDeletion(owner.userId(), owner.origin(), token.accessToken(), token.expiresAt(),
+        // Clock tolerance must not extend the locally retained deletion credential.
+        long authorizationDeadline = Math.min(token.expiresAt(), now + GoogleSignIn.AUTHORIZATION_LIFETIME);
+        vault.beginAccountDeletion(owner.userId(), owner.origin(), token.accessToken(), authorizationDeadline,
                 proof, System.currentTimeMillis() + DELETION_PROOF_LIFETIME);
         deleting = true;
         engine.pauseForAccountDeletion();

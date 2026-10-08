@@ -135,6 +135,16 @@ local key/partition erasure; other saved accounts remain intact. Pending local
 cleanup is retried while unlocked without claiming that an arbitrary 401/404
 means success.
 
+Android accepts at most 30 seconds of phone/server clock difference at the upper
+bound of a fresh deletion challenge/credential, consistently with Google
+challenge preparation. Already expired credentials are rejected, and the
+saved credential deadline is capped to its original expiry or five local
+minutes, whichever is earlier. This is client-side validation only; the
+relay's existing five-minute enrollment lifetime and proof TTL are unchanged.
+The client offers explicit account-bound confirmation retry for failed
+reauthentication, and uses the existing cleanup-only path if deletion is
+already pending.
+
 Cleanup removes the account's profile/auth mapping, devices, public prekeys,
 block relationships and introductions, direct queued payloads and attributable
 media, auth/renewal credentials, push/presence/routing records and membership.

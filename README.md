@@ -12,6 +12,14 @@ license notices at **https://vanishr-download.vercel.app**.
 The public [update feed](https://vanishr-download.vercel.app/updates.json), not
 the latest Git version, determines which release users can download and discover.
 
+Release **0.5.6/code 37** fixes fresh Google/password deletion confirmation
+being rejected for a small phone/server clock difference. It adds clear,
+account-bound retry and confirmed-deletion feedback without bypassing ownership
+checks or deleting local data before server confirmation. This client-only
+update preserves 0.5.5 offline first-message support. See
+[release verification](docs/VERIFICATION.md#release-056--google-and-password-account-deletion-confirmation)
+for tested behavior and provider/device limitations.
+
 Release **0.5.5/code 36** adds standard libsignal offline first-message fallback
 keys, fixing new-user sends blocked by an exhausted/expired recipient key pool.
 It requires relay schema 12 and an updated recipient app. **The official admin

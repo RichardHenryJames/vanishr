@@ -1586,6 +1586,138 @@ public class ScreenFlowTest {
         assertTrue((activity.getWindow().getAttributes().flags & WindowManager.LayoutParams.FLAG_SECURE) != 0);
     }
 
+    @Test public void googleDeletionPickerCancellationAfterBackgroundingShowsAnAccountBoundRetry() throws Exception {
+        signedInFixture();
+        vault.transaction(() -> { vault.put("google-account", new byte[]{1}); return null; });
+        String identity = engine.identityCode();
+        Object attempt = syntheticGoogleAttempt(); setField(attempt, "deletingAccount", userId);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                inject(activity); setField(activity, "googleAttempt", attempt); invoke(activity, "render");
+                assertGoogleProgress(activity);
+            });
+            scenario.moveToState(Lifecycle.State.CREATED);
+            scenario.onActivity(activity -> invoke(activity, "googleFailed", new Class<?>[]{GoogleSignIn.Failure.class}, GoogleSignIn.Failure.CANCELLED));
+            scenario.moveToState(Lifecycle.State.RESUMED);
+            awaitMainCondition(scenario, activity -> dialog(activity) != null);
+            scenario.onActivity(activity -> {
+                engine = (ChatEngine) readField(activity, "engine"); vault = (AndroidVault) readField(engine, "vault");
+                assertEquals(identity, engine.identityCode()); assertTrue(engine.usesGoogle());
+                assertFalse(engine.safety().deletionPending());
+                assertNotNull(text(dialog(activity).getWindow().getDecorView(), "Account not deleted"));
+                assertTrue(((TextView) text(dialog(activity).getWindow().getDecorView(),
+                        GoogleSignIn.Failure.CANCELLED.message
+                        + "\n\nKeep the app installed. Retrying requires a new confirmation; it does not clear your chats.")).getText().length() > 0);
+                dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+            });
+            scenario.onActivity(activity -> {
+                SecureSheet sheet = dialog(activity);
+                assertEquals("Confirm with Google", sheet.getButton(AlertDialog.BUTTON_POSITIVE).getText().toString());
+                assertTrue(descendants(sheet.getWindow().getDecorView()).stream().filter(EditText.class::isInstance)
+                        .map(EditText.class::cast).allMatch(input -> input.length() == 0));
+                sheet.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+                assertFalse(engine.safety().deletionPending());
+                assertNull(readField(activity, "googleAttempt"));
+                assertEquals(identity, engine.identityCode());
+            });
+        }
+    }
+
+    @Test public void googleDeletionAfterPickerReopensSameAccountAndErasesOnlyAfterConfirmation() throws Exception {
+        signedInFixture();
+        vault.transaction(() -> { vault.put("google-account", new byte[]{1}); return null; });
+        String identity = engine.identityCode();
+        Object attempt = syntheticGoogleAttempt(); setField(attempt, "deletingAccount", userId);
+        var requests = new ArrayList<String>();
+        String enrollment = "c".repeat(43);
+        okhttp3.Interceptor transport = chain -> {
+            var request = chain.request(); requests.add(request.url().encodedPath());
+            if (request.url().encodedPath().equals("/auth/google")) {
+                assertNull(request.header("Authorization"));
+                return syntheticResponse(request, 200, new ChatEngine.GoogleResponse(
+                        new ChatEngine.Token(userId, null, enrollment, System.currentTimeMillis() + 310_000), "alex"));
+            }
+            assertEquals("/account", request.url().encodedPath()); assertEquals("DELETE", request.method());
+            assertEquals("Bearer " + enrollment, request.header("Authorization"));
+            assertNotNull(vault.get("identity"));
+            assertFalse(vault.pendingAccountDeletion().confirmed());
+            return new okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(204).message("Synthetic deletion confirmed")
+                    .body(okhttp3.ResponseBody.create(new byte[0], null)).build();
+        };
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { inject(activity); setField(activity, "googleAttempt", attempt); invoke(activity, "render"); });
+            scenario.moveToState(Lifecycle.State.CREATED);
+            scenario.moveToState(Lifecycle.State.RESUMED);
+            awaitMainCondition(scenario, activity -> readField(activity, "engine") != null);
+            scenario.onActivity(activity -> {
+                engine = (ChatEngine) readField(activity, "engine"); vault = (AndroidVault) readField(engine, "vault");
+                assertEquals(identity, engine.identityCode());
+                setField(engine, "safety", new AccountSafety(engine, vault, origin -> syntheticApi(transport),
+                        () -> new okhttp3.OkHttpClient.Builder().addInterceptor(transport).build()));
+                setField(attempt, "idToken", "synthetic-provider-proof");
+                invoke(activity, "completeGoogle");
+                assertGoogleProgress(activity);
+            });
+            awaitMainCondition(scenario, activity -> readField(activity, "engine") != null
+                    && ((ChatEngine) readField(activity, "engine")).account() == null
+                    && !(boolean) readField(activity, "completingGoogle"));
+            scenario.onActivity(activity -> {
+                engine = (ChatEngine) readField(activity, "engine"); vault = (AndroidVault) readField(engine, "vault");
+                assertNull(vault.get("identity")); assertNull(vault.get(AndroidVault.ACCOUNT_DELETION));
+                assertNull(readField(attempt, "idToken"));
+                assertNotNull(text(root(activity), "Continue with Google"));
+                assertNotNull(text(root(activity), "Account deleted. This account's data has been removed from this phone."));
+            });
+            assertEquals(List.of("/auth/google", "/account"), requests);
+        }
+    }
+
+    @Test public void googleDeletionResultCannotSwitchToAnotherAccountAfterPicker() throws Exception {
+        signedInFixture();
+        vault.transaction(() -> { vault.put("google-account", new byte[]{1}); return null; });
+        String identity = engine.identityCode();
+        Object attempt = syntheticGoogleAttempt();
+        setField(attempt, "deletingAccount", UUID.randomUUID());
+        setField(attempt, "idToken", "synthetic-provider-proof");
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { inject(activity); setField(activity, "googleAttempt", attempt); invoke(activity, "completeGoogle"); });
+            awaitMainCondition(scenario, activity -> dialog(activity) != null);
+            scenario.onActivity(activity -> {
+                assertNotNull(text(dialog(activity).getWindow().getDecorView(), "Account not deleted"));
+                assertEquals(identity, engine.identityCode());
+                assertTrue(engine.authenticated());
+                assertNull(readField(attempt, "idToken"));
+                assertNull(vault.get(AndroidVault.ACCOUNT_DELETION));
+            });
+        }
+    }
+
+    @Test public void googleDeletionErrorsExplainTheCauseAndRetryNeverSkipsConfirmation() throws Exception {
+        signedInFixture();
+        vault.transaction(() -> { vault.put("google-account", new byte[]{1}); return null; });
+        String identity = engine.identityCode();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                inject(activity);
+                for (Exception failure : List.of(
+                        new AccountSafety.DeletionAuthorizationException(AccountSafety.DeletionAuthorizationException.Reason.DIFFERENT_ACCOUNT),
+                        new AccountSafety.DeletionAuthorizationException(AccountSafety.DeletionAuthorizationException.Reason.EXPIRED),
+                        new RelayApi.ApiFailure(429), new IOException("synthetic-private-error"))) {
+                    invoke(activity, "deletionFailed", new Class<?>[]{Exception.class}, failure);
+                    SecureSheet sheet = dialog(activity);
+                    assertNotNull(text(sheet.getWindow().getDecorView(), "Account not deleted"));
+                    assertFalse(descendants(sheet.getWindow().getDecorView()).stream().anyMatch(view -> view instanceof TextView label
+                            && label.getText().toString().contains("synthetic-private-error")));
+                    assertTrue((sheet.getWindow().getAttributes().flags & WindowManager.LayoutParams.FLAG_SECURE) != 0);
+                    sheet.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+                    assertEquals(identity, engine.identityCode()); assertTrue(engine.authenticated());
+                    assertNull(vault.get(AndroidVault.ACCOUNT_DELETION));
+                }
+            });
+        }
+    }
+
     @Test public void googlePickerReturnKeepsProgressAndCancellationRestoresLogin() throws Exception {
         Object attempt = syntheticGoogleAttempt();
         var loginDrawn = new java.util.concurrent.atomic.AtomicBoolean();

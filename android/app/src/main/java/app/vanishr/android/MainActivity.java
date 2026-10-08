@@ -170,6 +170,8 @@ public final class MainActivity extends AppCompatActivity {
     private boolean completingGoogle;
     private CancellationSignal googleCancellation;
     private GoogleSignIn.Failure googleFailure;
+    private UUID googleDeletionFailureAccount;
+    private boolean accountDeletedNotice;
     private boolean loginPolicyApproved;
     private static final class GoogleAttempt {
         final String origin;
@@ -489,6 +491,11 @@ public final class MainActivity extends AppCompatActivity {
                     engine = loaded;
                     if (loaded.authenticated()) loaded.connect(this::queueSync);
                     render();
+                    showGoogleDeletionFailure();
+                    if (accountDeletedNotice && loaded.account() == null) {
+                        accountDeletedNotice = false;
+                        problem("Account deleted. This account's data has been removed from this phone.");
+                    }
                     if (googleAttempt != null && googleAttempt.idToken != null) completeGoogle();
                     if (selectedImage != null || cameraImage != null) importPendingImage();
                     if (selectedProfilePhoto != null) importProfilePhoto();
@@ -722,7 +729,7 @@ public final class MainActivity extends AppCompatActivity {
         form.addView(design.spacer(16));
         scroll.addView(form);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        if (googleFailure != null) { problem(googleFailure.message); googleFailure = null; }
+        if (googleFailure != null && googleDeletionFailureAccount == null) { problem(googleFailure.message); googleFailure = null; }
     }
 
     private void contactsScreen() {
@@ -825,6 +832,7 @@ public final class MainActivity extends AppCompatActivity {
     private void beginGoogleSignIn(String origin, boolean replace, UUID deletingAccount) {
         if (!resumed || engine == null || busy || googleAttempt != null) return;
         googleFailure = null;
+        googleDeletionFailureAccount = null;
         if (actionError != null) { actionError.setText(""); actionError.setVisibility(View.GONE); }
         var prepared = new java.util.concurrent.atomic.AtomicReference<GoogleSignIn.Challenge>();
         UUID expectedAccount = deletingAccount != null ? deletingAccount : engine.account() == null ? null : engine.account().userId();
@@ -850,18 +858,35 @@ public final class MainActivity extends AppCompatActivity {
                     if (googleCancellation != null) googleCancellation.cancel();
                 }
             }, Math.max(1, attempt.challenge.expiresAt() - System.currentTimeMillis()));
+        }, failure -> {
+            if (deletingAccount != null) deletionFailed(failure);
+            else showFailure(failure);
         });
     }
 
     private void googleFailed(GoogleSignIn.Failure failure) {
+        googleDeletionFailureAccount = googleAttempt == null ? null : googleAttempt.deletingAccount;
         if (googleAttempt != null) googleAttempt.idToken = null;
         googleAttempt = null;
         completingGoogle = false;
         googleFailure = failure;
         if (resumed) {
             render();
+            showGoogleDeletionFailure();
             if (engine != null && googleFailure != null) { problem(failure.message); googleFailure = null; }
         }
+    }
+
+    private void showGoogleDeletionFailure() {
+        if (!resumed || engine == null || googleFailure == null || googleDeletionFailureAccount == null) return;
+        UUID owner = googleDeletionFailureAccount;
+        GoogleSignIn.Failure failure = googleFailure;
+        googleDeletionFailureAccount = null; googleFailure = null;
+        if (engine.account() == null || !owner.equals(engine.account().userId())) {
+            problem("Deletion confirmation was cancelled because the active account changed.");
+            return;
+        }
+        deletionRetry(failure.message);
     }
 
     private void completeGoogle() {
@@ -874,7 +899,8 @@ public final class MainActivity extends AppCompatActivity {
         submit(() -> {
             try {
                 if (attempt.deletingAccount != null) {
-                    if (current.account() == null || !attempt.deletingAccount.equals(current.account().userId()))
+                    if (current.account() == null || !attempt.deletingAccount.equals(current.account().userId())
+                            || !attempt.origin.equals(current.account().origin()) || !current.usesGoogle())
                         throw new SecurityException("The account selected for deletion changed");
                     current.safety().deleteWithGoogle(attempt.challenge, attempt.idToken);
                 } else {
@@ -2225,10 +2251,30 @@ public final class MainActivity extends AppCompatActivity {
         }
         if (failure instanceof GeneralSecurityException || failure instanceof AndroidVault.PhoneLockedException
                 || failure instanceof AndroidVault.PhoneLockRequiredException) { showFailure(failure); return; }
-        if (failure instanceof RelayApi.ApiFailure apiFailure && apiFailure.status == 401) {
-            problem("Deletion was not authorized. Check your password or choose the same Google account, then retry."); return;
+        if (failure instanceof AccountSafety.DeletionAuthorizationException authorization) {
+            deletionRetry(authorization.userMessage()); return;
         }
-        problem("Account deletion did not finish. Keep the app installed and use the deletion retry, or request help at " + PlayPolicy.SUPPORT + ".");
+        if (failure instanceof RelayApi.ApiFailure apiFailure && apiFailure.status == 401) {
+            deletionRetry("Deletion was not authorized. Check your password or choose the Google account used to create this Vanishr account."); return;
+        }
+        if (failure instanceof RelayApi.ApiFailure apiFailure) { deletionRetry(apiFailure.userMessage()); return; }
+        if (failure instanceof java.io.IOException) {
+            deletionRetry("Cannot connect right now. Check your connection, then try confirming deletion again."); return;
+        }
+        deletionRetry("Account deletion could not be completed safely. Your encrypted account data has not been cleared. Try again or contact " + PlayPolicy.SUPPORT + ".");
+    }
+
+    private void deletionRetry(String message) {
+        ChatEngine current = engine;
+        if (!resumed || current == null || current.account() == null) { problem(message); return; }
+        if (current.safety().deletionPending()) { render(); problem(message); return; }
+        UUID owner = current.account().userId();
+        showDialog(new SecureSheet.Builder(this).setTitle("Account not deleted")
+                .setMessage(message + "\n\nKeep the app installed. Retrying requires a new confirmation; it does not clear your chats.")
+                .setNegativeButton("Close", null).setPositiveButton("Try again", (dialog, which) -> {
+                    if (engine == current && current.account() != null && owner.equals(current.account().userId()))
+                        deleteAccountDialog();
+                }).create());
     }
 
     private void pendingDeletionScreen() {
@@ -2255,6 +2301,7 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void deletedAccount() {
+        accountDeletedNotice = true;
         screenGeneration++;
         loginPolicyApproved = false;
         selectedPeer = null; signingUp = false; notificationOpen = null; photoChoice = null;
@@ -2734,7 +2781,7 @@ public final class MainActivity extends AppCompatActivity {
     @Override protected void onResume() {
         super.onResume(); resumed = true;
         if (engine == null) load();
-        else { render(); if (googleAttempt != null && googleAttempt.idToken != null) completeGoogle(); }
+        else { render(); showGoogleDeletionFailure(); if (googleAttempt != null && googleAttempt.idToken != null) completeGoogle(); }
         checkForUpdates(false);
         continuePhotoChoice();
     }

@@ -612,6 +612,74 @@ public class AccountSafetyTest {
                 System.currentTimeMillis() + 240_000);
     }
 
+    @Test public void googleDeletionAcceptsTheSameBoundedClockSkewAsChallengePreparation() throws Exception {
+        vault.transaction(() -> { vault.put("google-account", new byte[]{1}); return null; });
+        GoogleSignIn.Challenge challenge = new GoogleSignIn.Challenge(opaque(), opaque(), BuildConfig.GOOGLE_WEB_CLIENT_ID,
+                System.currentTimeMillis() + 310_000);
+        engine.safety().deleteWithGoogle(challenge, "synthetic-provider-proof");
+        assertTrue(engine.safety().deletionCompleted());
+        assertEquals(1, requests("/auth/google"));
+        assertEquals(1, requests("/account"));
+        assertEquals(0, requests("/devices"));
+    }
+
+    @Test public void googleDeletionBoundsFreshServerAuthorizationToFiveLocalMinutesAcrossRecovery() throws Exception {
+        vault.transaction(() -> { vault.put("google-account", new byte[]{1}); return null; });
+        authorization = new ChatEngine.Token(userId, null, opaque(), System.currentTimeMillis() + 310_000);
+        uncertainDelete = true;
+        long started = System.currentTimeMillis();
+        assertThrows(AccountSafety.DeletionPendingException.class,
+                () -> engine.safety().deleteWithGoogle(deletionChallenge(), "synthetic-provider-proof"));
+        AndroidVault.AccountDeletion pending = vault.pendingAccountDeletion();
+        assertNotNull(pending);
+        assertTrue(pending.expiresAt() >= started + 299_000);
+        assertTrue(pending.expiresAt() <= System.currentTimeMillis() + 300_000);
+        assertTrue(pending.expiresAt() < authorization.expiresAt());
+        assertEquals(authorization.accessToken(), pending.token());
+        assertFalse(engine.safety().deletionCompleted());
+        assertNotNull(vault.get("identity"));
+        uncertainDelete = false;
+        engine.safety().retryPendingDeletion();
+        assertTrue(engine.safety().deletionCompleted());
+        assertEquals(1, requests("/auth/google"));
+        assertEquals(0, requests("/devices"));
+    }
+
+    @Test public void passwordDeletionUsesTheSameBoundedFreshAuthorizationWindow() throws Exception {
+        authorization = new ChatEngine.Token(userId, null, opaque(), System.currentTimeMillis() + 310_000);
+        engine.safety().deleteWithPassword(PASSWORD);
+        assertTrue(engine.safety().deletionCompleted());
+        assertEquals(1, requests("/auth/login"));
+        assertEquals(1, requests("/account"));
+    }
+
+    @Test public void deletionRejectsBeyondThirtySecondsClockToleranceAndKeepsOriginalDeadlines() throws Exception {
+        vault.transaction(() -> { vault.put("google-account", new byte[]{1}); return null; });
+        byte[] account = vault.get("account"), identity = vault.get("identity");
+        GoogleSignIn.Challenge excessive = new GoogleSignIn.Challenge(opaque(), opaque(), BuildConfig.GOOGLE_WEB_CLIENT_ID,
+                System.currentTimeMillis() + 331_000);
+        assertThrows(AccountSafety.DeletionAuthorizationException.class,
+                () -> engine.safety().deleteWithGoogle(excessive, "synthetic-provider-proof"));
+        assertEquals(0, requests("/auth/google"));
+        authorization = new ChatEngine.Token(userId, null, opaque(), System.currentTimeMillis() + 331_000);
+        assertThrows(AccountSafety.DeletionAuthorizationException.class,
+                () -> engine.safety().deleteWithGoogle(deletionChallenge(), "synthetic-provider-proof"));
+        assertEquals(0, requests("/account"));
+        assertArrayEquals(account, vault.get("account")); assertArrayEquals(identity, vault.get("identity"));
+        assertNull(vault.pendingAccountDeletion());
+
+        authorization = new ChatEngine.Token(userId, null, opaque(), System.currentTimeMillis() + 240_000);
+        uncertainDelete = true;
+        assertThrows(AccountSafety.DeletionPendingException.class,
+                () -> engine.safety().deleteWithGoogle(deletionChallenge(), "synthetic-provider-proof"));
+        long deadline = vault.pendingAccountDeletion().expiresAt();
+        assertEquals(authorization.expiresAt(), deadline);
+        proofStatus = 503;
+        assertThrows(AccountSafety.DeletionPendingException.class, () -> engine.safety().retryPendingDeletion());
+        assertEquals(deadline, vault.pendingAccountDeletion().expiresAt());
+        assertEquals(2, requests("/auth/google"));
+    }
+
     @Test public void backgroundBeforeConfirmationRetainsProofAndNeverRepeatsGoogleAuthentication() throws Exception {
         vault.transaction(() -> { vault.put("google-account", new byte[]{1}); return null; });
         byte[] identity = vault.get("identity");

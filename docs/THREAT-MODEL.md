@@ -195,6 +195,18 @@ cleanup disables normal use and remains retryable. A saved Google account's
 challenge includes its expected immutable UUID, preventing reauthentication
 from silently registering a replacement after erasure.
 
+Deletion uses the same bounded 30-second clock tolerance as Google challenge
+preparation when validating the upper deadline of a freshly issued challenge
+or account-only credential. Already expired values still fail. The locally
+retained deletion credential is capped at the earlier of its original server
+deadline and five minutes from validation; tolerance never extends that
+credential, the server session, or a deletion recovery proof.
+Returning from the Google picker must still match the selected immutable
+account, relay origin and Google provider. Cancellation/failure retains an
+account-bound retry prompt, not a deletion authorization. Retry requires the
+typed confirmation and fresh sign-in again. Explicit deletion success appears
+only after confirmed server deletion and owner-specific local cleanup.
+
 The client commits a separate random 256-bit proof before sending deletion.
 V9 stores only its digest, original UUID, state and a fixed <=24-hour deadline
 in PostgreSQL. The receipt and account erasure commit together; responses are

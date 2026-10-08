@@ -3,6 +3,68 @@
 Evidence refreshed on Windows, 2026-10-08 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
+## Release 0.5.6 / Google and password account deletion confirmation
+
+- A Google-created account's owner reported the same-account picker returned
+  "Account deletion did not finish. Keep the app installed...". That generic
+  message did not identify the failure stage; no actual provider token, email
+  or affected-phone trace was collected.
+- Three regressions failed against unchanged production code: a fresh Google
+  challenge with a simulated ten-second server-ahead clock was rejected despite
+  being within the challenge preparation's existing 30-second tolerance; fresh
+  Google and password account-only authorization had the same strict-boundary
+  failure. These reproduce a real client defect compatible with the reported
+  message, not proof of the affected phone's clock setting.
+- Challenge and deletion-authorization upper bounds now use the same fixed
+  30-second tolerance. Already expired credentials remain rejected. The saved
+  deletion credential is capped to its original server deadline or five local
+  minutes, whichever is earlier. Recovery does not reset that deadline.
+  Wrong-account, device-scoped, reusable, malformed and excessively long-lived
+  credentials still cannot authorize deletion.
+- The Google picker result remains bound to the selected account, origin and
+  provider after reopening. Cancellation while backgrounded now returns to an
+  account-bound retry prompt. Pre-request failures explain the safe cause
+  (expired confirmation, account mismatch, connectivity, rate limit or validation)
+  rather than an unexplained generic toast. Retry still requires typing DELETE
+  and freshly authenticating. Pending deletion retains its separate proof-based
+  cleanup flow. Confirmed erasure shows an explicit success message.
+- **51 Android instrumentation tests passed, no failures/skips, 94.536 seconds**
+  on the isolated Android 12 QA emulator: the complete account-safety suite and
+  ten Google/deletion/sign-in UI regressions. Coverage includes popup pause/
+  reopen/cancel/success, account-switch rejection, clock bounds, original
+  credential/proof deadlines, wrong identities, loss of the deletion response,
+  interrupted local cleanup, no re-enrollment, and preservation of other saved
+  accounts. Google responses in these tests are synthetic.
+- **Six PostgreSQL/Redis relay integration tests passed** for Google subject
+  erasure, erased-account reauthentication protection, recent owner-only
+  enrollment and proof recovery/expiry. The six existing Android unit tests,
+  QA build and QA lint passed. The relay is unchanged; no backend deployment
+  is required by this correction.
+- Version 0.5.6 / code 37 packages these client-only changes for publication.
+  Real Google-provider deletion on the affected phone is not verified.
+  Never uninstall or clear app data as a deletion-recovery workaround.
+- The final signed APK and separate Play-only AAB built successfully with
+  release lint, the original certificate and validated Google/Firebase settings.
+  Actual APK manifest: **0.5.6 / 37**, min API 28, target API 36; its direct
+  update feed is present and 16-KiB ZIP alignment passes.
+  APK: **44,438,025 bytes**, SHA-256
+  `37266da2c6c52ca373b4df055c18143ede807e4c09fd99e126599006fec250a4`.
+  Play AAB: **45,754,081 bytes**, SHA-256
+  `ac6fecaba57ee72f6634b2840819bf0037fa9e899a4d2f769de1e5ba6e5e2010`.
+  The AAB passes signature and pinned official bundletool 1.18.3 validation;
+  its actual manifest, Google settings, matching notices, excluded external
+  updater, 16-KiB native packaging and all four 64-bit native-library load
+  alignments were verified. The bundle was not uploaded to Play Console.
+- Signed **0.5.6** runtime checks on the isolated Android 16 / API 36 emulator
+  passed for visible protected UI, Keystore encryption/deletion, native
+  libsignal/wire serialization, backups/cleartext rejection and generic
+  notification boundaries. The secured batch passed five tests with the
+  incompatible no-screen-lock case skipped; that complementary case passed
+  separately after removing only the generated emulator credential.
+  The full live messaging workflow was not repeated for this client-only
+  release; its prior 0.5.5 evidence remains separate. No Motorola-specific
+  resolution or real Google-provider deletion is inferred from these checks.
+
 ## Release 0.5.5 / offline first-message support
 
 - The reporter confirmed `prekeys_unavailable` ("The contact needs to sign in

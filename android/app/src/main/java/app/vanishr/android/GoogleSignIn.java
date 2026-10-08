@@ -12,6 +12,8 @@ import java.util.Collections;
 import java.util.UUID;
 
 final class GoogleSignIn {
+    static final long AUTHORIZATION_LIFETIME = 300_000;
+    static final long CLOCK_SKEW = 30_000;
     private static java.util.concurrent.CompletableFuture<Boolean> clearingSession;
     record Challenge(String id, String nonce, String clientId, long expiresAt) {
         @Override public String toString() { return "Challenge[redacted]"; }
@@ -60,7 +62,7 @@ final class GoogleSignIn {
                 || challenge.id() == null || !challenge.id().matches("[A-Za-z0-9_-]{43}")
                 || challenge.nonce() == null || !challenge.nonce().matches("[A-Za-z0-9_-]{43}")
                 || challenge.expiresAt() <= System.currentTimeMillis()
-                || challenge.expiresAt() > System.currentTimeMillis() + 330_000)
+                || challenge.expiresAt() > System.currentTimeMillis() + AUTHORIZATION_LIFETIME + CLOCK_SKEW)
             throw new SecurityException("Invalid Google challenge");
         return challenge;
     }
