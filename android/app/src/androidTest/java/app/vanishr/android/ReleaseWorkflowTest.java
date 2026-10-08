@@ -82,6 +82,16 @@ public class ReleaseWorkflowTest {
             assertTrue("Control must be actionable: " + value, selected.performClick());
         });
         instrumentation.waitForIdleSync();
+        if (value.equals("Create account") || value.equals("Sign in")) {
+            java.util.concurrent.atomic.AtomicBoolean policy = new java.util.concurrent.atomic.AtomicBoolean();
+            instrumentation.runOnMainSync(() -> {
+                CheckBox agreement = visibleViews().stream().filter(view -> view.isShown() && view instanceof CheckBox box
+                        && "I agree to the Terms and have read the Privacy policy.".contentEquals(box.getText()))
+                        .map(view -> (CheckBox) view).findFirst().orElse(null);
+                if (agreement != null) { agreement.setChecked(true); policy.set(true); }
+            });
+            if (policy.get()) clickText("Continue");
+        }
     }
 
     private void clickIcon(String description) throws Exception {
@@ -601,11 +611,6 @@ public class ReleaseWorkflowTest {
             fill("Username", handle);
             fill("Password", password);
             clickText("Create account");
-            awaitText("Before using Vanishr");
-            instrumentation.runOnMainSync(() -> visibleViews().stream()
-                    .filter(view -> view.isShown() && view instanceof CheckBox)
-                    .map(view -> (CheckBox) view).findFirst().orElseThrow().setChecked(true));
-            clickText("Continue");
             if (android.os.Build.VERSION.SDK_INT >= 33 && !BuildConfig.FIREBASE_APP_ID.isEmpty()
                     && context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 UiObject2 allow = device.wait(Until.findObject(By.res(java.util.regex.Pattern.compile(".*:id/permission_allow_button"))), 30_000);
