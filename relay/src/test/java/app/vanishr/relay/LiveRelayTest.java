@@ -39,6 +39,10 @@ class LiveRelayTest {
         @Override public String toString() { return "LiveDevice[redacted]"; }
     }
 
+    private record LiveAccount(String handle, String password, LiveDevice device) {
+        @Override public String toString() { return "LiveAccount[redacted]"; }
+    }
+
     private HttpClient client() throws Exception {
         assertEquals("https", origin.getScheme());
         assertNull(origin.getUserInfo());
@@ -76,9 +80,18 @@ class LiveRelayTest {
     }
 
     private LiveDevice enroll(HttpClient client) throws Exception {
+        return enroll(client, "probe_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16), UUID.randomUUID().toString());
+    }
+
+    private LiveAccount enrollAccount(HttpClient client) throws Exception {
         String handle = "probe_" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        String password = UUID.randomUUID().toString();
+        return new LiveAccount(handle, password, enroll(client, handle, password));
+    }
+
+    private LiveDevice enroll(HttpClient client, String handle, String password) throws Exception {
         AuthService.Token enrollment = json.readValue(call(client, "POST", "/auth/register", null,
-                Map.of("handle", handle, "password", UUID.randomUUID().toString()), 201), AuthService.Token.class);
+                Map.of("handle", handle, "password", password), 201), AuthService.Token.class);
         UUID deviceId = UUID.randomUUID();
         SignalClient crypto = new SignalClient(enrollment.userId(), new RelayIntegrationTest.TestVault());
         AuthService.Token registered = json.readValue(call(client, "POST", "/devices", enrollment.accessToken(),
@@ -147,6 +160,66 @@ class LiveRelayTest {
             } finally {
                 for (LiveDevice device : List.of(alice, bob)) {
                     try { call(client, "POST", "/auth/logout", device.token(), null, 204); }
+                    catch (Exception | AssertionError cleanupFailure) {
+                        if (primaryFailure != null) primaryFailure.addSuppressed(cleanupFailure);
+                        else throw cleanupFailure;
+                    }
+                }
+            }
+        }
+    }
+
+    private static byte[] randomBytes(int length) {
+        byte[] value = new byte[length];
+        new SecureRandom().nextBytes(value);
+        return value;
+    }
+
+    private void erase(HttpClient client, LiveAccount account) throws Exception {
+        AuthService.Token confirming = json.readValue(call(client, "POST", "/auth/login", null,
+                Map.of("handle", account.handle(), "password", account.password()), 200), AuthService.Token.class);
+        call(client, "DELETE", "/account", confirming.accessToken(), Map.of("confirmation", "DELETE"), 204);
+        call(client, "GET", "/account/backup/status", account.device().token(), null, 401);
+    }
+
+    @Test void realHttpsStoresOneOpaqueBoundedBackupPerOwnerAndErasesItWithTheAccount() throws Exception {
+        try (HttpClient client = client()) {
+            LiveAccount owner = enrollAccount(client);
+            LiveAccount other = enrollAccount(client);
+            String ownerToken = owner.device().token(), otherToken = other.device().token();
+            Throwable primaryFailure = null;
+            try {
+                call(client, "GET", "/account/backup/status", null, null, 401);
+                assertFalse(json.readTree(call(client, "GET", "/account/backup/status", ownerToken, null, 200)).get("exists").asBoolean());
+                call(client, "GET", "/account/backup", ownerToken, null, 404);
+
+                byte[] sealed = randomBytes(2_048);
+                JsonNode stored = json.readTree(exchange(client, "PUT", "/account/backup", ownerToken, sealed, "application/octet-stream", 200));
+                assertTrue(stored.get("exists").asBoolean());
+                assertEquals(sealed.length, stored.get("size").asInt());
+                assertEquals(RelayPolicy.BACKUP_RETENTION_HOURS * 3_600_000L, stored.get("expiresAt").asLong() - stored.get("updatedAt").asLong());
+                assertArrayEquals(sealed, exchange(client, "GET", "/account/backup", ownerToken, null, null, 200));
+
+                call(client, "GET", "/account/backup", otherToken, null, 404);
+                assertFalse(json.readTree(call(client, "GET", "/account/backup/status", otherToken, null, 200)).get("exists").asBoolean());
+
+                exchange(client, "PUT", "/account/backup", ownerToken, randomBytes(RelayPolicy.MIN_BACKUP_BYTES - 1), "application/octet-stream", 400);
+                exchange(client, "PUT", "/account/backup", ownerToken, randomBytes(RelayPolicy.MAX_BACKUP_BYTES + 1), "application/octet-stream", 413);
+                assertArrayEquals(sealed, exchange(client, "GET", "/account/backup", ownerToken, null, null, 200));
+                byte[] maximum = randomBytes(RelayPolicy.MAX_BACKUP_BYTES);
+                exchange(client, "PUT", "/account/backup", ownerToken, maximum, "application/octet-stream", 200);
+                assertArrayEquals(maximum, exchange(client, "GET", "/account/backup", ownerToken, null, null, 200));
+
+                call(client, "DELETE", "/account/backup", ownerToken, null, 204);
+                call(client, "GET", "/account/backup", ownerToken, null, 404);
+                exchange(client, "PUT", "/account/backup", otherToken, sealed, "application/octet-stream", 200);
+                call(client, "GET", "/account/backup", ownerToken, null, 404);
+            } catch (Exception | AssertionError failure) {
+                primaryFailure = failure;
+                throw failure;
+            } finally {
+                for (LiveAccount account : List.of(owner, other)) {
+                    try { erase(client, account); }
                     catch (Exception | AssertionError cleanupFailure) {
                         if (primaryFailure != null) primaryFailure.addSuppressed(cleanupFailure);
                         else throw cleanupFailure;

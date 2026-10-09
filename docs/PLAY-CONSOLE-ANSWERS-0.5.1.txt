@@ -732,6 +732,17 @@ Video link:
   Do not stage a confirmation dialog that the submitted build actually skips.
   Do not hide the role-restricted feature from the review.
 
+ADDENDUM FOR 0.5.7 (a later direct-download release, NOT part of the 0.5.1 submission
+and not submitted to Google Play):
+  A second dataSync service, app.vanishr.android.BackupService, uploads an opt-in,
+  client-encrypted backup of verified contacts and nicknames. It starts only while the
+  app is visible (user action or the once-a-day refresh), runs for seconds, shows a
+  Cancel action and sends only ciphertext. In a build that contains it, the "NOT
+  backup/restore" line above no longer applies: declare the backup-and-restore use case,
+  demonstrate Turn on backup / Back up now / Restore, and review Data safety (client-encrypted
+  contact list) and the privacy policy first. See docs/PLAY-STORE.md. Do not reuse these
+  0.5.1 answers for that build.
+
 No additional FGS types are declared by this bundle. If you remove the photo
 feature, re-evaluate/remove its service permission and declaration in a new AAB.
 

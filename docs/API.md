@@ -56,6 +56,10 @@ independent of login attempts. No access bearer is required or sent on renewal.
 | `GET /account/blocks` | DEVICE owner | UUID array, at most 512 | Owner's durable block preferences only |
 | `PUT /account/blocks/{peerId}` | DEVICE owner | Empty -> 204 | Blocks direct interaction in either direction, revokes affected queues/photo access; does not remove shared-group history |
 | `DELETE /account/blocks/{peerId}` | DEVICE owner | Empty -> 204 | Removes only caller's block; never restores payloads or identity trust |
+| `PUT /account/backup` | DEVICE owner, 6 writes/min/device, body 64 B-512 KiB | `application/octet-stream` client-encrypted blob -> `{exists,size,updatedAt,expiresAt}` | One blob per account; replaces the previous one. Expiry is set to 90 days from this write in the same statement (database CHECK enforces the bound); the minute cleanup removes expired rows; account erasure cascades. The relay checks size only and never interprets the bytes |
+| `GET /account/backup` | DEVICE owner, 12 reads/min/device | Encrypted octet stream | 404 `not_found` when absent or expired; reads never renew expiry |
+| `GET /account/backup/status` | DEVICE owner, shared read limit | `{exists,size,updatedAt,expiresAt}` | Size and timestamps only |
+| `DELETE /account/backup` | DEVICE owner, shared write limit | Empty -> 204 | Idempotent immediate deletion |
 | `POST /safety/reports` | DEVICE reporter | `{targetId,reason,messageId?,groupId?}` -> `{id,expiresAt}`, 201 | Metadata only; five reports per account per 24h; atomic TTL <=30 days |
 | `GET /safety/reports` | Current ADMIN and permanent pin | At most 50 report records | Earliest expiry first; reads do not renew retention |
 | `DELETE /safety/reports/{reportId}` | Current ADMIN and permanent pin | Empty -> 204 | Removes a reviewed report idempotently |
@@ -447,6 +451,17 @@ V12 adds only the public fallback table. Its deadline is checked against creatio
 time, expires within 30 days, and is deleted by the minute cleanup or the device's
 cascading deletion. No account, device, admin pin or existing key is rewritten.
 
+`account_backups(user_id UUID PK/FK accounts ON DELETE CASCADE, ciphertext BYTEA, updated_at TIMESTAMPTZ, expires_at TIMESTAMPTZ)`
+
+V13 adds the opt-in account backup table. `ciphertext` is 64 bytes to 512 KiB and is
+sealed on the client with a recovery key the relay never receives
+([ENCRYPTION.md](ENCRYPTION.md#8-account-backup-opt-in)). Database CHECK constraints
+bound the size and require `expires_at` to be after `updated_at` and at most 2,160 absolute
+hours (90 days) later, so a daylight-saving session time zone cannot stretch the bound; the minute cleanup deletes expired rows and account erasure cascades. The table
+has no plaintext metadata column, and the schema guard test pins its exact columns.
+Deploy V13 before publishing an app version that offers backup; older clients never
+call these routes. No existing row is rewritten.
+
 Google authentication retains a stable Google subject-to-account mapping, not
 Google email, name, photo, access tokens or refresh tokens. It does not merge
 accounts with password accounts by email. `display_name` is set only by an explicit
@@ -457,10 +472,11 @@ authenticated profile edit; it is not imported from Google's token.
 `group_members(group_id UUID FK, user_id UUID FK, device_id UUID, identity_key VARCHAR(64), state VARCHAR(8), invited_until BIGINT, PK(group_id,user_id))`
 
 No message-content, attachment, media-key, private-key, profile, contact,
-search, content-index or permanent receipt tables. The bounded display-name field
-lives on `accounts`; no private contact-name mapping is stored. Deleting/replacing a device
-cascades its public prekeys. Account erasure is owner-only with fresh
-authentication. No content-recovery API is provided.
+search, content-index or permanent receipt tables. The one stored user blob is the
+opt-in client-encrypted `account_backups` row, which the relay cannot read. The bounded
+display-name field lives on `accounts`; no private contact-name mapping is stored in
+plaintext. Deleting/replacing a device cascades its public prekeys. Account erasure is
+owner-only with fresh authentication. No message-content recovery API is provided.
 
 ## Ephemeral Redis keys
 

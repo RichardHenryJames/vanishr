@@ -100,6 +100,31 @@ transfer. The service is not automatically restarted after force-stop.
   Screenshots and demonstration evidence still need the operator; none is
   fabricated by this document.
 
+**Change in 0.5.7 (direct-download APK only; no Play bundle was built): encrypted contacts
+backup.** A second service,
+`BackupService`, uses the same permission and `dataSync` type to upload an opt-in,
+client-encrypted backup of verified contacts and nicknames (never messages, photos or
+keys). It starts only while the app is visible, from Turn on backup / Back up now or the
+once-a-day refresh of an enabled backup, runs for seconds (30-second call timeout; Android's
+timeout callback stops it), shows a Cancel action and is not restarted after force-stop.
+Deferral delays only the backup refresh; interruption keeps the previous server copy and
+retries after 30 minutes. This contradicts the 0.5.1 answers ("NOT backup/restore"), so
+before any Play build includes it:
+
+- [ ] Re-declare `dataSync` with the backup-and-restore use case, for both services, and
+  refresh the demonstration video to show Turn on backup, the recovery key, the upload
+  notification with Cancel and a restore on a second phone (synthetic accounts only).
+- [ ] Re-check the Data safety form: the backup is a client-encrypted copy of the contact
+  list that the developer cannot read; confirm Google's end-to-end-encryption exemption
+  wording rather than assuming it.
+- [x] The public privacy, security, delete-account and Android pages describe the 0.5.7 backup
+  (opt-in, contacts only, 90 days from the last upload, deleted on turn-off and with the
+  account, no recovery without the key). Re-check that wording against Google's definitions
+  before a Play submission; the in-app policy version was not changed.
+- [ ] Relay schema V13 is deployed before the direct-download APK is offered; the
+  [verification record](VERIFICATION.md#release-057--encrypted-contacts-backup) lists exactly what was
+  and was not tested, and a Play build still needs its own physical-device and OEM check.
+
 ## Account deletion and safety contract gates
 
 The following is the **0.4.7 implemented contract**, verified with the matching
@@ -223,6 +248,7 @@ versions/configurations distributed through Play, not just one test run.
 | App activity / interactions and relationship metadata | Direct routing, group membership, presence audiences, Online/Typing/Last seen in [Presence](../relay/src/main/java/app/vanishr/relay/Presence.java), [GroupDirectory](../relay/src/main/java/app/vanishr/relay/GroupDirectory.java) | Groups/presence used as features; membership durable, online 12 seconds, typing 5 seconds, latest activity/audience 24 hours | Assess app interactions / other actions / User IDs and contact relationships. Not app analytics, but still personal metadata sent off device |
 | Messages: other in-app messages | Client-encrypted direct/group content in [ChatEngine](../android/app/src/main/java/app/vanishr/android/ChatEngine.java) and [GroupChat](../android/app/src/main/java/app/vanishr/android/GroupChat.java); opaque relay delivery | User chooses to send; view once or 1/6/24 hours; relay deadline no more than 24 hours | Review the exact end-to-end-encryption exception, not a blanket "No." Admin is an actual recipient of its own conversations. Other routing/account data is not exempt because content is encrypted |
 | Contacts / social relationships | Manually added account identifiers and relay-visible delivery/membership graph; no phone address-book upload | Contacts/groups are chosen features; local nicknames stay encrypted on the client | Inspect current Console definitions for Contacts and User IDs/other interactions. Do not state that "no READ_CONTACTS permission" means no relationship data is processed |
+| Contacts: opt-in encrypted backup (0.5.7 direct-download APK; not in any Play build) | `account_backups` blob from [AccountBackup](../android/app/src/main/java/app/vanishr/android/AccountBackup.java) sealed by [BackupCipher](../client-core/src/main/java/app/vanishr/crypto/BackupCipher.java): verified contacts' IDs, usernames, public identities and private nicknames; the relay stores ciphertext and never the key | Optional and off by default; refreshed at most daily while on; at most 512 KiB; expires 90 days after the last upload; removed on turn-off and with the account | Decide with Google's current collection and end-to-end-encryption definitions whether this counts as collected, since the developer holds ciphertext it cannot read. The public privacy and deletion text already mention it; do not describe it as a message or photo backup |
 | Safety reports / other user-generated content or app activity | Metadata-only reporter/target/report IDs, reason and optional message/group IDs; in-app safety UI in [MainActivity](../android/app/src/main/java/app/vanishr/android/MainActivity.java) | Optional; at most 30 days from submission, removed when either reporter or target account is deleted. Pinned-admin deletion clears the undeliverable queue; no post-deletion safety-report exception | Confirm final backend fields and classification; purpose is fraud prevention, security and compliance / app functionality. No message body or image evidence. New reports return 503 when no enabled pinned admin exists |
 | Account deletion confirmation / User IDs and operation metadata | [DeletionReceipts](../relay/src/main/java/app/vanishr/relay/DeletionReceipts.java) stores proof SHA-256 digest, original random UUID, PENDING/DELETED state and creation/expiry times; recover deletion completion without retained account credentials | Created for the proof-based deletion flow; durable in SQL across account deletion and Redis reset. Fixed 24-hour lifetime from creation; no extension on checks/retries. Access expires at the deadline; every-minute purge while service runs | Disclose for account management/security and lost-response recovery. Pseudonymous is not anonymous; this is not ephemeral processing or a retained safety report. No plaintext proof, name, login credential, Google subject or content in this receipt |
 | Personal info: Email address / support correspondence | External mail request to the operator, including sender address and voluntarily supplied identifiers | Optional email channel; no automatic mailbox TTL in app code | Distinguish external support correspondence from Google sign-in (which does not store email). Determine Console scope and actual mailbox retention/provider handling; do not assert "we never receive email addresses" |

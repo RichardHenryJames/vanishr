@@ -1580,7 +1580,7 @@ class RelayIntegrationTest {
         }
     }
 
-    @Test void productionRelayClassesHaveNoClientCryptoAndSchemaHasNoContentTables() throws Exception {
+    @Test void productionRelayClassesHaveNoClientCryptoAndSchemaHasNoPlaintextContentTables() throws Exception {
         try (var paths = Files.walk(Path.of("target/classes/app/vanishr/relay"))) {
             for (Path path : paths.filter(file -> file.toString().endsWith(".class")).toList()) {
                 String bytecode = new String(Files.readAllBytes(path), StandardCharsets.ISO_8859_1);
@@ -1589,7 +1589,10 @@ class RelayIntegrationTest {
             }
         }
         List<String> tables = database.queryForList("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name", String.class);
-        assertEquals(List.of("account_blocks", "account_deletion_receipts", "accounts", "admin_identity", "admin_introductions", "devices", "fallback_prekeys", "flyway_schema_history", "group_members", "prekeys", "private_groups"), tables);
+        assertEquals(List.of("account_backups", "account_blocks", "account_deletion_receipts", "accounts", "admin_identity", "admin_introductions", "devices", "fallback_prekeys", "flyway_schema_history", "group_members", "prekeys", "private_groups"), tables);
+        // The only stored user blob is one client-encrypted backup per account with no plaintext metadata column.
+        assertEquals(List.of("user_id", "ciphertext", "updated_at", "expires_at"), database.queryForList(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='account_backups' ORDER BY ordinal_position", String.class));
         assertEquals(List.of("singleton", "user_id"), database.queryForList(
             "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='admin_identity' ORDER BY ordinal_position", String.class));
         assertEquals(List.of("user_id", "admin_id", "introduced_at"), database.queryForList(
@@ -1639,6 +1642,116 @@ class RelayIntegrationTest {
             .andExpect(status().isMethodNotAllowed());
         request(get("/account/profile"), bob).andExpect(status().isOk()).andExpect(jsonPath("$.displayName").value("Receiver Profile"));
         }
+
+    private static byte[] randomBytes(int length) {
+        byte[] value = new byte[length];
+        new java.security.SecureRandom().nextBytes(value);
+        return value;
+    }
+
+    private MockHttpServletRequestBuilder backup(byte[] ciphertext) {
+        return put("/account/backup").contentType("application/octet-stream").content(ciphertext);
+    }
+
+    @Test void encryptedBackupIsOwnerScopedOpaqueReplaceableAndDeletable() throws Exception {
+        Device alice = device("backup_alice"), bob = device("backup_bob");
+        request(backup(randomBytes(128)), null).andExpect(status().isUnauthorized());
+        request(get("/account/backup"), null).andExpect(status().isUnauthorized());
+        request(get("/account/backup"), alice).andExpect(status().isNotFound()).andExpect(jsonPath("$.error").value("not_found"));
+        request(get("/account/backup/status"), alice).andExpect(status().isOk()).andExpect(jsonPath("$.exists").value(false))
+                .andExpect(jsonPath("$.size").value(0));
+
+        byte[] first = randomBytes(1000);
+        long before = System.currentTimeMillis();
+        request(backup(first), alice).andExpect(status().isOk()).andExpect(jsonPath("$.exists").value(true))
+                .andExpect(jsonPath("$.size").value(1000))
+                .andExpect(jsonPath("$.updatedAt").value(org.hamcrest.Matchers.greaterThan(before - 600_000)))
+                .andExpect(jsonPath("$.expiresAt").value(org.hamcrest.Matchers.greaterThan(before + Duration.ofDays(89).toMillis())));
+        request(get("/account/backup"), alice).andExpect(status().isOk()).andExpect(content().contentType("application/octet-stream"))
+                .andExpect(content().bytes(first));
+        assertEquals(Duration.ofDays(90).toSeconds(), database.queryForObject(
+                "SELECT EXTRACT(EPOCH FROM (expires_at - updated_at))::bigint FROM account_backups WHERE user_id = ?", Long.class, alice.userId()));
+
+        request(get("/account/backup"), bob).andExpect(status().isNotFound());
+        request(get("/account/backup/status"), bob).andExpect(jsonPath("$.exists").value(false));
+        byte[] replacement = randomBytes(64);
+        request(backup(replacement), alice).andExpect(status().isOk()).andExpect(jsonPath("$.size").value(64));
+        request(get("/account/backup"), alice).andExpect(content().bytes(replacement));
+        assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM account_backups", Integer.class));
+
+        request(delete("/account/backup"), bob).andExpect(status().isNoContent());
+        request(get("/account/backup"), alice).andExpect(status().isOk());
+        request(delete("/account/backup"), alice).andExpect(status().isNoContent());
+        request(delete("/account/backup"), alice).andExpect(status().isNoContent());
+        request(get("/account/backup"), alice).andExpect(status().isNotFound());
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM account_backups", Integer.class));
+    }
+
+    @Test void encryptedBackupNeedsADeviceAndBoundsItsSizeBeforeStorage() throws Exception {
+        Device owner = device("backup_bounds");
+        Device enrolling = enrollment(owner, recentLogin("backup_bounds", null));
+        request(backup(randomBytes(128)), enrolling).andExpect(status().isForbidden());
+        request(get("/account/backup"), enrolling).andExpect(status().isForbidden());
+        request(backup(randomBytes(RelayPolicy.MIN_BACKUP_BYTES - 1)), owner).andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("invalid_backup"));
+        request(backup(new byte[0]), owner).andExpect(status().isBadRequest());
+        request(backup(randomBytes(RelayPolicy.MAX_BACKUP_BYTES + 1)), owner).andExpect(status().isPayloadTooLarge())
+                .andExpect(jsonPath("$.error").value("request_too_large"));
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM account_backups", Integer.class));
+        byte[] maximum = randomBytes(RelayPolicy.MAX_BACKUP_BYTES);
+        request(backup(randomBytes(RelayPolicy.MIN_BACKUP_BYTES)), owner).andExpect(status().isOk());
+        request(backup(maximum), owner).andExpect(status().isOk()).andExpect(jsonPath("$.size").value(RelayPolicy.MAX_BACKUP_BYTES));
+        request(get("/account/backup"), owner).andExpect(status().isOk()).andExpect(content().bytes(maximum));
+        request(body(post("/account/backup"), Map.of("ciphertext", "AAAA")), owner).andExpect(status().isMethodNotAllowed());
+    }
+
+    @Test void encryptedBackupHasBoundedRetentionIsPurgedAndErasedWithTheAccount() throws Exception {
+        Device owner = device("backup_expiry");
+        request(backup(randomBytes(256)), owner).andExpect(status().isOk());
+        assertThrows(DataIntegrityViolationException.class, () -> database.update(
+                "UPDATE account_backups SET expires_at = updated_at + interval '91 days' WHERE user_id = ?", owner.userId()));
+        assertThrows(DataIntegrityViolationException.class, () -> database.update(
+                "UPDATE account_backups SET expires_at = updated_at WHERE user_id = ?", owner.userId()));
+        assertThrows(DataIntegrityViolationException.class, () -> database.update(
+                "UPDATE account_backups SET ciphertext = '\\x00'::bytea WHERE user_id = ?", owner.userId()));
+
+        // The 90-day bound is absolute hours, so a daylight-saving session time zone cannot stretch or shrink it.
+        for (String zone : List.of("UTC", "America/Los_Angeles", "Asia/Kolkata")) {
+            var session = new org.springframework.jdbc.datasource.SingleConnectionDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword(), true);
+            try {
+                JdbcTemplate zoned = new JdbcTemplate(session);
+                zoned.execute("SET TIME ZONE '" + zone + "'");
+                String start = "timestamptz '2026-10-09 12:00:00+00'";
+                assertEquals(1, zoned.update("UPDATE account_backups SET updated_at = " + start + ", expires_at = " + start
+                        + " + interval '2160 hours' WHERE user_id = ?", owner.userId()), zone);
+                assertThrows(DataIntegrityViolationException.class, () -> zoned.update("UPDATE account_backups SET updated_at = " + start
+                        + ", expires_at = " + start + " + interval '2161 hours' WHERE user_id = ?", owner.userId()), zone);
+                new AccountBackups(zoned).put(owner.userId(), randomBytes(128));
+                assertEquals(Duration.ofDays(90).toSeconds(), zoned.queryForObject(
+                        "SELECT EXTRACT(EPOCH FROM (expires_at - updated_at))::bigint FROM account_backups WHERE user_id = ?", Long.class, owner.userId()), zone);
+            } finally { session.destroy(); }
+        }
+
+        database.update("UPDATE account_backups SET updated_at = now() - interval '2184 hours', expires_at = now() - interval '24 hours' WHERE user_id = ?", owner.userId());
+        request(get("/account/backup"), owner).andExpect(status().isNotFound());
+        request(get("/account/backup/status"), owner).andExpect(jsonPath("$.exists").value(false));
+        assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM account_backups", Integer.class));
+        new AccountBackups(database).purgeExpired();
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM account_backups", Integer.class));
+
+        request(backup(randomBytes(256)), owner).andExpect(status().isOk());
+        Device confirming = enrollment(owner, recentLogin("backup_expiry", null));
+        request(body(delete("/account"), Map.of("confirmation", "DELETE")), confirming).andExpect(status().isNoContent());
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM account_backups", Integer.class));
+    }
+
+    @Test void encryptedBackupWritesAreRateLimitedPerDeviceAndNeverRevealStoredBytesInErrors() throws Exception {
+        Device owner = device("backup_rate");
+        for (int attempt = 0; attempt < 6; attempt++) request(backup(randomBytes(64)), owner).andExpect(status().isOk());
+        String failure = request(backup(randomBytes(64)), owner).andExpect(status().isTooManyRequests()).andReturn().getResponse().getContentAsString();
+        assertEquals("{\"error\":\"rate_limited\"}", failure);
+        request(get("/account/backup/status"), owner).andExpect(status().isOk()).andExpect(jsonPath("$.exists").value(true));
+    }
 
     private AuthService.Token recentLogin(String handle, UUID device) throws Exception {
         return json.readValue(request(body(post("/auth/login"),

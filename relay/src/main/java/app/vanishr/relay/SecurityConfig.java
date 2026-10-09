@@ -84,6 +84,7 @@ public class SecurityConfig {
             response.setHeader("Cache-Control", "no-store");
             response.setHeader("Pragma", "no-cache");
                 int limit = request.getRequestURI().startsWith("/media/") ? RelayPolicy.MAX_MEDIA_BYTES
+                    : request.getRequestURI().equals("/account/backup") ? RelayPolicy.MAX_BACKUP_BYTES
                     : request.getRequestURI().matches("/groups/[0-9a-fA-F-]{36}/messages") ? 3_000_000 : 196_608;
             if (request.getContentLengthLong() > limit) { error(response, 413, "request_too_large"); return; }
             try {

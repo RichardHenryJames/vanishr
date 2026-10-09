@@ -44,7 +44,7 @@
           <li>Account access to relay sessions and future delivery. Ephemeral queued records are cleaned up or denied under the existing bounded lifetimes described below.</li>
           <li>That account's encrypted local data and keys after the app receives an explicit <code>DELETED</code> confirmation for the original UUID. An email request cannot remotely wipe an offline phone; clear local app data yourself only if you also intend to erase all locally stored accounts.</li>
         </ul>
-        <p>Deletion does not delete your Google account or photos in your Android photo library. There is no server backup of client private keys that can restore your old chats.</p>
+        <p>Deletion does not delete your Google account or photos in your Android photo library. There is no server backup of client private keys that can restore your old chats. If you turned on the optional encrypted contacts backup, its server copy is erased with the account.</p>
       </section>
       <section id="retained"><h2>What may remain, and for how long</h2>
         <ul>

@@ -547,8 +547,9 @@ Network/provider failure does not weaken identity checks or extend content TTLs.
 
 - Java Spring Boot HTTPS relay; PostgreSQL holds accounts, editable username/display
   metadata, password verifiers, device identifiers, public prekeys, group
-  membership, deletion state and block/intro metadata only. No payload tables, private nicknames, group names,
-  or content-decryption keys.
+  membership, deletion state, block/intro metadata and, only for users who opt in, one
+  opaque client-encrypted backup blob per account. No payload tables, plaintext private
+  nicknames, group names, or content-decryption keys.
 - Official Signal libsignal on the client, not a hand-written key-agreement or ratchet.
 - Random per-image authenticated-encryption keys are transported inside Signal messages.
 - Memory-only Redis, with snapshots, AOF, replication/backups, and swap prohibited,
@@ -566,13 +567,15 @@ Network/provider failure does not weaken identity checks or extend content TTLs.
   never a sender name, message, image, media key, or access token. Offline
   ciphertext disappears at its deadline.
 - No calls, stories, reactions, searchable history, account recovery of keys,
-  cloud content backups, analytics SDK, or remotely supplied executable UI.
+  cloud backups of messages, photos, private keys or sessions, analytics SDK, or remotely
+  supplied executable UI. The only cloud backup is the opt-in, client-encrypted contacts
+  backup (see "Account backup" below); it cannot restore a conversation or an identity.
 
 ## Threats and limitations
 
 | Threat | Protection | Residual risk |
 | --- | --- | --- |
-| Database theft | Only account/profile metadata, password verifiers and public device material | Usernames, chosen shared display names, public keys and password guessing remain exposed; use strong passwords |
+| Database theft | Only account/profile metadata, password verifiers, public device material and, for opted-in users, one opaque encrypted backup blob | Usernames, chosen shared display names, public keys and password guessing remain exposed; use strong passwords. A stolen backup blob is sealed under a random 256-bit key (there is no passphrase to guess) and reveals only its size and update/expiry times |
 | Redis/blob theft | Only Signal ciphertext or authenticated encrypted images, each with TTL | Recipient/sender IDs, lengths, timing and delivery relationships are visible |
 | Backend compromise | Previously verified identities, client encryption and signed distribution keep content keys off-server | Server can deny/reorder delivery, lie about receipts, retain ciphertext, alter public keys before verification, and collect metadata |
 | Network attacker | HTTPS/WSS, certificate validation, no cleartext fallback, E2EE | Traffic analysis and denial of service remain possible |
@@ -586,6 +589,7 @@ Network/provider failure does not weaken identity checks or extend content TTLs.
 | Accidental logging | No bodies, tokens, keys, user content, SQL parameters, access logs or crypto logging | Operators/APM/proxies can override configuration; deployment review is required |
 | Expired data | Atomic expiry on every stored object; server TTL and client deadline checks; read deletion | Redis logical deletion does not prove physical RAM erasure; malicious operators, swap, dumps, snapshots and backups defeat retention promises |
 | Device backups | Android backup/transfer disabled, no-backup directory, nonexportable vault key | OEM behavior and rooted-device tools need device testing; no iOS implementation yet |
+| Account backup (opt-in) | Off by default; contacts and private nicknames only, never keys, sessions, messages, photos or credentials; AES-256-GCM under a random 256-bit recovery key the relay never sees; strict validation on restore; a contact is re-pinned only if the relay still reports exactly the identity the user verified; one blob per account, 90-day bounded retention, deleted on turn-off or account erasure; uploaded by a `dataSync` foreground service that never opens the vault | Anyone holding the recovery key plus the blob can read the contact list and nicknames (social graph); a lost key means no recovery; the key sits in the unlocked phone's protected vault, so a compromised unlocked phone can read it; a dishonest relay can delete the blob or serve an older once-verified copy and sees upload timing and size; restoring a contact whose identity changed still needs fresh verification; Play Console foreground-service and data-safety declarations must be updated before release |
 | Supply-chain compromise | Pinned versions, signed client releases, separate release trust | Dependency pinning is not an audit; review advisories and verify release artifacts before production |
 
 ## Release gates

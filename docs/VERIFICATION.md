@@ -1,7 +1,73 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-10-08 UTC. This is a development foundation,
+Evidence refreshed on Windows, 2026-10-09 UTC. This is a development foundation,
 not a production security assessment or independent audit.
+
+## Release 0.5.7 / Encrypted contacts backup
+
+Release 0.5.7 / code 38 adds an opt-in backup of verified contacts and private nicknames
+([design](ENCRYPTION.md#8-account-backup-opt-in),
+[threat model](THREAT-MODEL.md#threats-and-limitations)), uploaded by a second `dataSync`
+foreground service, with restore on a new phone. It needs relay schema 13, which is deployed
+before the APK is offered. This revision records the pre-release evidence below; the deployment
+and publication results are appended only after they are verified.
+
+**Pre-release local build 0.5.7 / code 38, built on 2026-10-09.** It was packaged
+with `package-apk.ps1` (Google/Firebase client configuration validated, relay health check passed,
+release lint passed, signature verified). The release stage rebuilds the APK, so the published
+file's hash is recorded in the publication result, not here.
+Local build: **44,471,474 bytes**, SHA-256 `4b2dbe6c1a6c3c25fcf784baa3f25b07faf7d56a026307c8f66854b7d8042136`;
+min API 28, target API 36. It is signed with the same certificate as the published 0.5.6
+(certificate SHA-256 `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`), so it can
+update that release in place. Its 15 manifest permissions are identical to 0.5.6; the only
+manifest addition is the `BackupService` declaration (`dataSync`). The backup flows were exercised
+only in the unminified QA build; the R8 mapping keeps the backup record types, but the minified
+build was not run against a relay before this release.
+
+Demonstrated on 2026-10-09 (all with synthetic accounts and relays):
+
+- `verify.ps1 -Android` passed. client-core: 19 tests, including six for the backup
+  cipher (RFC 5869 HKDF vectors cross-checked with an independent .NET implementation,
+  every-byte tamper rejection, wrong key/account, exact 512 KiB bound, strict recovery-key parsing).
+  Relay: 99 tests in that run, with PostgreSQL/Redis containers. Four new
+  integration tests cover authentication, owner isolation, replace/delete, size bounds
+  (including 413 above 512 KiB), device-only access, bounded expiry and purge, account-erasure
+  cascade and the write rate limit. The schema guard now pins the new table's exact columns,
+  and the relay JAR still has no client-crypto dependency. After an opt-in live probe was added
+  to `LiveRelayTest`, `mvn -pl relay -am test` passed again: 100 relay tests, 0 failures, with the
+  two live tests skipped because they run only against an explicit relay origin.
+- A first full run failed one new relay test: the 90-day bound was written as calendar days,
+  which a daylight-saving session time zone stretches by an hour. It is now 2,160 absolute hours
+  in both the statement and the CHECK constraint. The test exercises UTC, America/Los_Angeles and
+  Asia/Kolkata sessions, checks the CHECK boundary at fixed timestamps, and failed against the
+  calendar-day variant on 2026-10-09 (a window that crosses a daylight-saving change).
+- Android: 13 JVM unit tests (seven new: strict snapshot validation, limits, redaction, sealing),
+  debug and release lint with no issue in the new files, and an R8-minified release build that
+  keeps the record types Gson needs.
+- Isolated QA instrumentation on the dedicated Android 16 / API 36 emulator: five new
+  engine-level tests passed, including a real `BackupService` start that uploads the sealed blob
+  to a synthetic relay and stops itself, a restore that re-pins only the contact whose relay
+  identity is unchanged (changed, blocked, automatic and username-less contacts excluded), wrong,
+  malformed and damaged inputs restoring nothing, and turn-off keeping the key when the server
+  delete fails. Two new UI tests passed (secure sheets, no key shown until requested), as did all
+  41 account-safety tests.
+- The full screen-flow suite ran 129 tests. Three fail identically on the unmodified HEAD build
+  (`chatTypingAndSendDoNotWaitForBusyEncryptedStorage`, a 100 ms timing threshold;
+  `notificationColdStartIntentOpensTheChatAndKeepsViewOnceClosed`;
+  `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`), so they pre-date this work on this
+  emulator; recorded earlier runs used Android 12. One pixel-colour check was flaky and passed on
+  rerun. One new UI test raced the automatic refresh and was made deterministic.
+
+**Not verified before deployment:** schema 13 or any run against the live relay; a real rate limiter with
+200 restored contacts; physical devices, OEM foreground-service/Doze behavior and Android 12;
+the Android 15 `onTimeout` path; the release build at runtime; accessibility and narrow-screen
+layouts of the new sheets; Play Console declarations and Data safety
+([checklist](PLAY-STORE.md#foreground-service-declaration-draft)); any independent
+cryptographic review. The feature changes the earlier "no cloud content backups" non-goal; the
+project owner gave the go-ahead to release it on 2026-10-09, and the threat model, public
+privacy/security/delete-account/Android pages and Play checklist now describe it. The
+in-app policy version `2026-10-02` was not changed, so existing users are not forced to re-accept;
+the opt-in sheet itself discloses what the backup contains.
 
 ## Release 0.5.6 / Google and password account deletion confirmation
 

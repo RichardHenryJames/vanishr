@@ -84,7 +84,7 @@ public class AccountSafety {
         for (UUID group : owned) database.update(
                 "UPDATE private_groups SET revision = revision + 1, epoch = ?, closed_at = now() WHERE id = ?", UUID.randomUUID(), group);
         database.update("DELETE FROM admin_introductions WHERE user_id = ? OR admin_id = ?", actor.userId(), actor.userId());
-        // Cascades erase devices/prekeys, memberships, owned closed groups, and both block directions.
+        // Cascades erase devices/prekeys, memberships, owned closed groups, the encrypted backup, and both block directions.
         if (database.update("DELETE FROM accounts WHERE id = ? AND deletion_state = 'DELETING'", actor.userId()) != 1)
             throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "account_cleanup_failed");
         receipts.complete(actor.userId());

@@ -47,6 +47,8 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
         this.file = new AtomicFile(new File(context.getNoBackupFilesDir(), "vault.bin"));
     }
 
+    Context applicationContext() { return context; }
+
     private static KeyStore keyStore() throws Exception {
         KeyStore store = KeyStore.getInstance("AndroidKeyStore");
         store.load(null);
@@ -561,6 +563,7 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
             for (String name : names("")) if (!name.startsWith(SAVED_ACCOUNT)) remove(name);
             return null;
         }, true);
+        BackupState.clear(context, owner);
     }
 
     void stopAccountPush() throws IOException {

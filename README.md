@@ -12,6 +12,17 @@ license notices at **https://vanishr-download.vercel.app**.
 The public [update feed](https://vanishr-download.vercel.app/updates.json), not
 the latest Git version, determines which release users can download and discover.
 
+Release **0.5.7/code 38** adds an optional, off-by-default encrypted contacts backup.
+Verified contacts and private nicknames are sealed on the phone with a recovery key
+only the user holds and uploaded by a short `dataSync` foreground service; a new
+phone restores a contact only if the relay still reports exactly the identity the
+user verified before. It never includes private keys, sessions, messages or photos.
+It requires relay schema 13, which is deployed before the APK is offered, and does
+not change the Play 0.5.1 declarations, which need review before any Play build
+includes it. See [encryption](docs/ENCRYPTION.md#8-account-backup-opt-in) and
+[verification](docs/VERIFICATION.md#release-057--encrypted-contacts-backup) for what was
+and was not tested.
+
 Release **0.5.6/code 37** fixes fresh Google/password deletion confirmation
 being rejected for a small phone/server clock difference. It adds clear,
 account-bound retry and confirmed-deletion feedback without bypassing ownership

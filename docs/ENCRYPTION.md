@@ -6,7 +6,8 @@
 libsignal supplies identity key generation and its native cryptographic RNG;
 the app does not implement curve arithmetic or random seeding. The libsignal
 registration identifier is generated using `KeyHelper.generateRegistrationId`.
-No private key is uploaded, logged, placed in intents, or backed up.
+No private key is uploaded, logged, placed in intents, or backed up. (The opt-in
+account backup in section 8 contains no key material.)
 
 Android Keystore cannot directly run all libsignal identity/Kyber/ratchet
 operations. The app therefore wraps serialized private protocol state using a
@@ -162,7 +163,47 @@ Device generation changes revoke old bearer sessions even if an identifier is
 reused. Outstanding old-device delivery is inaccessible to the new identity
 and expires normally. Contacts must remove the old pin/session and independently
 verify the new identity. This does not recover messages or erase a lost phone.
-No password-reset or private-key recovery service is implemented.
+No password-reset or private-key recovery service is implemented. The opt-in
+[account backup](#8-account-backup-opt-in) restores a verified contact list only; it
+never restores keys, sessions or messages.
+
+## 8. Account backup (opt-in)
+
+An optional backup lets a user bring verified contacts and private nicknames to a
+replacement phone. It is off by default. It never contains identity, ratchet or prekey
+material, messages, photos, credentials or group sender keys.
+
+- **Contents (version 1).** For each independently verified direct contact (automatic
+  admin introductions are excluded; at most 200): account UUID, device UUID, the public
+  identity key the user verified, username, shared profile name and private nickname.
+- **Recovery key.** 256 random bits from `SecureRandom`, shown as 52 base32 characters
+  in groups of four. After setup it is kept in the Keystore-protected vault so the
+  refresh can run, and can be shown again from the app. It is never sent to the relay,
+  logged or put in an intent. There is no recovery service: without the key the backup
+  cannot be opened, and anyone holding the key can open the blob.
+- **Format.** `VBK1` | version 1 | account UUID | 16-byte random salt | 12-byte random
+  nonce | AES-256-GCM ciphertext and tag. The AES key is HKDF-SHA-256 (RFC 5869) of the
+  recovery key, using the per-backup salt and the account UUID as context. The first 37
+  bytes are authenticated data, so another account's blob, a changed header or any modified
+  byte fails with one generic error. The maximum is 512 KiB, the relay's limit. These are
+  standard primitives, the same JCA AES-GCM family used for images; no new protocol is
+  introduced. The RFC 5869 test vectors run in the client-core unit tests.
+- **Upload.** Only a visible app can start it, either from Backup & restore or at most
+  once a day when the app opens (a failed attempt waits 30 minutes). The client seals the
+  blob while the vault is open and hands only the ciphertext and a short-lived access token
+  to `BackupService`, a `dataSync` foreground service with a Cancel action. The service
+  never opens the vault or sees the key, and records only success/failure timestamps in a
+  preferences file. The relay keeps one blob per account for 90 days from its last upload.
+- **Restore.** After signing in on the new phone the user enters the key. The client
+  downloads the blob, authenticates it, validates every field strictly, then asks the relay
+  for each contact's *current* identity. A contact is restored and pinned only if its device
+  and identity key are exactly those the user verified before. Changed, missing, blocked or
+  already-present contacts are left alone, so a changed identity must be verified again.
+  Nothing is trusted because a backup said so. A dishonest relay can still delete the blob
+  or serve an older copy of it, which can only bring back an earlier, once-verified contact.
+- **Turning off** deletes the server copy first and then forgets the key; if the request
+  fails, backup stays on. Signing out parks the key with the other account data;
+  account deletion erases the server row (cascade) and the local key.
 
 ## Group encryption
 

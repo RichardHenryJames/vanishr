@@ -71,6 +71,7 @@ final class ChatEngine implements AutoCloseable {
     private final ProfilePhotos photos;
     private final ContactPresence presence;
     private final AdminOnboarding onboarding;
+    private final AccountBackup backup;
     private final AccountSafety safety;
     private Account account;
     private volatile RelayApi api;
@@ -102,6 +103,7 @@ final class ChatEngine implements AutoCloseable {
         photos = new ProfilePhotos(this,vault);
         presence = new ContactPresence(this);
         onboarding = new AdminOnboarding(this, vault, adminPin);
+        backup = new AccountBackup(this, vault);
         safety = Objects.requireNonNull(safetyFactory.apply(this, vault));
         if (safety.deletionPending()) {
             try { safety.retryPendingDeletion(); }
@@ -135,6 +137,7 @@ final class ChatEngine implements AutoCloseable {
     ProfilePhotos photos() { return photos; }
     ContactPresence presence() { return presence; }
     AdminOnboarding onboarding() { return onboarding; }
+    AccountBackup backup() { return backup; }
     AccountSafety safety() { return safety; }
     boolean independentlyVerified(UUID userId) {
         return signal != null && !safety.deletionPending() && !safety.isBlocked(userId) && signal.isVerified(userId)
@@ -914,6 +917,14 @@ final class ChatEngine implements AutoCloseable {
         if (socket != null) socket.cancel();
         socket = null;
         if (wake != null) connect(wake);
+    }
+
+    /** Lets a background upload start with a token that will outlive it, without ending a still-usable session. */
+    void renewAccessIfExpiringWithin(long millis) throws Exception {
+        if (account == null || api == null || !authenticated()) throw new SecurityException("Sign in before using backup");
+        if (accessReady() && account.expiresAt() - System.currentTimeMillis() >= millis) return;
+        if (remembered()) refreshSession(true);
+        else if (!accessReady()) throw new RelayApi.ApiFailure(401);
     }
 
     void invalidateToken() throws Exception {

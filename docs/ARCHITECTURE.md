@@ -18,11 +18,14 @@ flowchart LR
 ## Ownership
 
 - `client-core`: official libsignal 0.102.3 session adapter, independently pinned
-  identities, authenticated content envelope, AES-256-GCM image encryption.
+  identities, authenticated content envelope, AES-256-GCM image encryption and the
+  AES-256-GCM/HKDF sealing of the opt-in account backup.
 - `android`: native UI, Android Keystore storage, crash-consistent ciphertext
-  outbox and acknowledgements, image import, expiry, notifications, HTTPS/WSS.
+  outbox and acknowledgements, image import, expiry, notifications, HTTPS/WSS, and
+  the opt-in contacts backup with its `dataSync` upload service.
 - `relay`: Spring Boot 3.5.16, BCrypt account login, opaque hashed-token sessions,
-  PostgreSQL public prekey distribution, atomic Redis delivery and deletion.
+  PostgreSQL public prekey distribution, atomic Redis delivery and deletion, and
+  bounded storage of one opaque encrypted backup blob per opted-in account.
 - `infra`: digest-pinned local containers, verified TLS for every service,
   memory-bounded Redis without disk persistence, replication or swap.
 
@@ -172,6 +175,26 @@ and never overwrites the nickname or pinned identity. At most ten contacts and t
 current account are refreshed every thirty seconds while the app synchronizes.
 An old username can be claimed by another account, but cannot redirect a saved chat.
 
+## Account backup (opt-in)
+
+Backup is off by default and covers only independently verified contacts and their
+private nicknames; never keys, sessions, messages, photos or credentials. Details and
+limits are in [ENCRYPTION.md](ENCRYPTION.md#8-account-backup-opt-in).
+
+```mermaid
+flowchart LR
+    V[Open app + unlocked vault] -->|seal contacts with recovery key| B[Sealed blob + short-lived token]
+    B --> S[BackupService: dataSync foreground service]
+    S -->|HTTPS PUT /account/backup| R[Relay: one opaque blob per account, 90-day TTL]
+    R -->|GET after sign-in + recovery key| N[New phone: authenticate, validate, re-check identities]
+```
+
+The service can only be started while the app is visible (Android restricts foreground
+services started from the background), so automatic refresh happens when the app opens
+and a backup is due. The vault closes when the app is backgrounded, which is why the blob is
+sealed first and the service holds no key. Restore pins a contact only when the relay still
+reports the identity the user verified earlier.
+
 ## Retention semantics
 
 Expiry modes: `VIEW_ONCE`, `HOUR_1`, `HOURS_6`, `HOURS_24`. Client expiry starts
@@ -216,9 +239,11 @@ Devices offline for 24 hours lose expired pending content. One-time public keys
 also expire after 24 hours; the separate fallback can outlast that window but
 does not extend any message lifetime. Redis restart
 loses pending delivery and tokens by design. PostgreSQL persists only minimal
-accounts/devices/public keys and group membership metadata. There is no message
+accounts/devices/public keys and group membership metadata, plus the opaque encrypted
+backup blob of users who opt in. There is no message
 recovery, history search, server-side media decoding, reactions, calls or cloud
-chat backup. A 200-member limit is not a load guarantee; full multi-device load
+chat backup. The only backup is the opt-in contacts backup above, which cannot restore a
+conversation. A 200-member limit is not a load guarantee; full multi-device load
 and independent group-protocol integration review remain release requirements.
 
 ## Operational boundaries

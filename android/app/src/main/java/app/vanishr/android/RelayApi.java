@@ -167,6 +167,16 @@ final class RelayApi implements AutoCloseable {
 
     byte[] groupMedia(UUID group,UUID message) throws Exception { return execute(request("/groups/"+group+"/messages/"+message+"/media").get().build(),app.vanishr.crypto.ImageCipher.MAX_IMAGE_BYTES+16); }
 
+    AccountBackup.Status backupUpload(byte[] ciphertext) throws Exception {
+        byte[] response = execute(request("/account/backup").put(RequestBody.create(ciphertext, MediaType.get("application/octet-stream"))).build(), 4096);
+        try {
+            AccountBackup.Status status = JSON.fromJson(new String(response, StandardCharsets.UTF_8), AccountBackup.Status.class);
+            return status == null ? new AccountBackup.Status(true, ciphertext.length, 0, 0) : status;
+        } catch (JsonParseException failure) { throw new IOException("Invalid relay response"); }
+    }
+
+    byte[] backupDownload() throws Exception { return execute(request("/account/backup").get().build(), app.vanishr.crypto.BackupCipher.MAX_BLOB_BYTES); }
+
     ContactPresence.Status[] presence(ContactPresence.Update update) throws Exception {
         if (cancelled) throw new IOException("Relay connection closed");
         if (sessionRefresh != null) sessionRefresh.refresh(false);

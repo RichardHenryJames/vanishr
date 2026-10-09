@@ -47,6 +47,7 @@ public final class MainActivity extends AppCompatActivity {
     private boolean photoPermissionsRequested;
     private boolean photoPermissionPending;
     private boolean preparingPhotos;
+    private boolean preparingBackup;
     private record PhotoChoice(UUID account, ChatEngine.Peer peer, RemotePhotoSession.Session request) { }
     private final ActivityResultLauncher<String[]> photoPermissions = registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(), result -> photoPermissionsResult());
     private void photoPermissionsResult() {
@@ -502,6 +503,7 @@ public final class MainActivity extends AppCompatActivity {
                     registerPush();
                     queueSync();
                     continuePhotoChoice();
+                    maybeBackup(loaded);
                 });
             } catch (Exception failure) {
                 vault.close();
@@ -1922,6 +1924,7 @@ public final class MainActivity extends AppCompatActivity {
             startActivity(Intent.createChooser(share, "Vanishr username"));
         }));
         panel.addView(profileAction("Verify identity", R.drawable.ic_shield_check, this::identityDialog));
+        panel.addView(profileAction("Backup & restore", R.drawable.ic_lock_keyhole, this::backupDialog));
         panel.addView(design.spacer(8)); panel.addView(design.divider()); panel.addView(design.spacer(8));
         SwitchMaterial notifications = new SwitchMaterial(this);
         notifications.setTextSize(13); notifications.setTypeface(design.font(500)); notifications.setMinHeight(dp(58));
@@ -2076,6 +2079,179 @@ public final class MainActivity extends AppCompatActivity {
         code.setTypeface(Typeface.MONOSPACE); code.setPadding(dp(24), dp(12), dp(24), dp(20));
         showDialog(new SecureSheet.Builder(this).setTitle("Safety number").setView(code)
                 .setPositiveButton("Close", null).create());
+    }
+
+    private void backupDialog() {
+        ChatEngine current = engine;
+        if (current == null || current.account() == null || !current.authenticated() || busy) return;
+        boolean enabled;
+        try { enabled = current.backup().enabled(); }
+        catch (RuntimeException unavailable) { problem("Backup settings are unavailable."); return; }
+        dismissContent();
+        LinearLayout panel = vertical(); panel.setPadding(dp(22), dp(8), dp(22), dp(12));
+        if (!enabled) {
+            panel.addView(design.text("Back up your verified contacts and the private nicknames you gave them, so you can restore them on a new phone. "
+                + "The backup is encrypted on this phone with a recovery key that only you hold. Vanishr cannot read the backup or recover the key. "
+                + "Messages, photos, private keys and sign-in details are never backed up.", 13, 500, INK));
+            panel.addView(design.spacer(10));
+            panel.addView(profileAction("Turn on backup", R.drawable.ic_lock_keyhole, () -> beginBackup(current)));
+            panel.addView(profileAction("Restore from backup", R.drawable.ic_arrow_up, () -> restoreDialog(current)));
+        } else {
+            panel.addView(design.text(backupSummary(current.account().userId()), 13, 500, INK));
+            panel.addView(design.spacer(10));
+            panel.addView(profileAction("Back up now", R.drawable.ic_arrow_up, () -> { dismissContent(); startBackup(current, true); }));
+            panel.addView(profileAction("Show recovery key", R.drawable.ic_key_round, () -> recoveryKeySheet(current, false)));
+            MaterialButton off = profileAction("Turn off and delete backup", R.drawable.ic_trash_2, () -> disableBackupDialog(current));
+            off.setTextColor(Ui.ERROR); off.setIconTint(android.content.res.ColorStateList.valueOf(Ui.ERROR)); panel.addView(off);
+        }
+        ScrollView scroll = new ScrollView(this); scroll.addView(panel);
+        showDialog(new SecureSheet.Builder(this).setTitle("Backup & restore").setView(scroll).setNegativeButton("Close", null).create());
+    }
+
+    private String backupSummary(UUID owner) {
+        long success = BackupState.lastSuccess(this, owner), now = System.currentTimeMillis();
+        boolean failed = BackupState.lastFailed(this, owner);
+        if (BackupService.busy()) return "Backing up now. You can leave Vanishr; the upload finishes in the background.";
+        if (success == 0) return failed ? "Backup is on, but the first upload did not finish. Vanishr will try again when you open it."
+            : "Backup is on. The first upload is waiting to run.";
+        String when = now - success < 60_000 ? "just now" : android.text.format.DateUtils.getRelativeTimeSpanString(
+            success, now, android.text.format.DateUtils.MINUTE_IN_MILLIS).toString().toLowerCase(Locale.getDefault());
+        return "Backup is on. Last uploaded " + when + "." + (failed ? " The latest attempt failed and will be retried." : "");
+    }
+
+    private void beginBackup(ChatEngine current) {
+        var status = new java.util.concurrent.atomic.AtomicReference<AccountBackup.Status>();
+        submit(() -> status.set(current.backup().serverStatus()), () -> {
+            if (engine != current) return;
+            if (!status.get().exists()) { enableBackup(current); return; }
+            showDialog(new SecureSheet.Builder(this).setTitle("Replace the existing backup?")
+                .setMessage("A backup already exists for this account. Turning on backup creates a new recovery key and replaces it. "
+                    + "To bring those contacts to this phone, choose Restore instead.")
+                .setNegativeButton("Cancel", null).setNeutralButton("Restore instead", (dialog, which) -> restoreDialog(current))
+                .setPositiveButton("Replace", (dialog, which) -> enableBackup(current)).create());
+        });
+    }
+
+    // The key is stored before it is shown, so leaving the app to copy it never loses it; it can be shown again later.
+    private void enableBackup(ChatEngine current) {
+        if (busy) return;
+        byte[] key = app.vanishr.crypto.BackupCipher.newRecoveryKey();
+        submit(() -> current.backup().enable(key), () -> {
+            Arrays.fill(key, (byte) 0);
+            if (engine != current) return;
+            recoveryKeySheet(current, true);
+            startBackup(current, false);
+        }, failure -> { Arrays.fill(key, (byte) 0); showFailure(failure); });
+    }
+
+    private void recoveryKeySheet(ChatEngine current, boolean first) {
+        String text;
+        try { text = current.backup().recoveryKey(); }
+        catch (RuntimeException failure) { problem("The recovery key is unavailable."); return; }
+        dismissContent();
+        LinearLayout content = vertical(); content.setPadding(dp(22), dp(8), dp(22), dp(12));
+        content.addView(design.text((first ? "Backup is on. " : "") + "Write this key down or keep it in a password manager. You need it to restore your contacts on a new phone. "
+            + "Vanishr cannot recover it for you. Keep it private: it unlocks your backup. You can show it again from Backup & restore.", 13, 500, INK));
+        content.addView(design.spacer(14));
+        TextView code = design.text(text, 14, 700, INK);
+        code.setTypeface(Typeface.MONOSPACE); code.setContentDescription("Recovery key");
+        content.addView(code);
+        ScrollView scroll = new ScrollView(this); scroll.addView(content);
+        showDialog(new SecureSheet.Builder(this).setTitle("Your recovery key").setView(scroll).setPositiveButton("Done", null).create());
+    }
+
+    private void disableBackupDialog(ChatEngine current) {
+        dismissContent();
+        showDialog(new SecureSheet.Builder(this).setTitle("Turn off backup?")
+            .setMessage("The encrypted backup is deleted from the Vanishr server and this phone forgets the recovery key. "
+                + "Your contacts on this phone are not changed. You will not be able to restore from the deleted backup.")
+            .setNegativeButton("Cancel", null).setPositiveButton("Turn off", (dialog, which) -> {
+                if (BackupService.busy()) { problem("A backup is still uploading. Try again in a moment."); return; }
+                submit(current.backup()::disable, this::backupDialog);
+            }).create());
+    }
+
+    private void restoreDialog(ChatEngine current) {
+        if (current == null || !current.authenticated() || busy) return;
+        dismissContent();
+        LinearLayout content = vertical(); content.setPadding(dp(22), dp(8), dp(22), dp(12));
+        content.addView(design.text("Enter the recovery key you saved when backup was turned on. A contact is restored only when its current identity matches "
+            + "the one you verified before; anything else must be verified again. Keep Vanishr open until this finishes.", 13, 500, INK));
+        content.addView(design.spacer(12));
+        Ui.Field key = design.field("Recovery key", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
+        key.input().setTypeface(Typeface.MONOSPACE);
+        content.addView(key.view());
+        ScrollView scroll = new ScrollView(this); scroll.addView(content);
+        SecureSheet sheet = new SecureSheet.Builder(this).setTitle("Restore from backup").setView(scroll)
+            .setNegativeButton("Cancel", null).setPositiveButton("Restore", null).create();
+        sheet.setOnShowListener(ignored -> sheet.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+            if (busy || engine != current) return;
+            String text = key.input().getText().toString();
+            if (text.isBlank()) { key.layout().setError("Enter your recovery key"); return; }
+            key.input().setText(""); sheet.dismiss();
+            var result = new java.util.concurrent.atomic.AtomicReference<AccountBackup.Result>();
+            submit(() -> result.set(current.backup().restore(text)), () -> {
+                if (engine != current) return;
+                render(); restoreFinished(result.get()); queueSync(); startBackup(current, false);
+            }, failure -> restoreFailed(current, failure));
+        }));
+        showDialog(sheet);
+    }
+
+    private void restoreFinished(AccountBackup.Result result) {
+        StringBuilder text = new StringBuilder(result.restored() + (result.restored() == 1 ? " contact restored." : " contacts restored."));
+        if (result.present() > 0) text.append(' ').append(result.present()).append(" already on this phone.");
+        if (result.unrestored() > 0) text.append(' ').append(result.unrestored()).append(result.unrestored() == 1 ? " contact" : " contacts")
+            .append(" could not be restored because the account changed, was blocked or no longer exists. Add and verify them again if you still need them.");
+        text.append("\n\nBackup is on again with the same recovery key.");
+        showDialog(new SecureSheet.Builder(this).setTitle("Restore finished").setMessage(text.toString()).setPositiveButton("Done", null).create());
+    }
+
+    private void restoreFailed(ChatEngine current, Exception failure) {
+        if (failure instanceof AccountBackup.Rejected rejected && engine == current) {
+            showDialog(new SecureSheet.Builder(this).setTitle("Backup not restored").setMessage(rejected.getMessage())
+                .setNegativeButton("Close", null).setPositiveButton("Try again", (dialog, which) -> restoreDialog(current)).create());
+        } else showFailure(failure);
+    }
+
+    private void backupFailed(Exception failure) {
+        if (failure instanceof AccountBackup.Rejected rejected) problem(rejected.getMessage());
+        else showFailure(failure);
+    }
+
+    // The foreground service may only be started while the app is visible, so every backup begins here.
+    private void startBackup(ChatEngine current, boolean manual) {
+        if (!resumed || engine != current || BackupService.busy() || preparingBackup) return;
+        preparingBackup = true;
+        int generation = screenGeneration;
+        if (manual) Toast.makeText(this, "Preparing your backup...", Toast.LENGTH_SHORT).show();
+        work.execute(() -> {
+            AccountBackup.Prepared prepared = null;
+            Exception failure = null;
+            try { prepared = current.backup().prepare(); }
+            catch (Exception error) { failure = error; }
+            AccountBackup.Prepared result = prepared;
+            Exception error = failure;
+            ui.post(() -> {
+                preparingBackup = false;
+                if (!resumed || engine != current || generation != screenGeneration) { if (result != null) result.close(); return; }
+                if (error != null) { if (manual) backupFailed(error); return; }
+                try {
+                    BackupService.start(this, result);
+                    if (manual) Toast.makeText(this, "Backup started. It continues in the background.", Toast.LENGTH_LONG).show();
+                } catch (RuntimeException unavailable) {
+                    if (current.account() != null) BackupState.failed(this, current.account().userId());
+                    if (manual) problem("Backup could not start right now. Try again from Backup & restore.");
+                }
+            });
+        });
+    }
+
+    private void maybeBackup(ChatEngine current) {
+        if (!resumed || engine != current || busy || preparingBackup || BackupService.busy() || !current.authenticated()
+                || current.safety().deletionPending() || !current.safety().termsAccepted(PlayPolicy.VERSION)) return;
+        try { if (current.backup().due(System.currentTimeMillis())) startBackup(current, false); }
+        catch (RuntimeException unavailable) { /* The vault closed or the phone locked; try again on the next open. */ }
     }
 
     private void openPublicPage(String url) {

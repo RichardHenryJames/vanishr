@@ -71,6 +71,7 @@ public class ScreenFlowTest {
 
     private void resetQaFixture() throws Exception {
         assertTrue(context.getSharedPreferences("preferences", Context.MODE_PRIVATE).edit().clear().commit());
+        assertTrue(context.getSharedPreferences("backup", Context.MODE_PRIVATE).edit().clear().commit());
         new android.util.AtomicFile(new File(context.getNoBackupFilesDir(), "vault.bin")).delete();
         KeyStore store = KeyStore.getInstance("AndroidKeyStore"); store.load(null);
         for (String alias : Collections.list(store.aliases())) if (alias.startsWith("vanishr.")) store.deleteEntry(alias);
@@ -702,6 +703,72 @@ public class ScreenFlowTest {
                 SecureSheet sheet = dialog(activity);
                 assertTrue(((TextView) sheet.findViewById(android.R.id.message)).getText().toString().contains("No chat text or photos"));
                 assertFalse(descendants(sheet.getWindow().getDecorView()).stream().anyMatch(EditText.class::isInstance));
+                assertTrue((sheet.getWindow().getAttributes().flags & WindowManager.LayoutParams.FLAG_SECURE) != 0);
+            });
+        }
+    }
+
+    @Test public void backupAndRestoreSheetsAreSecureAndStateWhatIsNeverBackedUp() throws Exception {
+        signedInFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { inject(activity); invoke(activity, "accountDialog"); });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertNotNull(text(dialog(activity).getWindow().getDecorView(), "Backup & restore"));
+                invoke(activity, "backupDialog");
+            });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                SecureSheet sheet = dialog(activity);
+                View panel = sheet.getWindow().getDecorView();
+                assertNotNull(text(panel, "Turn on backup"));
+                assertNotNull(text(panel, "Restore from backup"));
+                assertTrue(descendants(panel).stream().anyMatch(view -> view instanceof TextView label
+                    && label.getText().toString().contains("Messages, photos, private keys and sign-in details are never backed up")));
+                assertTrue((sheet.getWindow().getAttributes().flags & WindowManager.LayoutParams.FLAG_SECURE) != 0);
+                invoke(activity, "restoreDialog", new Class<?>[]{ChatEngine.class}, engine);
+            });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                SecureSheet sheet = dialog(activity);
+                assertNotNull(text(sheet.getWindow().getDecorView(), "Recovery key"));
+                sheet.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+                assertTrue(descendants(sheet.getWindow().getDecorView()).stream()
+                    .filter(com.google.android.material.textfield.TextInputLayout.class::isInstance)
+                    .map(com.google.android.material.textfield.TextInputLayout.class::cast)
+                    .anyMatch(field -> "Enter your recovery key".contentEquals(field.getError())));
+                assertTrue((sheet.getWindow().getAttributes().flags & WindowManager.LayoutParams.FLAG_SECURE) != 0);
+                assertFalse(engine.backup().enabled());
+            });
+        }
+    }
+
+    @Test public void enabledBackupOffersBackupNowAndShowsTheStoredRecoveryKeyOnlyOnRequest() throws Exception {
+        signedInFixture();
+        byte[] key = BackupCipher.newRecoveryKey();
+        engine.backup().enable(key);
+        // A recent upload keeps the automatic refresh from starting a real attempt while the sheet is inspected.
+        BackupState.succeeded(context, userId, System.currentTimeMillis());
+        String formatted = BackupCipher.formatRecoveryKey(key);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { inject(activity); invoke(activity, "backupDialog"); });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                SecureSheet sheet = dialog(activity);
+                View panel = sheet.getWindow().getDecorView();
+                assertNotNull(text(panel, "Back up now"));
+                assertNotNull(text(panel, "Show recovery key"));
+                assertNotNull(text(panel, "Turn off and delete backup"));
+                assertTrue(descendants(panel).stream().anyMatch(view -> view instanceof TextView label
+                    && label.getText().toString().startsWith("Backup is on.")));
+                assertFalse("The key is never shown until requested", descendants(panel).stream().anyMatch(view -> view instanceof TextView label
+                    && label.getText().toString().contains(formatted.substring(0, 9))));
+                invoke(activity, "recoveryKeySheet", new Class<?>[]{ChatEngine.class, boolean.class}, engine, false);
+            });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                SecureSheet sheet = dialog(activity);
+                assertNotNull(text(sheet.getWindow().getDecorView(), formatted));
                 assertTrue((sheet.getWindow().getAttributes().flags & WindowManager.LayoutParams.FLAG_SECURE) != 0);
             });
         }
