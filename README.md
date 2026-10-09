@@ -17,9 +17,9 @@ Verified contacts and private nicknames are sealed on the phone with a recovery 
 only the user holds and uploaded by a short `dataSync` foreground service; a new
 phone restores a contact only if the relay still reports exactly the identity the
 user verified before. It never includes private keys, sessions, messages or photos.
-It requires relay schema 13, which is deployed before the APK is offered, and does
-not change the Play 0.5.1 declarations, which need review before any Play build
-includes it. See [encryption](docs/ENCRYPTION.md#8-account-backup-opt-in) and
+It requires relay schema 13, which was deployed before the APK was offered. It is a
+direct-download change only: the Play 0.5.1 declarations were not updated and need review
+before any Play build includes it. See [encryption](docs/ENCRYPTION.md#8-account-backup-opt-in) and
 [verification](docs/VERIFICATION.md#release-057--encrypted-contacts-backup) for what was
 and was not tested.
 

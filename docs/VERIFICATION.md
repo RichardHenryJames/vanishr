@@ -8,21 +8,21 @@ not a production security assessment or independent audit.
 Release 0.5.7 / code 38 adds an opt-in backup of verified contacts and private nicknames
 ([design](ENCRYPTION.md#8-account-backup-opt-in),
 [threat model](THREAT-MODEL.md#threats-and-limitations)), uploaded by a second `dataSync`
-foreground service, with restore on a new phone. It needs relay schema 13, which is deployed
-before the APK is offered. This revision records the pre-release evidence below; the deployment
-and publication results are appended only after they are verified.
+foreground service, with restore on a new phone. It needs relay schema 13, which was deployed
+before the APK was offered. The pre-release evidence comes first; the measured deployment and
+public-release results follow it.
 
-**Pre-release local build 0.5.7 / code 38, built on 2026-10-09.** It was packaged
+**Release build 0.5.7 / code 38, built on 2026-10-09.** It was packaged
 with `package-apk.ps1` (Google/Firebase client configuration validated, relay health check passed,
-release lint passed, signature verified). The release stage rebuilds the APK, so the published
-file's hash is recorded in the publication result, not here.
-Local build: **44,471,474 bytes**, SHA-256 `4b2dbe6c1a6c3c25fcf784baa3f25b07faf7d56a026307c8f66854b7d8042136`;
+release lint passed, signature verified). The release stage rebuilt it from the clean committed
+tree and produced identical bytes.
+APK: **44,471,474 bytes**, SHA-256 `4b2dbe6c1a6c3c25fcf784baa3f25b07faf7d56a026307c8f66854b7d8042136`;
 min API 28, target API 36. It is signed with the same certificate as the published 0.5.6
 (certificate SHA-256 `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`), so it can
 update that release in place. Its 15 manifest permissions are identical to 0.5.6; the only
 manifest addition is the `BackupService` declaration (`dataSync`). The backup flows were exercised
 only in the unminified QA build; the R8 mapping keeps the backup record types, but the minified
-build was not run against a relay before this release.
+build has not run them against a relay.
 
 Demonstrated on 2026-10-09 (all with synthetic accounts and relays):
 
@@ -58,13 +58,63 @@ Demonstrated on 2026-10-09 (all with synthetic accounts and relays):
   emulator; recorded earlier runs used Android 12. One pixel-colour check was flaky and passed on
   rerun. One new UI test raced the automatic refresh and was made deterministic.
 
-**Not verified before deployment:** schema 13 or any run against the live relay; a real rate limiter with
-200 restored contacts; physical devices, OEM foreground-service/Doze behavior and Android 12;
-the Android 15 `onTimeout` path; the release build at runtime; accessibility and narrow-screen
-layouts of the new sheets; Play Console declarations and Data safety
-([checklist](PLAY-STORE.md#foreground-service-declaration-draft)); any independent
-cryptographic review. The feature changes the earlier "no cloud content backups" non-goal; the
-project owner gave the go-ahead to release it on 2026-10-09, and the threat model, public
+**Deployment and publication, 2026-10-09 (UTC):**
+
+- **Relay.** `publish-azure.ps1 -Action Check`, then `-Action Publish`, installed the relay JAR built
+  from commit `fab7945` (its `V13__account_backups.sql` is byte-identical to the source) on the
+  existing VM in `vanishr-dev-rg`. The only Azure operations were the script's temporary artifact
+  storage account (created and deleted) and the VM run command that installs the artifact; VM size,
+  disk, network and spending settings were not changed, and the group lists only the VM, disk, NIC,
+  IP, NSG, VNet and run command afterwards. `/health` returned HTTP 200 before and after. The opt-in
+  live probe `LiveRelayTest#realHttpsStoresOneOpaqueBoundedBackupPerOwnerAndErasesItWithTheAccount`
+  passed against the public HTTPS relay: two synthetic `probe_` accounts stored, replaced and deleted
+  a backup; retention was exactly 2,160 hours; one account could not read the other's backup; 63 bytes
+  returned 400 and 512 KiB + 1 returned 413; a maximum-size 512 KiB blob made a round trip through
+  Caddy; and each device token returned 401 once its account was deleted (the test removed both
+  probe accounts).
+- **Stage audit.** After `:app:testDebugUnitTest`, `:app:exportDependencyInventory` and notice
+  generation (116 components; the committed notices did not change), `.tools\vercel-download-0.5.7`
+  held 31 files / 59,728,475 bytes (limit 99,000,000), no hidden file and no `.env`. Its generated
+  `vercel.json` is static-only, with the APK headers and a `no-store` feed. The source ZIP has 452
+  entries: 234 source files, each byte-identical to its blob in commit `fab7945`, plus 218
+  dependency-source files. Name, content and known-private-value scans of the stage, the ZIP and the
+  APK found nothing, and the dependency inventory (116) and the 16 unavailable-source entries equal
+  0.5.6's. This is recorded in `.tools\distribution-audit-0.5.7.json`; it was an inspection by the
+  release agent with automated scans, not an independent audit.
+- **Vercel.** Deployment `dpl_Ab5jhrT2UoVE7hDG2WTGxV8tKf4p` (production, READY) was uploaded from that
+  stage with the existing Vanishr project link (project and team IDs checked). The CLI moved only
+  the team alias `vanishr-download-vanishr.vercel.app`, so the canonical alias
+  `vanishr-download.vercel.app`, which still served 0.5.6, was explicitly moved to the new deployment.
+- **Public verification** (`.tools\public-release-verification-0.5.7.json`). The canonical feed
+  reports 0.5.7 / 38 with `no-store`; the 30 served files (`vercel.json` is configuration and is not
+  served) are byte-identical to the audit; the downloaded APK verifies with the original
+  certificate; CSP, nosniff, referrer, HSTS and the APK download headers are present; ten private or
+  missing paths (`/.secrets/...`, `/.env`, `/.git/config`, `/.vercel/project.json`,
+  `/google-services.json`, `/infra/azure/cloud-config.json`, `/scripts/publish-azure.ps1`, a
+  nonexistent page) return 404; and the privacy, security, delete-account and Android pages carry
+  the backup disclosure.
+- **Update on a device.** On the dedicated Android 16 / API 36 emulator, the published 0.5.6 APK was
+  installed and the public 0.5.7 APK was installed over it with `adb install -r`. The package updated
+  in place (code 37 to 38, first-install time kept), launched and stayed alive with an empty crash
+  buffer. The public APK's manifest declares `BackupService` and `PhotoSharingService` as
+  non-exported `dataSync` services and the same 15 permissions. No account existed on that emulator.
+
+**Not verified:** the in-app "Check for updates" path and an in-place update of a phone that holds
+real account data; the minified release build's backup, restore and foreground-service flows with a
+real account (only the unminified QA build ran them; the generic R8 rule keeps every record and its
+members, and the published manifest declares the service); a real rate limiter with 200 restored
+contacts; physical devices, OEM foreground-service/Doze behavior and Android 12; the Android 15
+`onTimeout` path; accessibility and narrow-screen layouts of the new sheets; Play Console
+declarations and Data safety ([checklist](PLAY-STORE.md#foreground-service-declaration-draft)); any
+independent cryptographic review.
+
+**Rollback hazard.** Schema 13 is additive, but redeploying an older relay JAR after it is applied is
+expected to fail Flyway validation (applied migration not resolved locally). There is no tested
+rollback; it would need a reviewed manual removal of the `account_backups` table and its
+`flyway_schema_history` row, so keep the V13-capable JAR for any redeploy.
+
+The feature changes the earlier "no cloud content backups" non-goal; the project owner gave the
+go-ahead to release it on 2026-10-09, and the threat model, public
 privacy/security/delete-account/Android pages and Play checklist now describe it. The
 in-app policy version `2026-10-02` was not changed, so existing users are not forced to re-accept;
 the opt-in sheet itself discloses what the backup contains.

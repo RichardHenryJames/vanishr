@@ -144,7 +144,9 @@ resources, enable paid add-ons or alter the spending limit.
 The opt-in encrypted contacts backup needs relay schema V13 (`account_backups`,
 no existing row is rewritten). Publish that relay before any app version that
 offers backup; against an older relay the backup requests fail and no backup is
-created. The relay only stores an
+created. Once V13 is applied, an older relay JAR is expected to fail Flyway
+validation, and there is no tested rollback: keep the V13-capable JAR for any
+redeploy. The relay only stores an
 opaque blob (at most 512 KiB per account, 90-day retention), so no new Azure
 resource, VM size change or paid add-on is involved; the table adds at most
 512 KiB per opted-in account to the existing PostgreSQL volume.
