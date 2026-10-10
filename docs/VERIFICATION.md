@@ -46,8 +46,8 @@ Demonstrated on 2026-10-10 (synthetic accounts and relays only):
   automatic marker, forgetting the chat and manual verification; an admin-side test with 130 introduced
   accounts keeps the open chat first, then verified contacts, within 128 and shares nothing when the
   local identity no longer matches the pin; and a UI test shows Online, Typing and Last seen in the
-  official-admin chat header. All four pass, and all four fail when `automaticConnection` is forced to
-  `false` (the old behavior), so they test the fix.
+  official-admin chat header. All four pass, and all four failed when `automaticConnection` was forced to
+  `false` (the old behavior; checked before a code review tightened two negative assertions), so they test the fix.
 - A full run of 178 QA tests (132 screen-flow, 41 account-safety, 5 backup) had 26 failures after
   Android's System UI stopped responding under host load and its "isn't responding" dialog stayed
   focused, so UiAutomator and keyboard checks could not see the app. All 26 are screen-flow tests,
@@ -57,11 +57,47 @@ Demonstrated on 2026-10-10 (synthetic accounts and relays only):
   `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`). `receiptBurstsReuseEightyMessageRowsAndExpiryClearsCachedText`,
   a scroll-position race, failed in that rerun and in one of two isolated reruns and passed in the other.
 
+**Publication, 2026-10-10 (UTC):**
+
+- **Relay.** Unchanged: `git diff ab93146 HEAD -- relay/src/main infra` is empty, so the deployed
+  schema-13 relay was not redeployed and no Azure operation ran. `/health` returned `up` after
+  publication.
+- **Build and stage.** After `:app:testDebugUnitTest`, `:app:exportDependencyInventory` and notice
+  generation (116 components; the committed notices did not change), `package-apk.ps1` built the
+  signed APK from commit `72c41fe`: **44,471,474 bytes**, SHA-256
+  `1d90827940ce3089bb4a08447e5ecb7313b4e243530812d31c11d1b49c3517d7`, min API 28, target API 36,
+  the same 15 permissions as 0.5.7 and the same certificate (SHA-256
+  `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`). The size equals 0.5.7's; the
+  hashes differ and its dex contains the new in-app summary and not the old one.
+  `.tools\vercel-download-0.5.8` holds 31 files / 59,737,488 bytes (limit 99,000,000), no hidden file
+  and no `.env`. The source ZIP has 452 entries: 234 source files, each byte-identical to its blob in
+  commit `72c41fe`, plus 218 dependency-source files. Name, content and known-private-value scans of
+  the stage, the ZIP and the APK found nothing, and the dependency inventory (116) and the 16
+  unavailable-source entries equal 0.5.7's. This is recorded in
+  `.tools\distribution-audit-0.5.8.json`; it was an inspection by the release agent with automated
+  scans, not an independent audit.
+- **Vercel.** Deployment `dpl_9GK51PD7fyf444sLChzKwj6oiab7` (production, READY) was uploaded from that
+  stage with the existing Vanishr project link (project and team IDs checked, no downgrade against the
+  published 0.5.7 feed). The CLI moved only the team alias, so the canonical alias
+  `vanishr-download.vercel.app`, which still served 0.5.7, was moved explicitly.
+- **Public verification** (`.tools\public-release-verification-0.5.8.json`). The canonical feed reports
+  0.5.8 / 39 with `no-store`; the 30 served files (`vercel.json` is configuration and is not served)
+  are byte-identical to the audit; the downloaded APK verifies with the original certificate; CSP,
+  nosniff, referrer, HSTS and the APK download headers are present; ten private or missing paths
+  return 404; and the privacy, security and Android pages carry the new status disclosure.
+- **Update on a device.** On the dedicated Android 16 / API 36 emulator the published 0.5.7 APK was
+  installed and the public 0.5.8 APK was installed over it with `adb install -r`: code 38 to 39,
+  first-install time kept, the app launched, stayed alive after 12 seconds and left an empty crash
+  buffer. No account existed on that emulator, so the status line was not exercised in the release build.
+
 **Not verified:** two real phones or a live relay (the admin identity is pinned to the production
-account and no admin was created on the shared relay); more than 128 introduced accounts on a real
-relay (a client test uses 130, the relay tests a handful); physical-phone and manufacturer
-foreground/background behavior; accessibility and narrow-screen layouts of the status line beyond the
-existing header checks; independent security review. **Known limit:** the admin's app lists at most 128
+account and no admin was created on the shared relay); the release (minified) build showing the status
+with a real account; the in-app "Check for updates" path and an update of a phone holding real account
+data; more than 128 introduced accounts on a real relay (a client test uses 130, the relay tests a
+handful); physical-phone and manufacturer foreground/background behavior; accessibility and
+narrow-screen layouts of the status line beyond the existing header checks; independent security
+review. **Rollout:** the official admin must install 0.5.8 in place and open Vanishr, and each new
+account must update, before either sees the other's status. **Known limit:** the admin's app lists at most 128
 contacts at a time (the open chat first, then verified contacts, then introduced accounts by name), so
 with more introduced accounts an account outside that list sees the admin's status only while the admin
 has its chat open. **Privacy effect:** every introduced account in the admin's list can now see when the
