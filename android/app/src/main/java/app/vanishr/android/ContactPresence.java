@@ -7,6 +7,7 @@ final class ContactPresence {
     static final long LIFETIME = 12_000;
     static final long TYPING_LIFETIME = 5_000;
     static final long LAST_SEEN_LIFETIME = 86_400_000;
+    static final int LIMIT = 128;
     record Update(List<ChatEngine.Contact> contacts, UUID typingTo, long typingForMillis, boolean lastSeen) {
         Update(List<ChatEngine.Contact> contacts, UUID typingTo, long typingForMillis) { this(contacts, typingTo, typingForMillis, true); }
         @Override public String toString() { return "PresenceUpdate[redacted]"; }
@@ -45,15 +46,28 @@ final class ContactPresence {
         return new ChatEngine.Contact(peer.userId(), peer.deviceId(), peer.identityKey());
     }
 
+    // The open chat first, then independently verified contacts, then the automatic admin connection, within the relay's limit.
+    private List<ChatEngine.Contact> audience(UUID selected) {
+        List<ChatEngine.Peer> peers = new ArrayList<>(engine.peers());
+        peers.sort(Comparator.comparing(peer -> !peer.userId().equals(selected)));
+        List<ChatEngine.Contact> verified = new ArrayList<>(), automatic = new ArrayList<>();
+        for (ChatEngine.Peer peer : peers) {
+            if (verified.size() >= LIMIT) break;
+            if (engine.independentlyVerified(peer.userId())) verified.add(identity(peer));
+            else if (automatic.size() < LIMIT && engine.automaticConnection(peer.userId())) automatic.add(identity(peer));
+        }
+        List<ChatEngine.Contact> contacts = new ArrayList<>(verified);
+        contacts.addAll(automatic);
+        contacts.sort(Comparator.comparing(contact -> !contact.userId().equals(selected)));
+        return List.copyOf(contacts.subList(0, Math.min(LIMIT, contacts.size())));
+    }
+
     Update update(long now) {
         if (!foreground || !engine.authenticated()) return null;
         UUID selected;
         long attempt;
         synchronized (this) { selected = conversation; attempt = generation; }
-        List<ChatEngine.Peer> peers = new ArrayList<>(engine.peers());
-        peers.sort(Comparator.comparing(peer -> !peer.userId().equals(selected)));
-        List<ChatEngine.Contact> contacts = peers.stream().filter(peer -> engine.independentlyVerified(peer.userId()))
-                .limit(128).map(ContactPresence::identity).toList();
+        List<ChatEngine.Contact> contacts = audience(selected);
         synchronized (this) {
             if (!foreground || generation != attempt) return null;
             long remaining = Math.max(0, Math.min(TYPING_LIFETIME, typingUntil - now));
@@ -88,7 +102,7 @@ final class ContactPresence {
 
     void accept(Status[] response, List<ChatEngine.Contact> audience, long started, long now) {
         states = Map.of();
-        if (response == null || response.length > 128 || started < 0 || now < started) throw new SecurityException("Invalid presence response");
+        if (response == null || response.length > LIMIT || started < 0 || now < started) throw new SecurityException("Invalid presence response");
         Map<UUID, Seen> received = new HashMap<>();
         Set<UUID> returned = new HashSet<>();
         for (Status status : response) {
@@ -119,7 +133,7 @@ final class ContactPresence {
         Seen state = states.get(peer.userId());
         if (state == null || !state.peer().equals(identity(peer))) return null;
         ChatEngine.Peer saved = engine.peers().stream().filter(value -> value.userId().equals(peer.userId())).findFirst().orElse(null);
-        if (saved == null || !identity(saved).equals(state.peer()) || !engine.independentlyVerified(peer.userId())) return null;
+        if (saved == null || !identity(saved).equals(state.peer()) || !engine.sharesPresence(peer.userId())) return null;
         return state;
     }
 

@@ -12,6 +12,16 @@ license notices at **https://vanishr-download.vercel.app**.
 The public [update feed](https://vanishr-download.vercel.app/updates.json), not
 the latest Git version, determines which release users can download and discover.
 
+Release **0.5.8/code 39** fixes the automatic chat between the official admin and each
+new account, which never showed Online, Typing or Last seen. It now shares them like any
+other direct chat while the saved identity still passes the app's admin pin. That chat
+remains separate from independent verification, so groups, private profile photos and
+the contacts backup still need it. **The admin and the new account must both update**;
+an older app on either side shares nothing. It is a client-only change (no relay
+update) that also makes the admin's status visible to introduced accounts. See the
+[threat model](docs/THREAT-MODEL.md#automatic-official-admin-conversations) and
+[verification](docs/VERIFICATION.md#release-058--admin-chat-presence).
+
 Release **0.5.7/code 38** adds an optional, off-by-default encrypted contacts backup.
 Verified contacts and private nicknames are sealed on the phone with a recovery key
 only the user holds and uploaded by a short `dataSync` foreground service; a new
@@ -63,7 +73,7 @@ the official relay origin and the admin's account/device/public-identity
 fingerprint, so this one conversation needs no manual safety-number step, and an
 unexpected key change blocks it. This automatic trust is separate from independent
 verification: groups, private profile photos, presence still
-require it. Existing accounts are not backfilled, and no email address is stored.
+require it (0.5.8 later made presence an exception for this one chat). Existing accounts are not backfilled, and no email address is stored.
 The relay also allows exactly one admin, permanently pinned to the existing account.
 Evidence: 22 targeted relay integration tests, 20 targeted native Android tests
 on an isolated Android 12 emulator, unit tests and QA/release lint. The full

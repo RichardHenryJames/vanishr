@@ -139,9 +139,13 @@ final class ChatEngine implements AutoCloseable {
     AdminOnboarding onboarding() { return onboarding; }
     AccountBackup backup() { return backup; }
     AccountSafety safety() { return safety; }
-    boolean independentlyVerified(UUID userId) {
+    boolean independentlyVerified(UUID userId) { return savedContact(userId) && !onboarding.automatic(userId); }
+    boolean automaticConnection(UUID userId) { return savedContact(userId) && onboarding.connected(userId); }
+    // Online, typing and last seen follow a normal chat; groups, profile photos and backups still need independent verification.
+    boolean sharesPresence(UUID userId) { return independentlyVerified(userId) || automaticConnection(userId); }
+    private boolean savedContact(UUID userId) {
         return signal != null && !safety.deletionPending() && !safety.isBlocked(userId) && signal.isVerified(userId)
-                && vault.get("contact/" + userId) != null && !onboarding.automatic(userId);
+                && vault.get("contact/" + userId) != null;
     }
     void prepareConversation(Peer peer) throws Exception { safety.requireAllowed(peer.userId()); onboarding.prepare(peer); }
     boolean realtimeReady() { return realtimeReady; }

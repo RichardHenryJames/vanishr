@@ -212,7 +212,8 @@ account/device IDs and public fingerprint. The admin's trusted client validates
 its own pinned identity and treats new participants as relay-enrolled accounts.
 It never overwrites an established peer identity automatically. Automatic
 direct-chat trust does not satisfy independent-verification requirements for
-group, profile-photo, presence features.
+group, profile-photo features. From 0.5.8 it does let the pair list each other for
+presence; groups and profile photos still need independent verification.
 
 | Method / Path | Contract |
 | --- | --- |
@@ -248,7 +249,10 @@ not plaintext JSON photo paths or a custom encryption algorithm.
 ## Online, typing and last seen
 
 Only mutually listed direct contacts with matching pinned device/key identities
-and live authenticated websocket connections receive status. Reconnecting cannot
+and live authenticated websocket connections receive status. Mutual listing
+includes the official admin and each introduced account from 0.5.8 (the relay
+treats them like any other pair; older clients simply do not list each other).
+Reconnecting cannot
 revive an old heartbeat. Redis retains a session digest and connection reference,
 not a bearer token. Online/typing durations are milliseconds remaining. Clients
 subtract request time and keep status only in memory.

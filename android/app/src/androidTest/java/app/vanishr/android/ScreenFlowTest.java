@@ -193,7 +193,7 @@ public class ScreenFlowTest {
         }));
     }
 
-    @Test public void adminOnboardingAddsOfficialAdminWithoutManualVerificationOrSharingPermissions() throws Exception {
+    @Test public void adminOnboardingAddsOfficialAdminWithoutManualVerificationOrPhotoAndGroupPermissions() throws Exception {
         SignalClient admin = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
         signedInFixture(adminPin(peerId, peerDevice, admin));
         var introduced = introduction(peerId, peerDevice, admin, "vanishr");
@@ -206,7 +206,9 @@ public class ScreenFlowTest {
         assertFalse(engine.independentlyVerified(peerId));
         engine.prepareConversation(introduced.peer());
         engine.presence().foreground(true);
-        assertTrue(engine.presence().update(android.os.SystemClock.elapsedRealtime()).contacts().isEmpty());
+        assertTrue(engine.sharesPresence(peerId));
+        assertEquals(List.of(RemotePhotoSession.contact(introduced.peer())),
+            engine.presence().update(android.os.SystemClock.elapsedRealtime()).contacts());
         engine.photos().sync();
         assertTrue(vault.names("profile-photo-request/").isEmpty());
         assertThrows(SecurityException.class, () -> new RemotePhotoSession.Prepared(engine, introduced.peer(), null));
@@ -313,6 +315,163 @@ public class ScreenFlowTest {
         adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
         assertThrows(SecurityException.class, () -> engine.onboarding().refresh());
         assertTrue(engine.peers().isEmpty());
+    }
+
+    @Test public void automaticAdminConnectionSharesPresenceLikeAVerifiedContactButNothingElse() throws Exception {
+        SignalClient admin = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(adminPin(peerId, peerDevice, admin));
+        var introduced = introduction(peerId, peerDevice, admin, "vanishr");
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(
+            userId, RemotePhotoSession.contact(introduced.peer()), List.of(introduced), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        engine.onboarding().refresh();
+        ChatEngine.Peer official = introduced.peer();
+        ChatEngine.Contact contact = RemotePhotoSession.contact(official);
+        assertFalse(engine.independentlyVerified(peerId));
+        assertTrue(engine.automaticConnection(peerId)); assertTrue(engine.sharesPresence(peerId));
+        ContactPresence presence = engine.presence();
+        presence.foreground(true); presence.conversation(peerId); presence.edited(peerId, true);
+        setField(engine, "realtimeReady", true);
+        long now = android.os.SystemClock.elapsedRealtime();
+        ContactPresence.Update update = presence.update(now);
+        assertEquals(List.of(contact), update.contacts());
+        assertEquals(peerId, update.typingTo()); assertTrue(update.lastSeen());
+        presence.accept(new ContactPresence.Status[]{new ContactPresence.Status(contact, 12_000, 5_000)}, update.contacts(), 1000, 1200);
+        assertEquals("Typing", presence.label(official, 1200)); assertEquals("Online", presence.label(official, 6000));
+        presence.accept(new ContactPresence.Status[]{new ContactPresence.Status(contact, 0, 0, 3_600_000L)}, update.contacts(), 1000, 1200);
+        assertEquals("Last seen 1 hour ago", presence.label(official, 1200));
+        engine.photos().sync();
+        assertTrue(vault.names("profile-photo-request/").isEmpty());
+        assertFalse(engine.independentlyVerified(peerId));
+
+        ChatEngine.Peer tampered = new ChatEngine.Peer(peerId, peerDevice, Base64.getEncoder().encodeToString(
+            new SignalClient(peerId, new DeviceSecurityTest.MemoryVault()).publicIdentity()), "Vanishr");
+        vault.transaction(() -> { write("contact/" + peerId, tampered); return null; });
+        assertFalse(engine.sharesPresence(peerId));
+        assertTrue(presence.update(now).contacts().isEmpty()); assertNull(presence.update(now).typingTo());
+        assertEquals("", presence.label(official, 1200));
+        vault.transaction(() -> { write("contact/" + peerId, official); return null; });
+        assertTrue(engine.sharesPresence(peerId));
+        vault.transaction(() -> { vault.put("blocked/" + peerId, new byte[]{1}); return null; });
+        assertFalse(engine.sharesPresence(peerId)); assertTrue(presence.update(now).contacts().isEmpty());
+        vault.transaction(() -> { vault.remove("blocked/" + peerId); return null; });
+        assertEquals(List.of(contact), presence.update(now).contacts());
+
+        setField(engine.onboarding(), "pin", adminPin(UUID.randomUUID(), UUID.randomUUID(), admin));
+        assertFalse(engine.automaticConnection(peerId)); assertTrue(presence.update(now).contacts().isEmpty());
+        assertNull(presence.update(now).typingTo()); assertEquals("", presence.label(official, 1200));
+        setField(engine.onboarding(), "pin", adminPin(peerId, peerDevice, admin));
+        assertTrue(engine.automaticConnection(peerId)); assertEquals("Last seen 1 hour ago", presence.label(official, 1200));
+
+        UUID stranger = UUID.randomUUID();
+        vault.transaction(() -> {
+            engine.groupSignal().verifyPeer(stranger, admin.publicIdentity());
+            write("contact/" + stranger, new ChatEngine.Peer(stranger, UUID.randomUUID(), contact.identityKey(), "Marked stranger"));
+            write("admin-contact/" + stranger, true);
+            return null;
+        });
+        assertFalse(engine.sharesPresence(stranger));
+        assertEquals(List.of(contact), presence.update(now).contacts());
+
+        engine.forget(official);
+        assertFalse(engine.sharesPresence(peerId)); assertTrue(presence.update(now).contacts().isEmpty());
+        engine.addPeer(official);
+        assertTrue(engine.independentlyVerified(peerId)); assertFalse(engine.automaticConnection(peerId));
+        assertEquals(List.of(contact), presence.update(now).contacts());
+    }
+
+    @Test public void adminPresenceAudienceKeepsTheOpenChatAndVerifiedContactsFirstWithinTheRelayLimit() throws Exception {
+        SignalClient own = new SignalClient(userId, vault);
+        signedInFixture(adminPin(userId, deviceId, own));
+        ChatEngine.Contact official = new ChatEngine.Contact(userId, deviceId, Base64.getEncoder().encodeToString(own.publicIdentity()));
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        List<AdminOnboarding.Introduction> contacts = new ArrayList<>();
+        for (int index = 1; index <= 130; index++) contacts.add(introduction(new UUID(0, index), UUID.randomUUID(), remote, String.format(Locale.ROOT, "acct_%03d", index)));
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId, official, contacts.subList(0, 64), contacts.get(63).userId()));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        engine.onboarding().first();
+        directory.set(new AdminOnboarding.Page(userId, official, contacts.subList(64, 128), contacts.get(127).userId()));
+        engine.onboarding().next();
+        directory.set(new AdminOnboarding.Page(userId, official, contacts.subList(128, 130), null));
+        engine.onboarding().next();
+        assertEquals(130, engine.peers().size());
+        ContactPresence presence = engine.presence(); presence.foreground(true);
+        long now = android.os.SystemClock.elapsedRealtime();
+        Set<UUID> firstPage = new HashSet<>();
+        for (int index = 0; index < 128; index++) firstPage.add(contacts.get(index).userId());
+
+        ContactPresence.Update update = presence.update(now);
+        assertEquals(ContactPresence.LIMIT, update.contacts().size());
+        assertEquals(firstPage, update.contacts().stream().map(ChatEngine.Contact::userId).collect(java.util.stream.Collectors.toSet()));
+        assertNull(update.typingTo());
+
+        ChatEngine.Peer last = contacts.get(129).peer();
+        presence.conversation(last.userId()); presence.edited(last.userId(), true);
+        update = presence.update(now);
+        assertEquals(ContactPresence.LIMIT, update.contacts().size());
+        assertEquals(last.userId(), update.contacts().get(0).userId()); assertEquals(last.userId(), update.typingTo());
+        assertFalse(update.contacts().stream().anyMatch(value -> value.userId().equals(contacts.get(127).userId())));
+
+        engine.addPeer(last);
+        assertTrue(engine.independentlyVerified(last.userId()));
+        presence.conversation(contacts.get(128).userId()); presence.edited(contacts.get(128).userId(), true);
+        update = presence.update(now);
+        assertEquals(ContactPresence.LIMIT, update.contacts().size());
+        assertEquals(contacts.get(128).userId(), update.contacts().get(0).userId());
+        assertEquals(contacts.get(128).userId(), update.typingTo());
+        assertEquals(last.userId(), update.contacts().get(1).userId());
+        assertFalse(update.contacts().stream().anyMatch(value -> value.userId().equals(contacts.get(126).userId())));
+        assertTrue(update.contacts().stream().anyMatch(value -> value.userId().equals(contacts.get(125).userId())));
+
+        setField(engine.onboarding(), "pin", adminPin(userId, deviceId, new SignalClient(userId, new DeviceSecurityTest.MemoryVault())));
+        update = presence.update(now);
+        assertEquals(List.of(RemotePhotoSession.contact(last)), update.contacts());
+        assertNull(update.typingTo());
+    }
+
+    @Test public void officialAdminConversationHeaderShowsOnlineTypingAndLastSeen() throws Exception {
+        SignalClient admin = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(adminPin(peerId, peerDevice, admin));
+        var introduced = introduction(peerId, peerDevice, admin, "vanishr");
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(
+            userId, RemotePhotoSession.contact(introduced.peer()), List.of(introduced), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        engine.onboarding().refresh();
+        ChatEngine.Contact contact = RemotePhotoSession.contact(introduced.peer());
+        var reportedPresence = new java.util.concurrent.atomic.AtomicReference<ContactPresence.Status>();
+        var builder = ((okhttp3.OkHttpClient) readField(engine.groupApi(), "client")).newBuilder();
+        builder.interceptors().add(0, chain -> {
+            if (chain.request().url().encodedPath().equals("/presence")) {
+                ContactPresence.Status state = reportedPresence.get();
+                return syntheticResponse(chain.request(), 200, state == null ? List.of() : List.of(state));
+            }
+            return chain.proceed(chain.request());
+        });
+        setField(engine.groupApi(), "client", builder.build());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                setField(activity, "selectedPeer", peerId); inject(activity);
+                assertNotNull(text(root(activity), "Official admin"));
+                assertEquals(View.GONE, ((TextView) readField(activity, "contactStatus")).getVisibility());
+                setField(engine, "realtimeReady", true);
+            });
+            for (String label : List.of("Online", "Typing", "Last seen 1 hour ago")) {
+                scenario.onActivity(activity -> {
+                    long now = android.os.SystemClock.elapsedRealtime();
+                    ContactPresence.Status state = label.startsWith("Last seen") ? new ContactPresence.Status(contact, 0, 0, 3_600_000L)
+                            : new ContactPresence.Status(contact, 12_000, label.equals("Typing") ? 5000 : 0);
+                    reportedPresence.set(state);
+                    engine.presence().accept(new ContactPresence.Status[]{state}, List.of(contact), now, now);
+                    invoke(activity, "refreshContactStatus");
+                });
+                awaitMainCondition(scenario, activity -> label.contentEquals(((TextView) readField(activity, "contactStatus")).getText()));
+            }
+            scenario.onActivity(activity -> {
+                assertEquals(View.VISIBLE, ((TextView) readField(activity, "contactStatus")).getVisibility());
+                assertNotNull(text(root(activity), "Official admin"));
+            });
+            snapshot(scenario, "82-official-admin-last-seen");
+        }
     }
 
     @Test public void adminOnboardingAcceptsAnEnrolledFirstMessageButNeverReplacesItsPinnedIdentity() throws Exception {

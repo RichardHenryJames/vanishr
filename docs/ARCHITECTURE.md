@@ -100,8 +100,9 @@ conversation allocates peer trust and Signal state on the admin device; the
 current page is cached in the account's encrypted vault. Contact removal leaves
 a local dismissal so refreshes cannot silently re-add it. Automatically pinned
 direct chats are distinct from independently verified contacts: private profile
-photos, presence and groups retain their original
-verification requirements. No email directory, AI service or plaintext-message
+photos and groups retain their original verification requirements, while presence
+(Online, Typing, Last seen) is shared in the automatic admin chat from 0.5.8
+only while its pinned identity still validates. No email directory, AI service or plaintext-message
 access is added.
 
 Encrypted queued messages/media and bounded session/presence records are held

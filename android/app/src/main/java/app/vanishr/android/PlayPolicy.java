@@ -11,7 +11,9 @@ final class PlayPolicy {
     static final String SUMMARY = "Keep Vanishr safe: no harassment, threats, impersonation, spam, illegal content, "
             + "or sexual exploitation or abuse of children. Use Block and Report when needed.\n\n"
             + "New accounts are introduced to the human Vanishr admin. The admin sees your shared name, username "
-            + "and public device identity, not your other conversations. Messages remain end-to-end encrypted.\n\n"
+            + "and public device identity and, as in any chat with a contact, your Online, Typing and Last seen status "
+            + "while you use the app, not your other conversations. You see the admin's status the same way. "
+            + "Messages remain end-to-end encrypted.\n\n"
             + "The Privacy policy explains account metadata, temporary relay data, Google sign-in, notifications "
             + "and account deletion. Abuse reports contain selected identifiers and a reason, not chat text or photos.";
 

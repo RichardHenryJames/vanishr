@@ -335,6 +335,46 @@ class RelayIntegrationTest {
                 .andExpect(status().isOk()).andExpect(content().json("[]"));
     }
 
+    @Test void officialAdminAndIntroducedAccountsShareOnlineTypingAndLastSeenOnlyWhenBothListEachOther() throws Exception {
+        Device admin = device("presence_admin");
+        assignAdmin(admin);
+        Device newcomer = device("presence_new_one"), second = device("presence_new_two"), unlisted = device("presence_new_three");
+        for (Device introduced : List.of(newcomer, second, unlisted))
+            request(get("/account/admin-contacts"), introduced).andExpect(status().isOk())
+                .andExpect(jsonPath("$.contacts[0].userId").value(admin.userId().toString()));
+        var adminConnection = foreground(admin);
+        foreground(newcomer); foreground(second); foreground(unlisted);
+        Presence.Update newcomerUpdate = new Presence.Update(List.of(presencePeer(admin)), admin.userId(), 5000, true);
+        request(body(post("/presence"), newcomerUpdate), newcomer).andExpect(status().isOk()).andExpect(content().json("[]"));
+        Presence.Update adminUpdate = new Presence.Update(List.of(presencePeer(newcomer), presencePeer(second)), newcomer.userId(), 5000, true);
+        Presence.Status[] adminSees = json.readValue(request(body(post("/presence"), adminUpdate), admin).andExpect(status().isOk())
+            .andReturn().getResponse().getContentAsString(), Presence.Status[].class);
+        assertEquals(1, adminSees.length); assertEquals(presencePeer(newcomer), adminSees[0].peer());
+        assertTrue(adminSees[0].onlineForMillis() > 0); assertTrue(adminSees[0].typingForMillis() > 0);
+        Presence.Status[] newcomerSees = json.readValue(request(body(post("/presence"), newcomerUpdate), newcomer).andExpect(status().isOk())
+            .andReturn().getResponse().getContentAsString(), Presence.Status[].class);
+        assertEquals(1, newcomerSees.length); assertEquals(presencePeer(admin), newcomerSees[0].peer());
+        assertTrue(newcomerSees[0].typingForMillis() > 0 && newcomerSees[0].typingForMillis() <= 5000);
+        assertNull(newcomerSees[0].lastSeenAgoMillis());
+        Presence.Status[] secondSees = json.readValue(request(body(post("/presence"),
+            new Presence.Update(List.of(presencePeer(admin), presencePeer(newcomer)), null, 0, true)), second).andExpect(status().isOk())
+            .andReturn().getResponse().getContentAsString(), Presence.Status[].class);
+        assertEquals(1, secondSees.length); assertEquals(presencePeer(admin), secondSees[0].peer());
+        assertEquals(0, secondSees[0].typingForMillis());
+        Presence.Update plain = new Presence.Update(List.of(presencePeer(admin)), null, 0, true);
+        request(body(post("/presence"), plain), unlisted).andExpect(status().isOk()).andExpect(content().json("[]"));
+        realtime.afterConnectionClosed(adminConnection, org.springframework.web.socket.CloseStatus.NORMAL);
+        for (Device introduced : List.of(newcomer, second)) {
+            Presence.Status[] offline = json.readValue(request(body(post("/presence"), plain), introduced).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString(), Presence.Status[].class);
+            assertEquals(1, offline.length); assertEquals(presencePeer(admin), offline[0].peer());
+            assertEquals(0, offline[0].onlineForMillis()); assertEquals(0, offline[0].typingForMillis());
+            assertNotNull(offline[0].lastSeenAgoMillis());
+            assertTrue(offline[0].lastSeenAgoMillis() >= 0 && offline[0].lastSeenAgoMillis() < Presence.LAST_SEEN_LIFETIME);
+        }
+        request(body(post("/presence"), plain), unlisted).andExpect(status().isOk()).andExpect(content().json("[]"));
+    }
+
     @Test void lastSeenRejectsExpiredFutureAndChangedDeviceRecords() throws Exception {
         Device first = device("seen_check"), second = device("seen_stored");
         foreground(first);

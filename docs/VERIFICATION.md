@@ -1,7 +1,72 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-10-09 UTC. This is a development foundation,
+Evidence refreshed on Windows, 2026-10-10 UTC. This is a development foundation,
 not a production security assessment or independent audit.
+
+## Release 0.5.8 / Admin chat presence
+
+Release 0.5.8 / code 39 fixes the automatic chat between the official admin and each new
+account, which never showed Online, Typing or Last seen although a verified contact chat does.
+The cause was client-side: presence audiences listed only independently verified contacts, and
+the pinned automatic admin connection was deliberately left out on both sides (an earlier test
+asserted an empty audience). The relay treats any two accounts that list each other the same
+way, so there is **no relay or schema change** (the relay stays at schema 13) and no Azure
+operation. The admin's app and the new account's app must both run 0.5.8; with an older app on
+either side nothing is shared.
+
+**What changed.** [ChatEngine](../android/app/src/main/java/app/vanishr/android/ChatEngine.java)
+`automaticConnection` / `sharesPresence` and [AdminOnboarding](../android/app/src/main/java/app/vanishr/android/AdminOnboarding.java)
+`connected` admit an automatic contact to the presence audience only while the saved contact
+exists, its Signal identity is still pinned, it is neither blocked nor dismissed and the
+official-admin pin check still passes (the pinned identity for a new account's view of the
+admin, the local pinned identity for the admin's view of an introduced account); any exception
+fails closed. [ContactPresence](../android/app/src/main/java/app/vanishr/android/ContactPresence.java)
+fills its audience with the open chat first, then independently verified contacts, then
+automatic ones, up to the relay's 128-contact limit, and its status snapshot uses the same rule.
+`independentlyVerified` is unchanged, so groups, profile photos and the contacts backup still
+exclude the automatic chat. The in-app policy summary and the public privacy, security, Android
+and `llms.txt` text now say the admin and introduced accounts see each other's status. The in-app
+policy version is unchanged by the owner's decision, so no re-acceptance screen appears.
+
+Demonstrated on 2026-10-10 (synthetic accounts and relays only):
+
+- `verify.ps1 -Android` passed. client-core: 19 tests. Relay: 101 tests (85 integration tests with
+  PostgreSQL/Redis containers) with the two opt-in live tests skipped. The new integration test
+  `officialAdminAndIntroducedAccountsShareOnlineTypingAndLastSeenOnlyWhenBothListEachOther` uses a
+  real admin pin and its introduced accounts: nothing is shared until both sides list each other,
+  an introduced account the admin did not list sees nothing, two introduced accounts cannot see each
+  other through the admin, typing reaches only its recipient, and after the admin disconnects each
+  listed account gets a bounded Last seen. Android: lint, 13 JVM unit tests and instrumentation
+  compilation passed.
+- Isolated QA instrumentation on the dedicated Android 16 / API 36 emulator. Four tests were added
+  or updated: the former "no sharing permissions" admin test now expects the pinned admin in the
+  audience while profile photos, remote photos and key claims stay off and the contact stays not
+  independently verified (which groups and the contacts backup require); a new-account test covers Typing, Online
+  and Last seen, a tampered saved identity, a block, a wrong pin, an unrelated contact carrying an
+  automatic marker, forgetting the chat and manual verification; an admin-side test with 130 introduced
+  accounts keeps the open chat first, then verified contacts, within 128 and shares nothing when the
+  local identity no longer matches the pin; and a UI test shows Online, Typing and Last seen in the
+  official-admin chat header. All four pass, and all four fail when `automaticConnection` is forced to
+  `false` (the old behavior), so they test the fix.
+- A full run of 178 QA tests (132 screen-flow, 41 account-safety, 5 backup) had 26 failures after
+  Android's System UI stopped responding under host load and its "isn't responding" dialog stayed
+  focused, so UiAutomator and keyboard checks could not see the app. All 26 are screen-flow tests,
+  none touches presence or admin onboarding, and the 46 account-safety and backup tests passed. On a
+  freshly booted emulator with animations disabled the 26 were rerun: 23 passed. Two fail as on the
+  unmodified 0.5.7 build (`notificationColdStartIntentOpensTheChatAndKeepsViewOnceClosed`,
+  `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`). `receiptBurstsReuseEightyMessageRowsAndExpiryClearsCachedText`,
+  a scroll-position race, failed in that rerun and in one of two isolated reruns and passed in the other.
+
+**Not verified:** two real phones or a live relay (the admin identity is pinned to the production
+account and no admin was created on the shared relay); more than 128 introduced accounts on a real
+relay (a client test uses 130, the relay tests a handful); physical-phone and manufacturer
+foreground/background behavior; accessibility and narrow-screen layouts of the status line beyond the
+existing header checks; independent security review. **Known limit:** the admin's app lists at most 128
+contacts at a time (the open chat first, then verified contacts, then introduced accounts by name), so
+with more introduced accounts an account outside that list sees the admin's status only while the admin
+has its chat open. **Privacy effect:** every introduced account in the admin's list can now see when the
+official admin uses the app, and the admin sees each such account's status; the relay already observed
+this metadata. Play declarations were not changed or resubmitted.
 
 ## Release 0.5.7 / Encrypted contacts backup
 

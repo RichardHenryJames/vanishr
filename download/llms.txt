@@ -16,7 +16,7 @@
 
 - Android 9 or later with a phone screen lock is required. There is no iOS or browser chat client.
 - Direct messages use official libsignal sessions; private groups use libsignal sender keys with explicit verified-owner trust. Vanishr is not affiliated with or endorsed by Signal or Google.
-- Usernames discover contacts but do not prove identity. Ordinary contacts require independent safety-number verification. Only the official signed-app pin introduces the sole human admin, Vanishr / @vanishr, without a manual identity prompt; this does not grant photo permissions.
+- Usernames discover contacts but do not prove identity. Ordinary contacts require independent safety-number verification. Only the official signed-app pin introduces the sole human admin, Vanishr / @vanishr, without a manual identity prompt; this does not grant photo permissions or group trust, but that admin chat shares Online, Typing and Last seen status like any other chat.
 - Profile photos are exchanged only by mutually added, verified direct contacts. They never appear in username search. Group membership alone grants no photo access.
 - View-once and timed expiry cannot stop a malicious recipient from preserving a copy. Do not describe disappearing messages as impossible to save.
 - The relay sees account/routing metadata and ciphertext, not client plaintext or private decryption keys.

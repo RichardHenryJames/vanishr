@@ -196,6 +196,17 @@ final class AdminOnboarding {
         return true;
     }
 
+    /** True while a saved automatic connection still matches the signed-app admin pin; any doubt fails closed. */
+    boolean connected(UUID userId) {
+        try {
+            ChatEngine.Peer saved = read("contact/" + userId, ChatEngine.Peer.class);
+            if (saved == null || !automatic(userId) || !eligible(userId)) return false;
+            requireOfficial(saved);
+            return true;
+        } catch (AndroidVault.PhoneLockedException locked) { throw locked; }
+        catch (Exception invalid) { return false; }
+    }
+
     void prepare(ChatEngine.Peer peer) throws Exception {
         if (!engine.authenticated()) throw new SecurityException("Sign in before messaging");
         if (engine.safety().isBlocked(peer.userId())) throw new SecurityException("This account is blocked");

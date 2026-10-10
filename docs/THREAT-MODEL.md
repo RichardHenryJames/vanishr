@@ -158,6 +158,21 @@ Previously pinned keys/devices are never silently replaced. An admin identity
 change requires a reviewed signed-app pin update and explicit re-onboarding,
 not a username rule, remote configuration update or verification bypass.
 
+From 0.5.8 this automatic chat also shares Online, Typing and Last seen status in
+both directions, like any other direct chat (it was the one conversation that never
+showed it). A client lists an automatic contact in its presence audience only while
+the saved identity still passes the same pin checks (the official identity for a
+new account, the local pinned identity for the admin), the contact is neither blocked
+nor dismissed and the Signal identity is still pinned; any doubt shares nothing. The
+relay's mutual-listing rule is unchanged, so an older client on either side shares
+nothing. This is not independent verification: groups, private profile photos and
+contact backups still require it. Consequences: every introduced account in the
+admin's sharing list (up to 128 at a time, the open chat first) can see when the
+official admin uses the app, so anyone who registers can observe that; and the
+admin's initial binding of a new account is still relay-supplied, so a compromised
+relay could introduce an attacker-controlled account that learns the admin's
+status. The relay itself already observes this metadata.
+
 From 0.5.5, the explicitly approved offline-first-message policy supports
 libsignal's standard PQXDH last-resort prekeys. A recipient publishes a signed
 EC/Kyber fallback without a one-time EC key. Only capable senders receive it,
@@ -260,7 +275,8 @@ exact disconnect time or message-read time. Unknown or older-than-24-hour activi
 has no label. Usernames remain read-only in the contact profile; groups are unchanged.
 
 Foreground clients send presence metadata over authenticated TLS. The relay sees
-the temporary audience (up to 128 pinned direct contacts), typing recipient and
+the temporary audience (up to 128 pinned direct contacts, including the automatic
+official-admin chat), typing recipient and
 timing, but never draft text, photos or private keys. Presence is not end-to-end
 encrypted. Sharing requires both clients to list each other's exact account,
 device and public-key identities. The reader needs a current device session and
