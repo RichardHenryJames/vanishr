@@ -196,6 +196,36 @@ and a backup is due. The vault closes when the app is backgrounded, which is why
 sealed first and the service holds no key. Restore pins a contact only when the relay still
 reports the identity the user verified earlier.
 
+## Client threading and the open vault
+
+The main thread only builds and updates views. Everything else runs on single-thread
+lanes with one job each, so a slow network call can no longer sit in front of a tap:
+
+| Lane | Does | Does not |
+|---|---|---|
+| `work` | sync, sending, sign-in/out, opening the vault, introductions for contacts not yet saved, other user actions | prepare what a screen shows |
+| `reader` | decrypts the open chat's text, commits that screen's read receipts as one write, loads avatars, checks the presence header; runs at background priority so it cannot compete with touch handling | use the network or Signal sessions |
+| `photoWork`, `updateWork` | owner photo requests; the update feed check | anything else |
+
+Signal sessions and ratchet state stay on the `work` lane because libsignal state is
+not designed for concurrent use. Vault writes remain serialized by the vault's monitor.
+
+Tapping a chat opens it from local state: a saved contact, verified or the automatic
+admin chat, is re-checked on the main thread against the saved identity, the admin pin
+and the block list only. A contact this phone has never saved still needs its
+introduction over the network on the `work` lane. User actions are counted while they
+wait, and a running sync stops at its next step boundary (between relay calls, which is
+equivalent to a dropped connection at that point) and resumes right behind them.
+
+The open vault serves reads from an immutable snapshot of the last committed state,
+so a read never waits for an encrypted commit on another thread. A transaction still
+sees its own uncommitted writes; other threads see them only after the commit has
+persisted. Replaced or removed records are zeroed after readers have finished with
+them. Every Keystore operation (opening, sealing, decrypting content) checks that the
+phone is unlocked each time; reads of the already-open in-memory records reuse a
+successful check for at most 250 ms. See the
+[threat model](THREAT-MODEL.md#responsiveness-and-the-open-vault).
+
 ## Retention semantics
 
 Expiry modes: `VIEW_ONCE`, `HOUR_1`, `HOURS_6`, `HOURS_24`. Client expiry starts

@@ -60,8 +60,16 @@ public final class MainActivity extends AppCompatActivity {
     private Ui design;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ScheduledExecutorService work = Executors.newSingleThreadScheduledExecutor();
+    // Reads that only prepare what the screen shows. They never queue behind a sync or an upload on the work lane,
+    // and run at background priority so they cannot compete with touch handling for the CPU.
+    private final ExecutorService reader = Executors.newSingleThreadExecutor(task -> new Thread(() -> {
+        android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
+        task.run();
+    }, "vanishr-reader"));
     private final ScheduledExecutorService photoWork = Executors.newSingleThreadScheduledExecutor();
     private final ExecutorService updateWork = Executors.newSingleThreadExecutor();
+    // Counts user actions waiting for the work lane so a running sync can step aside for them.
+    private final java.util.concurrent.atomic.AtomicInteger waitingActions = new java.util.concurrent.atomic.AtomicInteger();
     private final java.util.concurrent.atomic.AtomicBoolean syncQueued = new java.util.concurrent.atomic.AtomicBoolean();
     private final java.util.concurrent.atomic.AtomicBoolean syncRequested = new java.util.concurrent.atomic.AtomicBoolean();
     private boolean checkingUpdates;
@@ -336,6 +344,8 @@ public final class MainActivity extends AppCompatActivity {
         frame.addView(image, new FrameLayout.LayoutParams(-1, -1));
         PhotoAvatar avatar = new PhotoAvatar(userId, frame, fallback, image);
         photoAvatars.add(avatar); bindProfileAvatar(avatar);
+        // The avatar was just bound at the current generation, so the next tick need not bind it again.
+        if (shownPhotoGeneration < 0 && engine != null) shownPhotoGeneration = engine.photos().generation();
         return frame;
     }
 
@@ -347,7 +357,7 @@ public final class MainActivity extends AppCompatActivity {
         long request = avatar.request;
         long photoGeneration = current.photos().generation();
         int generation = screenGeneration;
-        work.execute(() -> {
+        onReader(() -> {
             byte[] photo = null;
             Bitmap decoded = null;
             try {
@@ -480,7 +490,7 @@ public final class MainActivity extends AppCompatActivity {
         int generation = screenGeneration;
         loadingGeneration = generation;
         storageError = null; phoneSecurityRequired = false; waitingForPhoneUnlock = false; storageState();
-        work.execute(() -> {
+        act(() -> {
             AndroidVault vault = new AndroidVault(this);
             try {
                 vault.unlock();
@@ -773,8 +783,7 @@ public final class MainActivity extends AppCompatActivity {
         ScrollView scroll = new ScrollView(this);
         contactRows = vertical(); scroll.setFillViewport(true); scroll.addView(contactRows);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        shownPeers = engine.peers(); shownGroups=engine.groups().conversations();
-        shownAdminDirectory = engine.onboarding().generation(); renderContacts();
+        renderContacts();
         contactSearch.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence value, int start, int count, int after) { }
             @Override public void onTextChanged(CharSequence value, int start, int before, int count) {
@@ -937,9 +946,15 @@ public final class MainActivity extends AppCompatActivity {
             androidx.core.view.ViewCompat.setStateDescription(unreadFilter, unreadOnly ? "Unread only" : "All chats");
         }
         String filter = contactSearch == null ? "" : contactSearch.getText().toString().toLowerCase(Locale.ROOT);
-        for (GroupChat.Conversation group : engine.groups().conversations()) {
+        // One pass over the lists and the stored messages, however many chats there are.
+        java.util.List<GroupChat.Conversation> groups = engine.groups().conversations();
+        java.util.List<ChatEngine.Peer> peers = engine.peers();
+        Map<UUID, Long> unreadCounts = engine.unreadCounts();
+        shownPeers = peers; shownGroups = groups; shownAdminDirectory = engine.onboarding().generation();
+        for (GroupChat.Conversation group : groups) {
             if (!group.name().toLowerCase(Locale.ROOT).contains(filter)) continue;
-            if (unreadOnly && engine.entries(group.id()).stream().noneMatch(entry -> !entry.outgoing() && !entry.state().equals("READ"))) continue;
+            long count = unreadCounts.getOrDefault(group.id(), 0L);
+            if (unreadOnly && count == 0) continue;
             LinearLayout row=horizontal(); row.setMinimumHeight(dp(78)); row.setPadding(dp(18),dp(12),dp(18),dp(12)); row.setBackground(design.feedback(Color.TRANSPARENT,0));
             row.addView(design.groupAvatar(46, Ui.BLUE));
             LinearLayout details=vertical(); details.setPadding(dp(12),0,dp(8),0);
@@ -947,7 +962,6 @@ public final class MainActivity extends AppCompatActivity {
             LinearLayout subtitle=horizontal(); subtitle.setPadding(0,dp(5),0,0); subtitle.addView(design.symbol(R.drawable.ic_users_round,12,MUTED));
             TextView state=design.text(engine.groups().status(group),11,500,MUTED); state.setPadding(dp(5),0,0,0); state.setSingleLine(true); subtitle.addView(state); details.addView(subtitle);
             row.addView(details,new LinearLayout.LayoutParams(0,-2,1));
-            long count=engine.entries(group.id()).stream().filter(entry -> !entry.outgoing() && !entry.state().equals("READ")).count();
             row.addView(unreadBadge(group.id(),count));
             row.addView(design.symbol(R.drawable.ic_chevron_right,16,MUTED));
             row.setOnClickListener(view -> {
@@ -959,12 +973,13 @@ public final class MainActivity extends AppCompatActivity {
             row.setOnLongClickListener(view -> { groupInfo(group.id()); return true; });
             addChatRow(row);
         }
-        for (ChatEngine.Peer peer : engine.peers()) {
+        for (ChatEngine.Peer peer : peers) {
             if (!peer.name().toLowerCase(Locale.ROOT).contains(filter) && !peer.username().contains(filter)
                     && (peer.profileName() == null || !peer.profileName().toLowerCase(Locale.ROOT).contains(filter))) {
                 continue;
             }
-            if (unreadOnly && engine.entries(peer.userId()).stream().noneMatch(entry -> !entry.outgoing() && !entry.state().equals("READ"))) {
+            long unread = unreadCounts.getOrDefault(peer.userId(), 0L);
+            if (unreadOnly && unread == 0) {
                 continue;
             }
             LinearLayout row = horizontal();
@@ -973,14 +988,9 @@ public final class MainActivity extends AppCompatActivity {
             LinearLayout identity = vertical(); identity.setPadding(dp(12), 0, dp(8), 0);
             TextView title=design.text(peer.name(),14,700,INK); title.setSingleLine(true); title.setEllipsize(android.text.TextUtils.TruncateAt.END); identity.addView(title);
             row.addView(identity, new LinearLayout.LayoutParams(0, -2, 1));
-            long unread = engine.entries(peer.userId()).stream().filter(entry -> !entry.outgoing() && !entry.state().equals("READ")).count();
             row.addView(unreadBadge(peer.userId(),unread));
             row.addView(design.symbol(R.drawable.ic_chevron_right, 16, MUTED));
-            row.setOnClickListener(view -> {
-                ChatEngine current = engine;
-                if (current.independentlyVerified(peer.userId())) { selectedPeer = peer.userId(); render(); }
-                else submit(() -> current.prepareConversation(peer), () -> { selectedPeer = peer.userId(); render(); });
-            });
+            row.setOnClickListener(view -> openContact(peer));
             row.setOnLongClickListener(view -> { forgetDialog(peer); return true; });
             addChatRow(row);
         }
@@ -1006,6 +1016,16 @@ public final class MainActivity extends AppCompatActivity {
             warning.setPadding(dp(18), dp(12), dp(18), dp(12));
             contactRows.addView(warning, 0);
         }
+    }
+
+    // A saved contact is checked here against local state only, so the tap never waits for a sync or an upload on the work lane.
+    private void openContact(ChatEngine.Peer peer) {
+        ChatEngine current = engine;
+        if (current == null || !resumed) return;
+        try {
+            if (current.independentlyVerified(peer.userId()) || current.prepareSavedConversation(peer)) { selectedPeer = peer.userId(); render(); return; }
+        } catch (Exception failure) { showFailure(failure); return; }
+        submit(() -> current.prepareConversation(peer), () -> { selectedPeer = peer.userId(); render(); });
     }
 
     private TextView unreadBadge(UUID id, long count) {
@@ -1119,7 +1139,7 @@ public final class MainActivity extends AppCompatActivity {
         presenceRefreshQueued = true;
         ChatEngine.Peer peer = shownConversationPeer;
         int generation = conversationGeneration;
-        work.execute(() -> {
+        onReader(() -> {
             try {
                 if (!conversationCurrent(current, generation)) return;
                 ContactPresence.Seen verified = current.presence().snapshot(peer);
@@ -1152,7 +1172,7 @@ public final class MainActivity extends AppCompatActivity {
         if (engine==null || id==null) return null;
         GroupChat.Conversation group=engine.groups().get(id);
         if (group!=null && !engine.groups().invited(group)) return new ChatEngine.Peer(id,group.snapshot().epoch(),"",group.name());
-        return engine.peers().stream().filter(peer -> peer.userId().equals(id)).findFirst().orElse(null);
+        return engine.peer(id);
     }
 
     private void groupComposerState(GroupChat.Conversation group) {
@@ -1200,7 +1220,7 @@ public final class MainActivity extends AppCompatActivity {
         ChatEngine current = engine;
         int generation = screenGeneration;
         pending.failed = false;
-        work.execute(() -> {
+        act(() -> {
             byte[] image = null;
             try {
                 if (!resumed || generation != screenGeneration || engine != current || pending.cancelled) return;
@@ -1443,11 +1463,12 @@ public final class MainActivity extends AppCompatActivity {
         int generation = conversationGeneration;
         Map<UUID, ChatEngine.Entry> known = new HashMap<>();
         messageRows.forEach((id, row) -> known.put(id, row.entry));
-        work.execute(() -> {
+        onReader(() -> {
             Map<UUID, String> text = new HashMap<>();
             Map<UUID, String> senders = new HashMap<>();
             Map<UUID, String> senderNames = new HashMap<>();
             java.util.List<ChatEngine.Entry> entries = new ArrayList<>();
+            java.util.List<ChatEngine.Entry> receipts = new ArrayList<>();
             try {
                 if (!conversationCurrent(current, generation)) return;
                 for (ChatEngine.Entry entry : current.entries(peer.userId())) {
@@ -1462,16 +1483,23 @@ public final class MainActivity extends AppCompatActivity {
                     }
                     if (!sameMessage(entry, known.get(entry.id()))) {
                         if (!entry.image() && entry.expiry() != ChatEnvelope.Expiry.VIEW_ONCE) {
-                            try { text.put(entry.id(), current.content(entry, false).envelope().text()); }
+                            try { text.put(entry.id(), current.content(entry, false, false).envelope().text()); }
                             catch (Exception failure) {
-                                if (entry.expiresAt() <= System.currentTimeMillis()) continue;
+                                // Cleared, forgotten, blocked or expired meanwhile: nothing left to show, so it is not a failure.
+                                if (entry.expiresAt() <= System.currentTimeMillis() || vanished(current, generation, entry.id())) continue;
                                 throw failure;
                             }
-                            if (!entry.outgoing()) entry = entry.withState("READ");
+                            if (!entry.outgoing()) {
+                                if (!entry.state().equals("READ")) receipts.add(entry);
+                                entry = entry.withState("READ");
+                            }
                         }
                     }
                     entries.add(entry);
                 }
+                // One durable commit for everything that became visible, not one encrypted write per message.
+                if (!conversationCurrent(current, generation)) { text.clear(); return; }
+                current.markRead(receipts);
                 ui.post(() -> {
                     try {
                         if (!conversationCurrent(current, generation)) return;
@@ -1493,6 +1521,17 @@ public final class MainActivity extends AppCompatActivity {
 
     private boolean conversationCurrent(ChatEngine current, int generation) {
         return resumed && engine == current && conversationGeneration == generation;
+    }
+
+    // A clear, forget, block or expiry deletes an entry's key a moment before its record, so a failure on a message that is
+    // about to disappear gets a short time to settle before it is reported. Runs on the read-only worker.
+    private boolean vanished(ChatEngine current, int generation, UUID id) {
+        for (int attempt = 0; attempt < 6; attempt++) {
+            if (!current.hasEntry(id) || !conversationCurrent(current, generation)) return true;
+            try { Thread.sleep(100); }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return false; }
+        }
+        return !current.hasEntry(id);
     }
 
     private static boolean sameMessage(ChatEngine.Entry entry, ChatEngine.Entry previous) {
@@ -2764,7 +2803,7 @@ public final class MainActivity extends AppCompatActivity {
         }
         pending.owner = current.account().userId(); pending.running = true;
         int generation = screenGeneration;
-        work.execute(() -> {
+        act(() -> {
             UUID destination = null;
             Exception error = null;
             try { destination = current.openNotification(pending.reference); }
@@ -2789,12 +2828,15 @@ public final class MainActivity extends AppCompatActivity {
         int generation = screenGeneration;
         ChatEngine current = engine;
         if (!resumed || current == null || !current.safety().termsAccepted(PlayPolicy.VERSION)) return;
-        try { current.sync(); }
+        boolean completed = true;
+        try { completed = current.sync(() -> waitingActions.get() > 0); }
         catch (GeneralSecurityException | AndroidVault.PhoneLockedException failure) {
             ui.post(() -> { if (engine == current && generation == screenGeneration && !busy) { hideContent(); storageFailure(failure); } }); return;
         }
         catch (AdminOnboarding.Failure failure) { current.onboarding().blocked(failure); current.unverifiedIncoming = true; }
         catch (Exception failure) { current.online = false; }
+        // A user action is waiting: it runs first and the sync resumes right behind it from the stored state.
+        if (!completed) { syncRequested.set(true); return; }
         UUID selected = selectedPeer;
         java.util.List<ChatEngine.Peer> peers;
         java.util.List<GroupChat.Conversation> groups;
@@ -2807,9 +2849,7 @@ public final class MainActivity extends AppCompatActivity {
         try {
             peers = current.authenticated() ? current.peers() : java.util.List.of();
             groups = current.authenticated() ? current.groups().conversations() : java.util.List.of();
-            if (current.authenticated()) for (ChatEngine.Entry entry : current.entries(null)) {
-                if (!entry.outgoing() && !entry.state().equals("READ")) unreadCounts.merge(entry.peerId(), 1L, Long::sum);
-            }
+            if (current.authenticated()) unreadCounts.putAll(current.unreadCounts());
             selectedGroup = groups.stream().filter(group -> group.id().equals(selected) && !current.groups().invited(group)).findFirst().orElse(null);
             selectedContact = selectedGroup == null ? peers.stream().filter(peer -> peer.userId().equals(selected)).findFirst().orElse(null)
                     : new ChatEngine.Peer(selectedGroup.id(), selectedGroup.snapshot().epoch(), "", selectedGroup.name());
@@ -2862,6 +2902,20 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     @FunctionalInterface private interface Work { void run() throws Exception; }
+
+    // A user action goes ahead of the next background step; a sync in progress yields to it at its next safe point.
+    private void act(Runnable task) {
+        waitingActions.incrementAndGet();
+        try { work.execute(() -> { waitingActions.decrementAndGet(); task.run(); }); }
+        catch (RuntimeException rejected) { waitingActions.decrementAndGet(); throw rejected; }
+    }
+
+    // Read-only preparation for the screen; it neither waits for nor delays the work lane.
+    private void onReader(Runnable task) {
+        try { reader.execute(task); }
+        catch (RejectedExecutionException closed) { if (!reader.isShutdown()) throw closed; }
+    }
+
     private void submit(Work action, Runnable completed) {
         submit(action, completed, this::showFailure);
     }
@@ -2872,7 +2926,7 @@ public final class MainActivity extends AppCompatActivity {
         int generation = screenGeneration;
         if (connection != null) connection.setText(R.string.working);
         homeStatus();
-        work.execute(() -> {
+        act(() -> {
             try { action.run(); ui.post(() -> {
                 if (!resumed || generation != screenGeneration) return;
                 busy = false; completed.run();
@@ -2972,5 +3026,5 @@ public final class MainActivity extends AppCompatActivity {
         if (hasFocus) resumeAfterPhoneUnlock();
     }
     @Override protected void onSaveInstanceState(Bundle state) { super.onSaveInstanceState(new Bundle()); }
-    @Override protected void onDestroy() { clearProfileAvatars(); selectedProfilePhoto = null; profilePhotoOwner = null; dismissContent(); if (googleCancellation != null) googleCancellation.cancel(); if (googleAttempt != null) googleAttempt.idToken = null; googleAttempt = null; ui.removeCallbacksAndMessages(null); unregisterReceiver(pushRefresh); unregisterReceiver(phoneUnlocked); if (cameraImage != null) Arrays.fill(cameraImage, (byte) 0); work.shutdown(); photoWork.shutdownNow(); updateWork.shutdownNow(); super.onDestroy(); }
+    @Override protected void onDestroy() { clearProfileAvatars(); selectedProfilePhoto = null; profilePhotoOwner = null; dismissContent(); if (googleCancellation != null) googleCancellation.cancel(); if (googleAttempt != null) googleAttempt.idToken = null; googleAttempt = null; ui.removeCallbacksAndMessages(null); unregisterReceiver(pushRefresh); unregisterReceiver(phoneUnlocked); if (cameraImage != null) Arrays.fill(cameraImage, (byte) 0); work.shutdown(); reader.shutdownNow(); photoWork.shutdownNow(); updateWork.shutdownNow(); super.onDestroy(); }
 }

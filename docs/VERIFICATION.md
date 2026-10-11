@@ -1,7 +1,164 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-10-10 UTC. This is a development foundation,
+Evidence refreshed on Windows, 2026-10-11 UTC. This is a development foundation,
 not a production security assessment or independent audit.
+
+## Release 0.5.9 / Startup and tap responsiveness
+
+Release 0.5.9 / code 40 fixes a delay reported after opening the app: tapping a chat right
+after start-up could make the app wait several seconds before it responded again. It is a
+**client-only change**: no relay or schema change (the relay stays at schema 13, unchanged
+since 0.5.7) and no Azure operation. Installs of 0.5.6, 0.5.7 and 0.5.8 can update through the
+in-app prompt; see the publication notes below for what was and was not tested.
+
+**Causes, measured on the unmodified 0.5.8 code first** (dedicated Android 16 / API 36 emulator,
+synthetic accounts, temporary probe tests that became the permanent tests below):
+
+- Every chat-list row called `engine.entries(peer)`, which listed every stored message, read each
+  one and checked the block list per message, so drawing the list on the main thread was
+  O(contacts × messages). The admin's list with 64 automatic contacts and 60 messages took
+  **26,275 ms**; with 43 contacts and 120+ messages the list had not appeared after 15 s (two probe
+  timeouts).
+- Every vault read made two Android binder calls (`isDeviceSecure`, `isDeviceLocked`): 1,000 reads
+  took **2,405 ms** of which the lock checks were 2,296 ms.
+- Reads waited for the vault monitor, which an encrypted commit holds while it re-encrypts and
+  writes the whole vault, so a tap or a refresh could wait behind another thread's commit.
+- One single-thread worker did everything: the 15-second sync (many sequential relay calls), the
+  3-second presence heartbeat, push registration, every avatar load, every conversation refresh and
+  every user action. Tapping the automatic admin chat, the only chat a new account has and every
+  chat for the admin, queued behind that backlog and set the screen busy, which also dropped
+  further taps: **4,685 ms** with the worker busy for 3 s. Verified contacts opened inline, so
+  only automatic chats showed it.
+- Opening a chat with unread messages wrote one encrypted vault commit per message.
+
+**What changed** (see [ARCHITECTURE.md](ARCHITECTURE.md#client-threading-and-the-open-vault) and
+[THREAT-MODEL.md](THREAT-MODEL.md#responsiveness-and-the-open-vault)):
+
+- [AndroidVault](../android/app/src/main/java/app/vanishr/android/AndroidVault.java): reads come from an
+  immutable snapshot of the last committed state and no longer wait for a commit; a transaction sees
+  its own writes and others see them after persistence; wiping of replaced values is O(n) instead of
+  O(n²) and happens after in-flight readers finish; `close()` clears the snapshot under the same lock.
+  A successful lock check is reused for at most 250 ms for reads of records already in memory; opening
+  the vault and every Keystore operation (sealing, decrypting message content, writing) still check each
+  time. The account-scoped wrapper checks ownership and reads from one snapshot, so a sign-out cannot land
+  between its check and its read.
+- [ChatEngine](../android/app/src/main/java/app/vanishr/android/ChatEngine.java): `unreadCounts()` counts
+  every conversation in one pass; `entries()` caches the block-list lookup per call and skips records that
+  vanish mid-scan; `peer(id)` looks up one contact; `markRead(batch)` commits a screen's read receipts
+  once and skips messages that were cleared meanwhile; `sync(yield)` can stop between steps.
+- [MainActivity](../android/app/src/main/java/app/vanishr/android/MainActivity.java): a second, read-only
+  worker (background priority) prepares screens (message text, avatars, the presence header); a saved contact, including the
+  automatic admin chat, opens after local identity, pin and block checks on the main thread and no longer
+  waits for the sync worker or sets the screen busy; user actions are counted so a running sync yields at
+  its next step boundary and resumes behind them; the list calls `unreadCounts()` once.
+- [AdminOnboarding](../android/app/src/main/java/app/vanishr/android/AdminOnboarding.java) split `prepare` into
+  the local half (`prepareSaved`) and the network introduction, which is unchanged for a contact this phone
+  never saved.
+- An independent code review of the diff found three races that the lane split made possible, all fixed with
+  tests:
+  - the read-only worker stores a read receipt under the same name as the "delivered" acknowledgement, and the
+    sync worker could delete it while "delivered" was in flight, so the sender would never see "read"; the sync
+    worker now deletes a sent acknowledgement only if it is unchanged (one-to-one and group paths);
+  - the profile-photo generation counter, which tells the screen to reload avatars, was bumped inside the
+    transaction that stores the photo, before other threads could read it, so a reload in that window could
+    keep an old or revoked photo on screen; the vault now has an `afterCommit` hook and the counter is bumped
+    only once the commit is published;
+  - an erase deletes a message's key a moment before its record, so a chat refresh in that window reported a
+    storage failure for a message that was being removed; the refresh now waits up to 600 ms for the record to
+    go before treating a failure on it as real, and a failure on a message that stays is still reported.
+  The entry-scanning loops of clear chat, block and group removal now skip a record that expired and vanished
+  mid-scan instead of failing.
+
+**Measured on the same emulator, 0.5.8 before / 0.5.9 after.** The 0.5.9 columns are the median and range of
+the same permanent tests over seven runs of the final code and its intermediate builds (emulator timing varies
+from run to run, and the last two runs were on a recreated emulator, see below):
+
+| Scenario | 0.5.8 | 0.5.9 median | 0.5.9 range |
+|---|---|---|---|
+| Admin list, 64 automatic contacts, 60 messages, drawn on the main thread | 26,275 ms | 498 ms | 435 to 938 ms |
+| Tap an automatic contact while the sync worker is blocked, until the chat opens | 4,685 ms (3 s block) | 108 ms (blocked until released) | 72 to 168 ms |
+| Launch to a visible list, 43 contacts, 120+ messages | not shown within 15 to 20 s | 1,676 ms | 1,558 to 2,121 ms |
+| 1,000 vault reads | 2,405 ms | 51 ms | 43 to 68 ms |
+| 100 `peers()` calls, 43 contacts | 19,900 ms | 877 ms | 684 to 1,082 ms |
+| 20 `entries(peer)` calls, 130 messages | 6,800 ms | 354 ms | 240 to 1,423 ms |
+| 20 `unreadCounts()` calls, 130 messages (replaces one `entries` call per row) | not applicable | 428 ms | 334 to 1,463 ms |
+| Tap on a verified contact while another thread holds a storage commit for 2 s | 2,194 to 2,225 ms (three runs, only 8 chats: it waited for the whole hold) | 55 ms (43 chats) | 34 to 125 ms |
+
+The 0.5.8 values come from temporary probes of the same scenarios, run before the fix. The last row could
+not be measured at 43 chats on 0.5.8 because the list itself did not appear, so 0.5.8 was measured with
+8 chats. The remaining 0.5 s of the admin list is building 64 rows of views on an emulator with a software
+renderer; it was not reduced further. The two slowest values in the `entries` and `unreadCounts` rows
+(1,423 and 1,463 ms) come from the final full run on a recreated emulator that had been up for about 40 minutes
+and was short of memory (3.6 of 4 GB used, swap in use); the same test run alone three times right afterwards took
+392 to 415 ms and 426 to 441 ms, in line with the earlier runs, so this is recorded as a transient emulator
+slowdown rather than a regression.
+
+Demonstrated on 2026-10-10 and 2026-10-11 (synthetic accounts and an emulator only):
+
+- Sixteen permanent tests were added to `ScreenFlowTest`, each with a threshold or assertion that the old
+  code fails: reads stay cheap with many contacts; vault reads never wait for an in-flight commit, see only
+  committed state, publish nothing from a failed transaction and fail closed once closed; `afterCommit`
+  actions run only after the change is readable and never after a rollback; unread counts equal
+  the slow per-conversation count including blocked and expired messages; read receipts for a screen are
+  exactly one commit and skip vanished messages; saved contacts prepare locally while unknown, changed and
+  blocked ones do not; a sync yields between steps and resumes behind a waiting action; reads fail closed
+  within the cache window after the phone locks (needs the generated device credential); a tap does not wait
+  for a storage commit; an automatic contact opens in about 0.1 s while the sync worker is blocked and its
+  messages load meanwhile; the list and a tap stay prompt at start-up with many contacts; a read receipt
+  stored while "delivered" is on the wire is not deleted (one-to-one and group); the photo generation never
+  moves before the photo can be read; and a message that vanishes while its chat opens is skipped while a
+  real failure is still reported.
+- Mutation checks: with the fixes reverted one at a time (no sync yield, automatic contacts through the
+  worker, one commit per receipt, lock check on every read, reads that take the monitor, the
+  unconditional acknowledgement delete, the photo generation bumped inside the transaction, and no settle wait
+  for a vanishing message) each matching new test failed, for example a 2,350 ms tap, 24
+  commits instead of 20, 2,461 ms for 1,000 reads, a lost read receipt and "The generation moved before the
+  photo could be read".
+- Three existing tests were adapted without changing what they assert. Two block the sync worker to prove that
+  reads queued behind it are dropped after backgrounding (`backgroundingDropsQueuedConversationReadsAndClearsRetainedRows`,
+  `queuedAvatarCannotReappearAfterBackgrounding`); those reads now run on the read-only worker, so they block
+  that worker instead. `typingDoesNotWaitForPresenceAudienceStorageReads` stalls the vault's wipe lock because
+  reads no longer wait on the monitor.
+- One existing bound was loosened: `chatTypingAndSendDoNotWaitForBusyEncryptedStorage` required typing and a
+  send tap to take under 100 ms while the vault is locked for 2 s, a bound that is already marginal. Six
+  isolated runs on the unmodified 0.5.8 build took 100 (failed), 87, 96, 90, 89 and 69 ms (median 90). The
+  first 0.5.9 build took 119, 158, 161, 147, 124 and 82 ms (median 135), because the read-only worker's tasks
+  now run during the measurement instead of queueing behind the blocked worker. A breakdown showed that
+  `refreshMessages` and the status refresh cost at most 1 ms on the main thread and that the time is twelve
+  cold keystrokes (55 to 75 ms) and the send tap (about 16 ms). With the read-only worker at background
+  priority the runs were 95, 100 (failed), 107 (failed), 113 (failed), 82 and 90 ms (median 97). The bound is now
+  250 ms: a wait on the 2 s lock is still caught, and the measured value is still recorded.
+- Full QA run on the final build and final tests, on the recreated emulator (see the next item): **194 tests
+  (148 screen-flow, 41 account-safety, 5 backup); 192 passed and 2 failed.** Both failures also occur on the
+  unmodified 0.5.8 build: a full `ScreenFlowTest` run of 0.5.8 (132 tests) failed these two and also the
+  scroll-position race `receiptBurstsReuseEightyMessageRowsAndExpiryClearsCachedText` (flaky; it failed in one
+  earlier 0.5.9 run and passed in the others, including the final one). They are
+  `compactClassicProfilesOpenAsSecureBottomSheetsAndKeepTheChatDraft`, a pixel check of a sheet button that
+  passes alone and fails inside a full run, and `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`,
+  which fails alone as well (as on 0.5.7). Earlier full runs on intermediate builds also failed the 100 ms
+  typing bound and the presence typing test described above, both since adapted; the receipt race found by
+  the review was fixed after the first two full runs, and every later full run includes its tests.
+- A first run of the suite on the final code was killed when the Windows host rebooted (20:40 local on
+  2026-10-10), which also stopped the emulator and the test script before it could clear the random screen-lock
+  PIN it had set; nothing but that dead script knew the PIN. Only the dedicated `Vanishr_Security_Test`
+  emulator was touched: it was restarted with `-wipe-data` (synthetic data only), after which the credential check
+  passed and the suite was rerun from the start. The first rerun on the recreated emulator had one extra
+  failure, in my new `aLockedPhoneStopsVaultReadsAfterTheShortUnlockCache`: its unlock step woke the phone about
+  a second after sleeping it, the PIN pad did not open, and because the unlock sat in a `finally` it could also
+  have replaced a real assertion failure. The test passed three times out of three when run alone. It now waits
+  for the keyguard to settle, retries the unlock up to three times and no longer lets an unlock failure replace
+  an assertion failure; only test code changed. A temporary mutation that made the unlock cache never expire
+  was then run against it and failed with `expected ... PhoneLockedException to be thrown, but nothing was
+  thrown`, so the test still catches that regression. The final full run above includes this version.
+- `DeviceSecurityTest` (6 tests) passed on the final build without a screen lock (5 passed, 1 skipped because it
+  needs a lock) and with one (5 passed, 1 skipped because it needs no lock), so each of the six ran once and
+  opening the vault is still strict.
+
+**Not verified:** any physical phone; a phone whose Keystore is hardware backed or uses StrongBox, which
+encrypts and decrypts more slowly, because the vault is still re-encrypted whole on each commit and opening
+it still decrypts it whole (this release does not change that); vaults larger than the test data; the
+release (minified) build on a device with a real account; the list with more than about 64 rows, which is
+still built in one pass; whether a real relay under load changes how often a sync yields.
 
 ## Release 0.5.8 / Admin chat presence
 

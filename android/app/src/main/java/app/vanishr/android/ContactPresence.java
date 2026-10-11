@@ -132,7 +132,7 @@ final class ContactPresence {
         if (peer == null || !foreground || !engine.realtimeReady() || !engine.authenticated()) return null;
         Seen state = states.get(peer.userId());
         if (state == null || !state.peer().equals(identity(peer))) return null;
-        ChatEngine.Peer saved = engine.peers().stream().filter(value -> value.userId().equals(peer.userId())).findFirst().orElse(null);
+        ChatEngine.Peer saved = engine.peer(peer.userId());
         if (saved == null || !identity(saved).equals(state.peer()) || !engine.sharesPresence(peer.userId())) return null;
         return state;
     }

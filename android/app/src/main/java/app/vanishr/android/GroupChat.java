@@ -64,7 +64,7 @@ final class GroupChat {
     }
 
     List<Conversation> conversations() {
-        return vault.names("group/").stream().map(name -> read(name,Conversation.class))
+        return vault.names("group/").stream().map(name -> read(name,Conversation.class)).filter(Objects::nonNull)
                 .filter(group -> !invited(group) || !engine.safety().isBlocked(group.snapshot().ownerId()))
                 .sorted(Comparator.comparing(Conversation::name)).toList();
     }
@@ -86,8 +86,9 @@ final class GroupChat {
     String senderName(UUID id,UUID sender) {
         Conversation group=get(id);
         if (group==null) return "Member";
-        return engine.peers().stream().filter(peer -> peer.userId().equals(sender)).map(ChatEngine.Peer::name).findFirst()
-                .orElseGet(() -> group.snapshot().members().stream().filter(member -> member.userId().equals(sender)).map(Member::name).findFirst().orElse("Member"));
+        ChatEngine.Peer known=engine.peer(sender);
+        if (known!=null) return known.name();
+        return group.snapshot().members().stream().filter(member -> member.userId().equals(sender)).map(Member::name).findFirst().orElse("Member");
     }
     private Approval approval(UUID group,UUID epoch) { return read("group-approval/"+epochKey(group,epoch),Approval.class); }
     private void snapshot(Snapshot value) throws Exception {
@@ -186,6 +187,7 @@ final class GroupChat {
     void forget(UUID id) throws Exception {
         for (String name : vault.names("entry/")) {
             ChatEngine.Entry entry=read(name,ChatEngine.Entry.class);
+            if (entry==null) continue;
             if (entry.groupEpoch()!=null && id.equals(entry.peerId())) engine.erase(entry,null);
         }
         vault.transaction(() -> {
@@ -533,12 +535,13 @@ final class GroupChat {
     void acknowledge(ChatEngine.Entry entry,String action) { write("group-ack/"+entry.id(),new Ack(entry.peerId(),entry.id(),entry.expiresAt(),action)); }
     private void flushAcks(UUID group) throws Exception {
         for (String name : vault.names("group-ack/")) {
-            Ack ack=read(name,Ack.class); if (!ack.groupId().equals(group)) continue;
+            Ack ack=read(name,Ack.class); if (ack==null || !ack.groupId().equals(group)) continue;
             try { api().call("POST",path(group)+"/messages/"+ack.id()+"/"+ack.action(),null,Void.class); }
             catch (RelayApi.ApiFailure failure) {
                 if (failure.status!=404 && failure.status!=410 && !(failure.status==403 && ack.action().equals("delete"))) throw failure;
             }
-            vault.transaction(() -> { vault.remove(name); return null; });
+            // A read receipt stored while "delivered" was in flight replaces it under the same name; keep it for the next pass.
+            vault.transaction(() -> { if (ack.equals(read(name,Ack.class))) vault.remove(name); return null; });
         }
         for (String name : vault.names("group-control-ack/")) {
             Ack ack=read(name,Ack.class); if (!ack.groupId().equals(group)) continue;

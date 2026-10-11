@@ -35,10 +35,20 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
     static final class PhoneLockRequiredException extends SecurityException { }
     static final class MigrationUnlockRequiredException extends SecurityException { }
     private static final int MAX_VAULT = 32 * 1024 * 1024;
+    static final long UNLOCK_CACHE_MILLIS = 250;
     private final Context context;
     private final AtomicFile file;
+    // Working state, guarded by this monitor. Writers mutate it inside a transaction.
     private Map<String, byte[]> values = new HashMap<>();
-    private boolean open;
+    // Last committed state. Readers use it without the monitor, so a slow commit never blocks them.
+    private volatile Map<String, byte[]> committed = Map.of();
+    // Held shared while a reader copies a value and exclusively while replaced values are wiped.
+    private final java.util.concurrent.locks.ReentrantReadWriteLock arrays = new java.util.concurrent.locks.ReentrantReadWriteLock();
+    private volatile boolean open;
+    private volatile long unlockedUntil;
+    private volatile long revision;
+    // Actions waiting for the running transaction to be published; guarded by this monitor.
+    private final List<Runnable> commitActions = new ArrayList<>();
     private boolean changed;
     private int transactionDepth;
 
@@ -127,6 +137,7 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
                 if (input.read() != -1) throw new SecurityException("Invalid vault trailing data");
             } catch (Exception failure) { close(); throw failure; }
             finally { Arrays.fill(plaintext, (byte) 0); }
+            publish();
             open = true;
             if (encrypted[0] != RECORD_VERSION) {
                 try {
@@ -141,6 +152,7 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
             try {
                 if (!Arrays.equals(probe, recovered)) throw new SecurityException("Secure storage verification failed");
             } finally { Arrays.fill(recovered, (byte) 0); }
+            publish();
             open = true;
         }
     }
@@ -163,15 +175,48 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
         if (keyguard.isDeviceLocked()) throw new PhoneLockedException();
     }
 
+    // Each check is two binder calls, so a successful one is reused briefly; unlocking and key use always check.
     private void requireOpen() {
         if (!open) throw new SecurityException("Vault is closed");
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now < unlockedUntil) return;
         requirePhoneUnlocked();
+        unlockedUntil = now + UNLOCK_CACHE_MILLIS;
     }
 
-    @Override public synchronized byte[] get(String name) {
+    private void publish() { committed = Collections.unmodifiableMap(new HashMap<>(values)); revision++; }
+
+    /** Counts published commits, so a test can prove that a batch of changes was one encrypted write. */
+    long revision() { return revision; }
+
+    private void wipeUnreferenced(Collection<byte[]> candidates, Collection<byte[]> live) {
+        Set<byte[]> keep = Collections.newSetFromMap(new IdentityHashMap<>());
+        keep.addAll(live);
+        arrays.writeLock().lock();
+        try { for (byte[] value : candidates) if (!keep.contains(value)) Arrays.fill(value, (byte) 0); }
+        finally { arrays.writeLock().unlock(); }
+    }
+
+    // A thread inside a transaction sees its own writes; every other thread reads the last committed state without waiting.
+    private <Result> Result readSnapshot(java.util.function.Function<Map<String, byte[]>, Result> reader) {
+        if (Thread.holdsLock(this)) return reader.apply(values);
+        // tryLock does not queue behind a writer that is only waiting, so a preempted low-priority reader cannot hold up this
+        // thread through the writer; it blocks only while a wipe is actually running.
+        java.util.concurrent.locks.Lock shared = arrays.readLock();
+        if (!shared.tryLock()) shared.lock();
+        try {
+            // Closing clears the snapshot under the write lock; a read that raced it must fail, not see an empty vault.
+            if (!open) throw new SecurityException("Vault is closed");
+            return reader.apply(committed);
+        } finally { shared.unlock(); }
+    }
+
+    @Override public byte[] get(String name) {
         requireOpen();
-        byte[] value = values.get(name);
-        return value == null ? null : value.clone();
+        return readSnapshot(view -> {
+            byte[] value = view.get(name);
+            return value == null ? null : value.clone();
+        });
     }
     @Override public synchronized void put(String name, byte[] value) {
         requireOpen();
@@ -184,11 +229,13 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
         if (transactionDepth == 0) throw new IllegalStateException("Protected writes require a transaction");
         if (values.remove(name) != null) changed = true;
     }
-    @Override public synchronized List<String> names(String prefix) {
+    @Override public List<String> names(String prefix) {
         requireOpen();
-        List<String> result = new ArrayList<>();
-        for (String name : values.keySet()) if (name.startsWith(prefix)) result.add(name);
-        return result;
+        return readSnapshot(view -> {
+            List<String> result = new ArrayList<>();
+            for (String name : view.keySet()) if (name.startsWith(prefix)) result.add(name);
+            return result;
+        });
     }
 
     @Override public synchronized <Result> Result transaction(Operation<Result> operation) throws Exception {
@@ -204,18 +251,32 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
         Map<String, byte[]> before = new HashMap<>(values);
         changed = false;
         transactionDepth++;
+        boolean committedChange = false, succeeded = false;
         try {
             Result result = operation.run();
-            if (changed) persist(verifyCommit);
+            if (changed) { persist(verifyCommit); publish(); committedChange = true; }
+            succeeded = true;
             return result;
         } catch (Exception failure) {
-            for (byte[] value : values.values()) if (!before.containsValue(value)) Arrays.fill(value, (byte) 0);
+            wipeUnreferenced(values.values(), before.values());
             values = before;
             throw failure;
         } finally {
             transactionDepth--;
-            for (byte[] value : before.values()) if (!values.containsValue(value)) Arrays.fill(value, (byte) 0);
+            if (committedChange) wipeUnreferenced(before.values(), values.values());
+            List<Runnable> actions = new ArrayList<>(commitActions);
+            commitActions.clear();
+            if (succeeded) for (Runnable action : actions) action.run();
         }
+    }
+
+    /**
+     * Runs the action once the current transaction has been persisted and published, and never if it rolls back, so a
+     * signal that says "stored data changed" cannot be seen before other threads can read the change. Outside a
+     * transaction it runs at once.
+     */
+    synchronized void afterCommit(Runnable action) {
+        if (transactionDepth == 0) action.run(); else commitActions.add(action);
     }
 
     private void persist() throws Exception { persist(false); }
@@ -312,31 +373,42 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
         UUID deviceId = owner.deviceId();
         String origin = Objects.requireNonNull(owner.origin());
         return new SecureVault() {
-            private void check(String name) {
-                if (values.containsKey(ACCOUNT_DELETION) || name.startsWith(SAVED_ACCOUNT))
+            // The ownership check and the access use one snapshot, so a sign-out cannot land between them.
+            private void check(Map<String, byte[]> view, String name) {
+                if (view.containsKey(ACCOUNT_DELETION) || name.startsWith(SAVED_ACCOUNT))
                     throw new SecurityException("The encryption account is no longer active");
-                ChatEngine.Account active = record("account", ChatEngine.Account.class);
+                byte[] encoded = view.get("account");
+                ChatEngine.Account active = encoded == null ? null
+                        : RelayApi.JSON.fromJson(new String(encoded, StandardCharsets.UTF_8), ChatEngine.Account.class);
                 if (active == null || !userId.equals(active.userId())
                         || !Objects.equals(deviceId, active.deviceId()) || !origin.equals(active.origin()))
                     throw new SecurityException("The encryption account is no longer active");
             }
             @Override public byte[] get(String name) {
-                synchronized (AndroidVault.this) { check(name); return AndroidVault.this.get(name); }
+                requireOpen();
+                return readSnapshot(view -> {
+                    check(view, name);
+                    byte[] value = view.get(name);
+                    return value == null ? null : value.clone();
+                });
             }
             @Override public void put(String name, byte[] value) {
-                synchronized (AndroidVault.this) { check(name); AndroidVault.this.put(name, value); }
+                synchronized (AndroidVault.this) { requireOpen(); check(values, name); AndroidVault.this.put(name, value); }
             }
             @Override public void remove(String name) {
-                synchronized (AndroidVault.this) { check(name); AndroidVault.this.remove(name); }
+                synchronized (AndroidVault.this) { requireOpen(); check(values, name); AndroidVault.this.remove(name); }
             }
             @Override public List<String> names(String prefix) {
-                synchronized (AndroidVault.this) {
-                    check(prefix);
-                    return AndroidVault.this.names(prefix).stream().filter(name -> !name.startsWith(SAVED_ACCOUNT)).toList();
-                }
+                requireOpen();
+                return readSnapshot(view -> {
+                    check(view, prefix);
+                    List<String> result = new ArrayList<>();
+                    for (String name : view.keySet()) if (name.startsWith(prefix) && !name.startsWith(SAVED_ACCOUNT)) result.add(name);
+                    return result;
+                });
             }
             @Override public <Result> Result transaction(Operation<Result> operation) throws Exception {
-                return AndroidVault.this.transaction(() -> { check(""); return operation.run(); });
+                return AndroidVault.this.transaction(() -> { check(values, ""); return operation.run(); });
             }
         };
     }
@@ -588,8 +660,12 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
     }
 
     @Override public synchronized void close() {
-        for (byte[] value : values.values()) Arrays.fill(value, (byte) 0);
+        arrays.writeLock().lock();
+        try {
+            open = false;
+            committed = Map.of();
+            for (byte[] value : values.values()) Arrays.fill(value, (byte) 0);
+        } finally { arrays.writeLock().unlock(); }
         values.clear();
-        open = false;
     }
 }

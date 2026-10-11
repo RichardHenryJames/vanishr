@@ -207,16 +207,20 @@ final class AdminOnboarding {
         catch (Exception invalid) { return false; }
     }
 
-    void prepare(ChatEngine.Peer peer) throws Exception {
+    /** The local half of preparing a chat: true when the contact is saved and still matches its pins; false needs the network. */
+    boolean prepareSaved(ChatEngine.Peer peer) throws Exception {
         if (!engine.authenticated()) throw new SecurityException("Sign in before messaging");
         if (engine.safety().isBlocked(peer.userId())) throw new SecurityException("This account is blocked");
         ChatEngine.Peer saved = read("contact/" + peer.userId(), ChatEngine.Peer.class);
-        if (saved != null) {
-            if (!RemotePhotoSession.contact(saved).equals(RemotePhotoSession.contact(peer)))
-                throw new SecurityException("Contact identity changed");
-            requireOfficial(saved);
-            return;
-        }
+        if (saved == null) return false;
+        if (!RemotePhotoSession.contact(saved).equals(RemotePhotoSession.contact(peer)))
+            throw new SecurityException("Contact identity changed");
+        requireOfficial(saved);
+        return true;
+    }
+
+    void prepare(ChatEngine.Peer peer) throws Exception {
+        if (prepareSaved(peer)) return;
         if (!eligible(peer.userId())) throw new SecurityException("Verify this contact before messaging");
         ChatEngine.Peer current = lookup(peer.userId());
         if (current == null || !RemotePhotoSession.contact(current).equals(RemotePhotoSession.contact(peer)))

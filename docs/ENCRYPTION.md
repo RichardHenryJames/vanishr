@@ -130,7 +130,10 @@ set `setUnlockedDeviceRequired(true)` only when generated on Android 15 or later
 Android 14 and below use the explicitly approved compatibility policy: no extra
 Keystore unlock restriction, avoiding Android 12-14 weak-biometric/profile bugs.
 Every storage access requires `KeyguardManager.isDeviceSecure()` and rejects
-`isDeviceLocked()`. On older Android this lock boundary is app-enforced, not an
+`isDeviceLocked()`: opening the vault and every Keystore operation check each time,
+and reads of records already decrypted in memory reuse a successful check for at most
+250 ms (0.5.9), so message text is never decrypted and nothing is committed while the
+phone is locked. On older Android this lock boundary is app-enforced, not an
 independent Keystore authorization. Keys remain nonexportable AES-256-GCM with
 random IVs and authenticated records. Existing keys keep their creation policy
 after OS upgrades. There is no separate app credential prompt or authentication

@@ -414,23 +414,25 @@ cancelled and their UI payloads cleared on backgrounding, while existing encrypt
 outbox records keep their normal retry and expiry behavior. No plaintext draft
 cache, new logging or weaker identity check is introduced.
 
-Conversation refreshes read protected records, decrypt newly displayed timed text
-and persist read acknowledgements on the existing serialized client worker, not
-the UI thread. Receipt-only updates reuse the existing message views instead of
+Conversation refreshes read protected records and decrypt newly displayed timed
+text on a read-only worker, not the UI thread and not the worker that syncs and
+sends. The read acknowledgements for everything newly displayed are one encrypted
+commit, and a message that vanished meanwhile is skipped, never recreated.
+Receipt-only updates reuse the existing message views instead of
 decrypting the history again. Retained views remain bounded by the existing
 message limit; their text is cleared on expiry, conversation changes and
 backgrounding. Asynchronous results are bound to the current engine and screen
 generation and recheck absolute deadlines before display. View-once messages
 still require explicit opening. No additional plaintext disk cache is created.
 
-Presence-header identity checks also run on the client worker. The UI checks the
+Presence-header identity checks also run on the read-only worker. The UI checks the
 validated in-memory snapshot's original deadline and current connection state;
 disconnects and replacement snapshots invalidate the label immediately. Typing
 edits do not hold a lock across protected-storage or network operations. Realtime
 wakes arriving during a sync request one coalesced follow-up instead of being
 discarded; Signal and vault mutations remain serialized.
 
-Profile-avatar reads and decoding also run on the serialized worker. Results
+Profile-avatar reads and decoding also run on the read-only worker. Results
 are bound to the current engine, screen, photo revision and individual view
 request, with expiry rechecked before display. Backgrounding invalidates these
 requests and clears bitmaps; secure-storage failures are surfaced through the
@@ -447,8 +449,10 @@ transport and retain their existing consent/lifetime rules.
 Vanishr has no separate app lock or repeated credential prompt. While Android
 reports the phone unlocked, foreground startup opens the encrypted vault
 automatically after any system-accepted unlock method, including fingerprint or
-face. A configured screen lock is still required and every vault access checks
-both device security and current lock state. Backgrounding clears visible content
+face. A configured screen lock is still required. Opening the vault and every
+Keystore operation check both device security and current lock state; reads of
+records already open in memory reuse a successful check for at most 250 ms (see
+[Responsiveness and the open vault](#responsiveness-and-the-open-vault)). Backgrounding clears visible content
 and closes the in-memory session. Anyone holding an already-unlocked phone can
 open Vanishr: this is not a second authentication boundary.
 
@@ -517,6 +521,55 @@ published metadata, not a signature or an in-app verification of the downloaded
 APK. A compromised host can suppress updates or serve misleading metadata;
 the signing key and Android package manager remain the update trust boundary.
 No downloaded scripts, DEX or other executable code replace the running client.
+
+### Responsiveness and the open vault
+
+Before 0.5.9, opening the chat list or a chat could take seconds: every list row
+rescanned every stored message, every vault read made two Android binder calls to
+re-check the lock state, a read waited while another thread re-encrypted and wrote
+the whole vault, and tapping the automatic admin chat queued behind the sync on the
+same worker. These are bounded now without weakening the access rules:
+
+- **Lock check.** Opening the vault and every Keystore operation (sealing, decrypting
+  message content, writing the vault) check that the phone is secure and unlocked
+  each time. Reads of the vault's records that are already decrypted in memory
+  (contacts, message metadata, and the Signal state and session tokens the open vault
+  holds) reuse a successful check for at most 250 ms. After the phone locks, those
+  reads can still succeed for up to 250 ms; message text cannot be decrypted and
+  nothing can be committed in that window, because those operations check again. This
+  check never protected memory from code running inside the process.
+- **Snapshot reads.** A read is served from an immutable copy of the last committed
+  state and never waits for another thread's commit. A transaction sees its own
+  writes; other threads see them only after they have been persisted. A failed
+  transaction publishes nothing. Replaced and removed values are zeroed after
+  in-flight readers finish, and closing the vault clears the snapshot under the same
+  lock, so a read racing the close fails closed instead of seeing an empty vault.
+- **Local-only taps.** A saved contact's chat, verified or the automatic admin chat,
+  opens after the same identity, admin-pin and block checks as before, now run on the
+  main thread against local records only. A changed identity, a blocked account and a
+  deletion in progress still fail closed. Only a contact never saved on this phone
+  needs the network introduction, which still runs on the sync worker.
+- **Lanes.** Screen preparation (message text, avatars, the presence header) uses a
+  read-only worker that has no network or Signal access. Signal sessions, sending and
+  sync stay on one worker because libsignal state is not made for concurrent use.
+  Because the read-only worker stores read receipts while the sync worker may be
+  sending acknowledgements, the sync worker deletes a sent acknowledgement only if it
+  is unchanged; a read receipt stored while "delivered" was on the wire is kept and
+  sent on the next pass. Counters that tell the screen stored data changed (the
+  profile-photo generation) are bumped only after the commit is published, through a
+  vault hook that never fires for a rolled-back transaction.
+- **Cooperative sync.** A user action that waits for the sync worker is counted; a
+  running sync stops at its next step boundary, which is equivalent to a dropped
+  connection there, and resumes behind the action from the stored state.
+
+Unchanged: no plaintext message cache, no new logging, absolute deadlines rechecked
+at display, and the same fail-closed behavior for expired content, failed
+authentication, changed identities and unavailable secure storage.
+
+Not claimed: the measurements in [VERIFICATION.md](VERIFICATION.md#release-059--startup-and-tap-responsiveness)
+come from an emulator with software-backed Keystore. A phone whose Keystore is
+hardware-backed (including StrongBox) encrypts and decrypts more slowly, and the vault
+is still re-encrypted whole on each commit; that was not measured and is not addressed.
 
 ## Notification navigation
 

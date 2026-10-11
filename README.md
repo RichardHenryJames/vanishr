@@ -12,6 +12,18 @@ license notices at **https://vanishr-download.vercel.app**.
 The public [update feed](https://vanishr-download.vercel.app/updates.json), not
 the latest Git version, determines which release users can download and discover.
 
+Release **0.5.9/code 40** fixes the delay after opening the app, when tapping a chat right
+after start-up could wait several seconds before anything responded. Opening a chat, the
+chat list and unread badges no longer wait behind a sync or an encrypted write; chats the
+phone already knows open at once, and a running sync steps aside for a send or other action.
+On an emulator with synthetic data the admin's 64-contact list went from about 26 s to under
+1 s and a tap with the sync worker blocked from about 4.7 s to about 0.1 s. Who can read
+what is unchanged. It is a client-only change (no relay update); installs of 0.5.6, 0.5.7 and
+0.5.8 get it from the in-app update prompt. Physical phones, and phones with hardware-backed
+key storage, were not measured. See the
+[threat model](docs/THREAT-MODEL.md#responsiveness-and-the-open-vault) and
+[verification](docs/VERIFICATION.md#release-059--startup-and-tap-responsiveness).
+
 Release **0.5.8/code 39** fixes the automatic chat between the official admin and each
 new account, which never showed Online, Typing or Last seen. It now shares them like any
 other direct chat while the saved identity still passes the app's admin pin. That chat

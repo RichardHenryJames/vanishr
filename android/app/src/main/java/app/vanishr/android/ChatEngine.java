@@ -148,6 +148,8 @@ final class ChatEngine implements AutoCloseable {
                 && vault.get("contact/" + userId) != null;
     }
     void prepareConversation(Peer peer) throws Exception { safety.requireAllowed(peer.userId()); onboarding.prepare(peer); }
+    /** The local half of opening a chat; false means the contact must still be introduced over the network. */
+    boolean prepareSavedConversation(Peer peer) throws Exception { safety.requireAllowed(peer.userId()); return onboarding.prepareSaved(peer); }
     boolean realtimeReady() { return realtimeReady; }
     RelayApi groupApi() { return api; }
     private void useApi(RelayApi next) {
@@ -383,9 +385,21 @@ final class ChatEngine implements AutoCloseable {
         return result;
     }
 
+    /** One contact without listing every contact; a saved contact wins over an introduction, as in peers(). */
+    Peer peer(UUID userId) {
+        if (userId == null || safety.isBlocked(userId)) return null;
+        Peer saved = read("contact/" + userId, Peer.class);
+        if (saved != null) return saved;
+        for (Peer introduced : onboarding.peers()) if (introduced.userId().equals(userId)) return introduced;
+        return null;
+    }
+
     private List<Peer> savedPeers() {
         List<Peer> peers = new ArrayList<>();
-        for (String name : vault.names("contact/")) peers.add(read(name, Peer.class));
+        for (String name : vault.names("contact/")) {
+            Peer saved = read(name, Peer.class);
+            if (saved != null) peers.add(saved);
+        }
         peers.sort(Comparator.comparing(Peer::name));
         return peers;
     }
@@ -424,6 +438,7 @@ final class ChatEngine implements AutoCloseable {
             throw new SecurityException("Contact is unavailable");
         for (String name : vault.names("entry/")) {
             Entry entry = read(name, Entry.class);
+            if (entry == null) continue;
             if (entry.groupEpoch() == null && peerId.equals(entry.peerId())) erase(entry, null);
         }
     }
@@ -447,6 +462,7 @@ final class ChatEngine implements AutoCloseable {
         presence.disconnected();
         for (String name : vault.names("entry/")) {
             Entry entry = read(name, Entry.class);
+            if (entry == null) continue;
             if (entry.groupEpoch() == null && peerId.equals(entry.peerId())
                     || entry.groupEpoch() != null && !entry.outgoing() && peerId.equals(entry.senderId()))
                 erase(entry, entry.outgoing() ? null : "delete");
@@ -584,16 +600,31 @@ final class ChatEngine implements AutoCloseable {
 
     List<Entry> entries(UUID peerId) {
         List<Entry> result = new ArrayList<>();
+        Map<UUID, Boolean> blocked = new HashMap<>();
+        long now = System.currentTimeMillis();
         for (String name : vault.names("entry/")) {
             Entry entry = read(name, Entry.class);
-            if (entry.expiresAt() > System.currentTimeMillis() && (peerId == null || peerId.equals(entry.peerId()))
-                    && !safety.isBlocked(entry.groupEpoch() == null ? entry.peerId() : entry.senderId())) result.add(entry);
+            if (entry == null || entry.expiresAt() <= now || (peerId != null && !peerId.equals(entry.peerId()))) continue;
+            if (!blocked.computeIfAbsent(entry.groupEpoch() == null ? entry.peerId() : entry.senderId(), safety::isBlocked)) result.add(entry);
         }
         result.sort(Comparator.comparingLong(entry -> entry.expiresAt() - entry.expiry().milliseconds));
         return result;
     }
 
-    Content content(Entry entry, boolean consume) throws Exception {
+    /** True while the message record exists; a screen refresh uses it to tell a vanished message from a real failure. */
+    boolean hasEntry(UUID id) { return vault.get("entry/" + id) != null; }
+
+    /** Unread incoming messages per conversation, counted in one pass instead of one scan per row. */
+    Map<UUID, Long> unreadCounts() {
+        Map<UUID, Long> counts = new HashMap<>();
+        for (Entry entry : entries(null)) if (!entry.outgoing() && !entry.state().equals("READ")) counts.merge(entry.peerId(), 1L, Long::sum);
+        return counts;
+    }
+
+    Content content(Entry entry, boolean consume) throws Exception { return content(entry, consume, true); }
+
+    /** With markRead false the caller records receipts for a whole screen at once through markRead(Collection). */
+    Content content(Entry entry, boolean consume, boolean markRead) throws Exception {
         safety.requireAllowed(entry.groupEpoch() == null ? entry.peerId() : entry.senderId());
         if (entry.expiresAt() <= System.currentTimeMillis()) { erase(entry, null); throw new SecurityException("Message expired"); }
         if (entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE && !consume) throw new SecurityException("Explicit viewing is required");
@@ -601,16 +632,22 @@ final class ChatEngine implements AutoCloseable {
         try {
             Content content = JSON.fromJson(new String(plaintext, StandardCharsets.UTF_8), Content.class);
             if (entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE) erase(entry, entry.outgoing() ? null : "read");
-            else if (!entry.outgoing() && !entry.state().equals("READ")) markRead(entry);
+            else if (markRead && !entry.outgoing() && !entry.state().equals("READ")) markRead(List.of(entry));
             return content;
         } finally { Arrays.fill(plaintext, (byte) 0); }
     }
 
-    private void markRead(Entry entry) throws Exception {
+    /** Records read receipts in one durable commit; entries that vanished or were already read in the meantime are skipped. */
+    void markRead(Collection<Entry> entries) throws Exception {
+        if (entries.isEmpty()) return;
         vault.transaction(() -> {
-            write("entry/" + entry.id(), entry.withState("READ"));
-            if (entry.groupEpoch()!=null) groups.acknowledge(entry,"read");
-            else write("ack/" + entry.id(), new Ack(entry.id(), entry.expiresAt(), "read"));
+            for (Entry entry : entries) {
+                Entry stored = read("entry/" + entry.id(), Entry.class);
+                if (stored == null || stored.outgoing() || stored.state().equals("READ")) continue;
+                write("entry/" + stored.id(), stored.withState("READ"));
+                if (stored.groupEpoch() != null) groups.acknowledge(stored, "read");
+                else write("ack/" + stored.id(), new Ack(stored.id(), stored.expiresAt(), "read"));
+            }
             return null;
         });
     }
@@ -714,6 +751,7 @@ final class ChatEngine implements AutoCloseable {
     private void flushAcks() throws Exception {
         for (String name : vault.names("ack/")) {
             Ack acknowledgement = read(name, Ack.class);
+            if (acknowledgement == null) continue;
             try {
                 api.call(acknowledgement.action().equals("delete") ? "DELETE" : "POST", "/messages/" + acknowledgement.id()
                         + (acknowledgement.action().equals("delete") ? "" : "/" + acknowledgement.action()), null, Void.class);
@@ -721,7 +759,8 @@ final class ChatEngine implements AutoCloseable {
                 if (failure.status != 404 && failure.status != 410
                         && !(failure.status == 403 && acknowledgement.action().equals("delete"))) throw failure;
             }
-            vault.transaction(() -> { vault.remove(name); return null; });
+            // A read receipt stored while "delivered" was in flight replaces it under the same name; keep it for the next pass.
+            vault.transaction(() -> { if (acknowledgement.equals(read(name, Ack.class))) vault.remove(name); return null; });
         }
     }
 
@@ -772,22 +811,35 @@ final class ChatEngine implements AutoCloseable {
         } catch (Exception failure) { AndroidVault.deleteContentKey(message.expiresAt(), message.id(), account.userId()); throw failure; }
     }
 
-    void sync() throws Exception {
+    void sync() throws Exception { sync(() -> false); }
+
+    /**
+     * One sync pass. The caller can ask it to yield: it then stops between steps and returns false, which is
+     * equivalent to a dropped connection at that point, and the next pass resumes from the stored state.
+     */
+    boolean sync(java.util.function.BooleanSupplier yield) throws Exception {
         safety.requireNotDeleting();
         purge();
         if (!authenticated()) {
             if (account != null && account.accessToken() != null && !account.accessToken().isEmpty()) invalidateToken();
-            return;
+            return true;
         }
         try {
             safety.refresh();
+            if (yield.getAsBoolean()) return false;
             if (System.currentTimeMillis() >= nextKeyCheck) { replenishKeys(); nextKeyCheck = System.currentTimeMillis() + 30_000; }
             flushAcks();
+            if (yield.getAsBoolean()) return false;
             flushOutgoing();
+            if (yield.getAsBoolean()) return false;
             unverifiedIncoming = false;
             Incoming[] pending = api.call("GET", "/messages/pending", null, Incoming[].class);
-            for (Incoming message : pending) receive(message);
+            for (Incoming message : pending) {
+                receive(message);
+                if (yield.getAsBoolean()) return false;
+            }
             flushAcks();
+            if (yield.getAsBoolean()) return false;
             List<Status> statuses = new ArrayList<>();
             List<Entry> outgoing = new ArrayList<>();
             for (Entry entry : entries(null)) if (entry.outgoing() && entry.groupEpoch()==null) outgoing.add(entry);
@@ -804,13 +856,17 @@ final class ChatEngine implements AutoCloseable {
                 }
                 return null;
             });
+            if (yield.getAsBoolean()) return false;
             boolean hadGroups=!groups.conversations().isEmpty();
             groups.sync();
             if (!hadGroups && !groups.conversations().isEmpty()) nextKeyCheck=0;
+            if (yield.getAsBoolean()) return false;
             refreshProfiles();
+            if (yield.getAsBoolean()) return false;
             photos.sync();
             online = true;
             onboarding.refresh();
+            return true;
         } catch (RelayApi.ApiFailure failure) {
             online = false;
             if (failure.status == 401) invalidateToken();

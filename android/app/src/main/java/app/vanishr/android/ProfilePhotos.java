@@ -45,9 +45,7 @@ final class ProfilePhotos {
         byte[] encoded = JSON.toJson(value).getBytes(StandardCharsets.UTF_8);
         try { vault.put(key, encoded); } finally { Arrays.fill(encoded, (byte) 0); }
     }
-    private ChatEngine.Peer peer(UUID userId) {
-        return engine.peers().stream().filter(value -> value.userId().equals(userId)).findFirst().orElse(null);
-    }
+    private ChatEngine.Peer peer(UUID userId) { return engine.peer(userId); }
     private boolean matches(ChatEngine.Peer peer, UUID device, String identity) {
         return peer != null && peer.deviceId().equals(device) && peer.identityKey().equals(identity) && engine.independentlyVerified(peer.userId());
     }
@@ -76,7 +74,7 @@ final class ProfilePhotos {
         long revision = Math.max(System.currentTimeMillis(), previous == null ? 1 : Math.addExact(previous.revision(), 1));
         try { vault.transaction(() -> { write("profile-photo", new Own(revision, image)); return null; }); }
         finally { if (previous != null && previous.photo() != null) Arrays.fill(previous.photo(), (byte) 0); }
-        generation++;
+        vault.afterCommit(() -> generation++);
     }
 
     private void verifyCurrent(ChatEngine.Peer peer) throws Exception {
@@ -98,7 +96,7 @@ final class ProfilePhotos {
             for (String name : vault.names("profile-photo-out/")) if (read(name, Queued.class).packet().recipientId().equals(userId)) vault.remove(name);
             return null;
         });
-        generation++;
+        vault.afterCommit(() -> generation++);
     }
 
     private void queue(ChatEngine.Peer peer, ProfileEnvelope.Action action, UUID requestId, long revision, byte[] image, long deadline) throws Exception {
@@ -138,7 +136,7 @@ final class ProfilePhotos {
             clearPeer(peer.userId());
             return null;
         });
-        generation++;
+        vault.afterCommit(() -> generation++);
     }
 
     private void clearPeer(UUID id) {
@@ -187,12 +185,12 @@ final class ProfilePhotos {
                         write("profile-photo-cache/" + sender.userId(), new Cached(sender.deviceId(), sender.identityKey(), envelope.revision(), envelope.photo(), packet.expiresAt()));
                         if (request.refreshAt() == 0) write("profile-photo-request/" + sender.userId(),
                             new Request(request.id(), request.deviceId(), request.identityKey(), request.expiresAt(), request.expiresAt() - REFRESH));
-                        generation++;
+                        vault.afterCommit(() -> generation++);
                     }
                     if (previous != null && previous.photo() != null) Arrays.fill(previous.photo(), (byte) 0);
                 } else {
                     Request request = read("profile-photo-request/" + sender.userId(), Request.class);
-                    if (request != null && request.id().equals(envelope.requestId())) { clearPeer(sender.userId()); generation++; }
+                    if (request != null && request.id().equals(envelope.requestId())) { clearPeer(sender.userId()); vault.afterCommit(() -> generation++); }
                 }
                 write("profile-photo-seen/" + packet.id(), packet.expiresAt());
             } finally {
@@ -261,7 +259,7 @@ final class ProfilePhotos {
                             queue(peer, ProfileEnvelope.Action.REQUEST, UUID.randomUUID(), 0, null, System.currentTimeMillis() + LIFETIME);
                         }
                     } catch (SecurityException failure) {
-                        vault.transaction(() -> { clearPeer(peer.userId()); return null; }); generation++;
+                        vault.transaction(() -> { clearPeer(peer.userId()); return null; }); vault.afterCommit(() -> generation++);
                     } catch (RelayApi.ApiFailure failure) { if (failure.status != 404 && failure.status != 409 && failure.status != 429) throw failure; }
                 }
                 cursor = (cursor + Math.min(2, peers.size())) % peers.size();
@@ -273,7 +271,7 @@ final class ProfilePhotos {
     void purge(String prefix, long now) {
         for (String name : vault.names(prefix + "profile-photo-cache/")) {
             Cached cached = read(name, Cached.class);
-            if (cached.expiresAt() <= now) { vault.remove(name); generation++; }
+            if (cached.expiresAt() <= now) { vault.remove(name); vault.afterCommit(() -> generation++); }
             if (cached.photo() != null) Arrays.fill(cached.photo(), (byte) 0);
         }
         for (String name : vault.names(prefix + "profile-photo-request/")) if (read(name, Request.class).expiresAt() <= now) vault.remove(name);
