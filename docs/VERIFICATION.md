@@ -138,7 +138,7 @@ Demonstrated on 2026-10-10 and 2026-10-11 (synthetic accounts and an emulator on
   which fails alone as well (as on 0.5.7). Earlier full runs on intermediate builds also failed the 100 ms
   typing bound and the presence typing test described above, both since adapted; the receipt race found by
   the review was fixed after the first two full runs, and every later full run includes its tests.
-- A first run of the suite on the final code was killed when the Windows host rebooted (20:40 local on
+- A first run of the suite on the final code was killed when the Windows host rebooted (about 15:10 UTC on
   2026-10-10), which also stopped the emulator and the test script before it could clear the random screen-lock
   PIN it had set; nothing but that dead script knew the PIN. Only the dedicated `Vanishr_Security_Test`
   emulator was touched: it was restarted with `-wipe-data` (synthetic data only), after which the credential check
@@ -153,6 +153,54 @@ Demonstrated on 2026-10-10 and 2026-10-11 (synthetic accounts and an emulator on
 - `DeviceSecurityTest` (6 tests) passed on the final build without a screen lock (5 passed, 1 skipped because it
   needs a lock) and with one (5 passed, 1 skipped because it needs no lock), so each of the six ran once and
   opening the vault is still strict.
+
+**Publication, 2026-10-11 (UTC):**
+
+- **Relay.** Unchanged: `git diff ab93146 HEAD -- relay/src/main infra` is empty, so the deployed schema-13
+  relay was not redeployed and no Azure operation ran. The packaging script's read-only `/health` check of the
+  relay returned `up`.
+- **Build and stage.** After `verify.ps1 -Android` (client-core 19 tests, relay 101 tests with the two opt-in live
+  tests skipped, lint, instrumentation compilation), `:app:testDebugUnitTest`, `:app:exportDependencyInventory`
+  and notice generation (116 components; the committed notices did not change), `package-apk.ps1` built the
+  signed APK from commit `3158c5c`: **44,471,474 bytes**, SHA-256
+  `2198f913a5a317b805c1a0dec873f075dcac8a98b5888932cfe4e78f6858e252`, min API 28, target API 36, the same 15
+  permissions as 0.5.8 and the same certificate (SHA-256
+  `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`). The size equals 0.5.7's and 0.5.8's; the
+  hashes differ and its dex contains the new read-only worker and not 0.5.8's. `.tools\vercel-download-0.5.9`
+  holds 31 files / 59,760,009 bytes (limit 99,000,000), no hidden file and no `.env`. The source ZIP has 452
+  entries: 234 source files, each byte-identical to its blob in commit `3158c5c`, plus 218 dependency-source
+  files. Name, content and known-private-value scans of the stage, the ZIP and the APK found nothing, and the
+  dependency inventory (116) and the 16 unavailable-source entries equal 0.5.8's. This is recorded in
+  `.tools\distribution-audit-0.5.9.json`; it was an inspection by the release agent with automated scans, not an
+  independent audit.
+- **Vercel.** Deployment `dpl_CGKAQVUnS3rwMPRo77HNZaysJn1q` (production, READY) was uploaded from that stage
+  with the existing Vanishr project link (project and team IDs checked, no downgrade against the published 0.5.8
+  feed). The CLI moved only the team alias, which is behind Vercel Authentication, so the canonical alias
+  `vanishr-download.vercel.app`, which still served 0.5.8, was moved explicitly.
+- **Public verification** (`.tools\public-release-verification-0.5.9.json`). The canonical feed reports 0.5.9 / 40
+  with `no-store`; the 30 served files (`vercel.json` is configuration and is not served) are byte-identical to
+  the audit; the downloaded APK verifies with the original certificate; CSP, nosniff, referrer, HSTS and the APK
+  download headers are present; ten private or missing paths return 404; and the Android and security pages carry
+  the 0.5.9 notes.
+- **Over-the-air update, 0.5.6 / 0.5.7 / 0.5.8 to 0.5.9**
+  (`.tools\ota-check-0.5.9\ota-verification-0.5.9.json`). On the dedicated Android 16 / API 36 emulator, with a
+  temporary screen lock that was cleared afterwards, the published release APKs of 0.5.6 (code 37), 0.5.7 (38)
+  and 0.5.8 (39) were installed one at a time. Each, with no manual trigger, fetched the live feed and showed
+  the **Update available / Vanishr 0.5.9** sheet with **Download** and **Later**. Tapping **Download** launched
+  an `ACTION_VIEW` browsable intent to `https://vanishr-download.vercel.app/...` in Chrome (Android redacts the
+  path in its log; the app's feed validation accepts only the exact versioned URL on this host, and well-formed
+  size and SHA-256 fields, but it does not hash the downloaded file itself; the public verification above hashed
+  that file). The published 0.5.9 APK was then installed over each with
+  `adb install -r`: it succeeded in place, the version code became 40, the first-install time was kept (so the
+  app data stays), the app launched and was still running after 12 seconds, the crash buffer was empty and the
+  update was no longer offered.
+- **What this does not show.** The browser download itself and Android's installation approval screen were not
+  completed by hand (Chrome stopped at its first-run screen on the recreated emulator). The update is not silent:
+  the prompt opens the browser and Android asks the user to approve the install, and an app only checks
+  automatically once a day, so an older install can take up to a day to show the prompt unless the user opens
+  My profile and chooses Check for updates. No account existed on the emulator, so an update of a phone holding
+  real account data, and the new app's behavior with a real account on a real relay, were not exercised.
+  Nothing was measured on a physical phone.
 
 **Not verified:** any physical phone; a phone whose Keystore is hardware backed or uses StrongBox, which
 encrypts and decrypts more slowly, because the vault is still re-encrypted whole on each commit and opening

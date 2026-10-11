@@ -19,8 +19,10 @@ phone already knows open at once, and a running sync steps aside for a send or o
 On an emulator with synthetic data the admin's 64-contact list went from about 26 s to under
 1 s and a tap with the sync worker blocked from about 4.7 s to about 0.1 s. Who can read
 what is unchanged. It is a client-only change (no relay update); installs of 0.5.6, 0.5.7 and
-0.5.8 get it from the in-app update prompt. Physical phones, and phones with hardware-backed
-key storage, were not measured. See the
+0.5.8 get it from the in-app update prompt, which opens the browser and still needs the user's
+install approval (the prompt and an in-place update were checked on an emulator against the
+published feed; the automatic check runs at most once a day). Physical phones, and phones with
+hardware-backed key storage, were not measured. See the
 [threat model](docs/THREAT-MODEL.md#responsiveness-and-the-open-vault) and
 [verification](docs/VERIFICATION.md#release-059--startup-and-tap-responsiveness).
 
