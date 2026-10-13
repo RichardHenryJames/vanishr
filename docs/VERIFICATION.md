@@ -1,7 +1,109 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-10-11 UTC. This is a development foundation,
+Evidence refreshed on Windows, 2026-10-13 UTC. This is a development foundation,
 not a production security assessment or independent audit.
+
+## Release 0.6.0 / Full-screen photos and the admin's save option
+
+Release 0.6.0 / code 41 changes how a photo from a chat is shown and adds one option for the
+official admin. It is a **client-only change**: no relay or schema change (the relay stays at
+schema 13, unchanged since 0.5.7; `git diff ab93146 HEAD -- relay/src/main infra` is empty) and no
+Azure operation. Installs of 0.5.6 to 0.5.9 can update through the in-app prompt; see the
+publication notes for what was and was not tested.
+
+**The request and how it was read.** A photo should open at the full screen width with no white
+border or padding; the Done button goes and only a cross at the top right stays; pressing and
+holding anywhere on the photo opens a popup to save it to the gallery, for every photo including
+one sent as view-once; and the save is "admin only". The viewer change applies to every account.
+"Admin only" was read as: **only the official admin account's app can save**. That reading was not
+confirmed with the owner before release; it is the one built, tested and disclosed.
+
+**What changed** (see [THREAT-MODEL.md](THREAT-MODEL.md#photo-viewer-and-the-admins-save-option-060)
+and [ARCHITECTURE.md](ARCHITECTURE.md#content-flow)):
+
+- [PhotoViewer](../android/app/src/main/java/app/vanishr/android/PhotoViewer.java) (new): a full-screen
+  dialog on a black, non-floating window theme (`Theme.Vanishr.PhotoViewer`), an image with no padding scaled
+  to the full width, and one 48 dp close cross at the top end, kept clear of system bars and cutouts on both
+  sides. It keeps `FLAG_SECURE` and hides overlay windows like the sheets did, and releases its bitmap and any
+  kept bytes when it stops.
+- [MainActivity](../android/app/src/main/java/app/vanishr/android/MainActivity.java): photos open in the viewer
+  instead of a bottom sheet; it closes at the message deadline, when the app is backgrounded and on sign-out.
+  Text messages still use the sheet with Done, the "Send photo" preview before sending is unchanged, and
+  Remote photos is unchanged. A long press (or the accessibility action "Save to gallery") asks for
+  confirmation; the save runs on its own thread and reports "Saved to your gallery." or "The photo could not
+  be saved."
+- [AdminOnboarding](../android/app/src/main/java/app/vanishr/android/AdminOnboarding.java) `verifiedAdmin()`:
+  the save option is unlocked only when the signed-in user id, this device's id and this phone's own identity
+  key all match the pin in the signed app, and any failure counts as "not the admin". It is decided on the
+  worker before the message is consumed. The older `admin()` compares only the user id, which the relay
+  supplies at sign-in, so it is not used for this (an independent review found that, see below).
+- [SafeImages](../android/app/src/main/java/app/vanishr/android/SafeImages.java) `saveToGallery`: writes the
+  unchanged bytes to `Pictures/Vanishr` through MediaStore (`IS_PENDING` while writing, the row deleted if
+  the write fails), after checking that they are a JPEG, PNG or WebP image. No storage permission and no
+  manifest permission were added. It needs Android 10 or later; on Android 9 (the minimum) the option says so.
+- Every other account's app still wipes a photo's decrypted bytes as soon as the bitmap is decoded and has no
+  save gesture. The in-app policy summary gained the sentence that the admin's app can save a photo sent to
+  it, even a view-once one; the policy version is unchanged by the owner's earlier decision, so no
+  re-acceptance screen appears. The privacy, security and Android pages and `llms.txt` say the same.
+
+Demonstrated on 2026-10-12 and 2026-10-13 (synthetic accounts and an emulator only):
+
+- Seven permanent tests were added to `ScreenFlowTest`:
+  - `photosFillTheScreenWithOnlyACloseButtonAndOrdinaryAccountsCannotSaveThem`: the viewer window, the image and
+    the picture span the whole screen width, no padding, no border, no Done button, the cross is the only
+    control (top right, at least 44 dp), `FLAG_SECURE` is set; an ordinary account has no long-click handler,
+    no popup, no kept bytes, and a view-once photo is consumed when opened; nothing reaches the gallery.
+  - `onlyTheAdminCanSaveAPhotoByLongPressingItEvenWhenItWasViewOnce`: the popup (Save photo, Cancel, Save); Cancel
+    saves nothing; Save writes exactly the original bytes (`image/jpeg`, not pending, under `Pictures/Vanishr`);
+    the same for a view-once photo after it was consumed and for a photo the admin sent; the kept bytes are zero
+    after the cross and after backgrounding; exactly two copies exist at the end.
+  - `aRealPressAndHoldAnywhereOnTheAdminsPhotoOpensTheSavePopupAndTheCrossClosesIt`: injected touches (about a
+    second without moving) at three places open the popup while the photo stays open; a real tap on the cross
+    closes the photo; the same hold on an ordinary account's photo does nothing.
+  - `anAccountThatOnlyCarriesTheAdminsUserIdCannotSavePhotos`: with the pinned user id but a different identity
+    key, or a different device id, `admin()` is true, `verifiedAdmin()` is false and the viewer has no save
+    option; the same account with the pinned identity can.
+  - `theCloseCrossFollowsTheReadingDirectionAndTheSideInsets`: the cross sits at the right edge in left-to-right
+    and at the left edge in right-to-left, each clear of its own side inset and of the status bar.
+  - `aGalleryCopyKeepsTheFormatAndAnUnsupportedFormatIsRefused`: JPEG and PNG copies keep their bytes, MIME type
+    and extension; an unsupported or empty payload is refused and leaves nothing behind.
+  - `anOpenPhotoClosesWhenItsMessageExpires`.
+  The opt-in live-relay `ReleaseWorkflowTest` was updated for the new control (it taps the cross, "Close
+  photo", instead of Done) but not run, because it needs a live relay and real accounts.
+- The viewer was captured from the final build and checked by eye: the picture spans the full width on black, one
+  white cross at the top right, no border, no button with text.
+- Mutation checks, each failing the matching new test and then reverted: every account treated as the admin
+  ("Ordinary accounts have no save gesture"); 24 dp padding on the picture (`expected:<0> but was:<63>`); the kept
+  bytes not wiped on close ("The kept bytes are wiped when the photo closes", `expected:<0> but was:<-1>`);
+  `verifiedAdmin()` reduced to the user-id check ("The device or identity key does not"); the left inset dropped
+  (`expected:<179.0> but was:<21.0>`); and a touch listener that swallows real touches, which fails only the
+  real-touch test while the `performLongClick()` tests still pass.
+- An independent read-only code review of the change found two issues, both fixed with a test: (1) the first
+  version gated saving on `admin()`, which a compromised relay could make true for an ordinary account by
+  returning the admin's user id on a fresh sign-in, contradicting the threat-model claim; it now uses
+  `verifiedAdmin()`; (2) the cross's margin was applied on the right only, so in a right-to-left language it sat
+  flush against the left edge and ignored a left cutout or bar; margins now follow both sides. It found no defects in
+  wiping, account switching, backgrounding, expiry, the MediaStore write or the unchanged text path.
+- One 0.5.9 test, `aMessageThatVanishesWhileTheChatOpensIsSkippedButARealFailureIsStillReported`, failed in the
+  first full run of this release: the first scheduled sync, about two seconds after launch, could refresh and
+  display the fixture messages before the test deleted a key. It now publishes the record only after the key is
+  gone (helper `entryWithoutItsKey`) and passed in three isolated runs and every later full run. Only test code
+  changed.
+- Full QA run on the final build and final tests on the dedicated Android 16 / API 36 emulator: **201 tests (155
+  screen-flow, 41 account-safety, 5 backup); 199 passed and 2 failed.** Both failures are the ones recorded for
+  0.5.8 and 0.5.9 and are unrelated to photos: `compactClassicProfilesOpenAsSecureBottomSheetsAndKeepTheChatDraft`
+  (a pixel check of a sheet button that fails inside a full run) and
+  `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`. An earlier full run of the same code, before the
+  real-touch test existed, had the same result (200 tests, the same two failures).
+
+**Not verified:** any physical phone, including how the gallery app and any gallery backup show or copy the
+saved file (the tests read it back through MediaStore); an Android 9 device, where the option only explains that
+it needs Android 10 (the emulator is API 36); the "Save to gallery" accessibility action with a screen reader (it
+is registered but only the long press was exercised); landscape, cutouts and foldables other than through
+synthetic insets; the live-relay `ReleaseWorkflowTest`; and that the sender is told nothing when the admin saves
+their photo (by design: there is no notification, which is why the public text asks people to send the admin only
+what they are happy for it to keep). The saved file is an ordinary, unencrypted gallery file that does not
+expire.
 
 ## Release 0.5.9 / Startup and tap responsiveness
 

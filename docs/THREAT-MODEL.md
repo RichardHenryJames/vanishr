@@ -202,6 +202,47 @@ existing protected-vault capacity and account-isolation boundaries. The relay
 rechecks the current admin role for discovery, and pauses discovery when it is
 revoked without transferring the permanent pin.
 
+### Photo viewer and the admin's save option (0.6.0)
+
+A photo opened from a chat fills the screen on black with a single close cross at the
+top right (no sheet, padding or Done button). The window keeps `FLAG_SECURE` and hides
+overlay windows, exactly as the sheets did, the photo closes at its message deadline and
+when the app is backgrounded, and the decoded bitmap is released with it.
+
+**One deliberate exception to "no plaintext copy outside the vault":** only the account
+that passes the pinned official-admin check keeps the decrypted photo bytes while the viewer
+is open. That check is `AdminOnboarding.verifiedAdmin()`: the signed-in user id, this
+device's id and this phone's own identity key must all match the pin compiled into the
+signed app, and any failure counts as "not the admin". The user id alone is not enough,
+because the relay supplies it at sign-in (`admin()` compares only that id, so it is not used
+to unlock saving; a regression test covers an account that carries the admin's id without
+the pinned identity). The decision is made before the message is consumed and off the main
+thread.
+A long press anywhere on that photo opens a confirmation, and Save writes the unchanged
+bytes into the shared gallery (`Pictures/Vanishr`, through MediaStore, Android 10 or later;
+no storage permission and no extra manifest permission). This works for any photo the admin
+can open, including one sent as view-once: the message is consumed when opened as before,
+and the saved file is a separate, ordinary, **unencrypted gallery file that does not expire**,
+is outside this app's protections, and is visible to any app with gallery access and to
+Android backups of the gallery. Every other account's app wipes the decrypted bytes
+immediately after decoding, as before, has no save gesture and has no save path. The bytes the
+admin's viewer keeps are wiped when the viewer closes (cross, back, expiry, backgrounding or
+sign-out); the copy handed to the writer is wiped after the write.
+
+What this changes for other people: anyone who sends the admin a photo, including a
+view-once photo, should assume the admin can keep it. It does not give the admin anything a
+recipient with a modified client or a second camera did not already have (the existing
+statement that view-once and expiry cannot stop a recipient keeping a copy still stands),
+but it makes it one tap for the one account that new users are introduced to. The in-app
+summary, the privacy and security pages and `llms.txt` say so. The gate is a client-side
+product rule, not a security boundary: a modified build can save anything it can view,
+and a compromised relay cannot make an ordinary account save, because the check is the
+local pinned identity, not a relay value.
+
+Not claimed: that the saved file is protected, that an ordinary account cannot be modified
+to save, or that physical-phone behavior and Android 9 (which has no scoped storage write
+path here; the option explains it needs Android 10) were tested.
+
 ## Account erasure, blocks and safety reports
 
 Account erasure requires a fresh account-only password/Google sign-in, never a
@@ -261,7 +302,10 @@ contact editor, and the server still derives update ownership from the session.
 
 Profiles, attachments and other in-app dialogs use secure native bottom sheets.
 Their windows retain screenshot and overlay protection; backgrounding dismisses
-them and clears visible content. Same-conversation redraws preserve an unsent
+them and clears visible content. A received or sent photo is the exception: it opens
+in the full-screen viewer described under
+[Photo viewer and the admin's save option](#photo-viewer-and-the-admins-save-option-060),
+with the same screenshot and overlay protection. Same-conversation redraws preserve an unsent
 composer draft only in memory. The draft is not persisted and is cleared when
 the app backgrounds; switching conversations does not carry it to another peer.
 

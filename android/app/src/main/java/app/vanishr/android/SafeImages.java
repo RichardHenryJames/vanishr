@@ -1,9 +1,13 @@
 package app.vanishr.android;
 
 import android.content.ContentResolver;
+import android.content.ContentValues;
+import android.content.Context;
 import android.graphics.*;
 import androidx.exifinterface.media.ExifInterface;
 import android.net.Uri;
+import android.os.Environment;
+import android.provider.MediaStore;
 import app.vanishr.crypto.ImageCipher;
 import app.vanishr.crypto.ProfileEnvelope;
 
@@ -12,6 +16,42 @@ import java.util.Arrays;
 
 final class SafeImages {
     private SafeImages() { }
+
+    /**
+     * Writes a received photo, unchanged, into the shared Pictures/Vanishr folder through MediaStore. Android 10 and later
+     * need no storage permission for a file the app creates. Nothing is written for a format the gallery cannot show.
+     */
+    @androidx.annotation.RequiresApi(29)
+    static Uri saveToGallery(Context context, byte[] image) throws IOException {
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(image, 0, image.length, bounds);
+        String type = bounds.outMimeType;
+        String extension = "image/jpeg".equals(type) ? ".jpg" : "image/png".equals(type) ? ".png" : "image/webp".equals(type) ? ".webp" : null;
+        if (extension == null) throw new IOException("Unsupported image format");
+        ContentResolver resolver = context.getContentResolver();
+        String stamp = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss", java.util.Locale.ROOT));
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.MediaColumns.DISPLAY_NAME, "Vanishr_" + stamp + extension);
+        values.put(MediaStore.MediaColumns.MIME_TYPE, type);
+        values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Vanishr");
+        values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+        Uri item = resolver.insert(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values);
+        if (item == null) throw new IOException("Gallery unavailable");
+        try {
+            try (OutputStream output = resolver.openOutputStream(item, "w")) {
+                if (output == null) throw new IOException("Gallery unavailable");
+                output.write(image);
+            }
+            ContentValues finished = new ContentValues();
+            finished.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            if (resolver.update(item, finished, null, null) != 1) throw new IOException("Gallery did not accept the photo");
+        } catch (IOException | RuntimeException failure) {
+            resolver.delete(item, null, null);
+            throw failure;
+        }
+        return item;
+    }
 
     static byte[] importImage(ContentResolver resolver, Uri uri) throws Exception {
         byte[] source;

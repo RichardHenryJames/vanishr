@@ -13,6 +13,7 @@ final class PlayPolicy {
             + "New accounts are introduced to the human Vanishr admin. The admin sees your shared name, username "
             + "and public device identity and, as in any chat with a contact, your Online, Typing and Last seen status "
             + "while you use the app, not your other conversations. You see the admin's status the same way. "
+            + "The admin's app can also save a photo you send it, even a view-once one, so send the admin only what you are happy for it to keep. "
             + "Messages remain end-to-end encrypted.\n\n"
             + "The Privacy policy explains account metadata, temporary relay data, Google sign-in, notifications "
             + "and account deletion. Abuse reports contain selected identifiers and a reason, not chat text or photos.";

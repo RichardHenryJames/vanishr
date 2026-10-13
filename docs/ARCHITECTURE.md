@@ -129,6 +129,17 @@ content remain in the Android client's Keystore-protected encrypted vault.
    content and ratchet state in one atomic transaction, then acknowledges delivery.
 8. Timed payloads/blobs are deleted from Redis on delivery. View-once payloads
    are deleted on read. All payloads and receipts expire at the hard deadline.
+9. Opening a photo (a normal one directly, a view-once one after an explicit confirmation
+   that consumes it) decrypts it in memory and shows it full screen
+   ([PhotoViewer](../android/app/src/main/java/app/vanishr/android/PhotoViewer.java)).
+   Normally the decrypted bytes are wiped as soon as the bitmap is decoded. For the
+   verified official-admin account only (`AdminOnboarding.verifiedAdmin()`: user id, device
+   id and this phone's identity key must all match the pin in the signed app, because the
+   relay supplies the user id at sign-in), the viewer keeps them until it closes so that a long
+   press can write them, after a confirmation, to the shared gallery
+   ([SafeImages](../android/app/src/main/java/app/vanishr/android/SafeImages.java)
+   `saveToGallery`, Android 10 or later). See the
+   [threat model](THREAT-MODEL.md#photo-viewer-and-the-admins-save-option-060).
 
 ## Group flow
 

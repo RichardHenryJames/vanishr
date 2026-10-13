@@ -68,6 +68,8 @@ public final class MainActivity extends AppCompatActivity {
     }, "vanishr-reader"));
     private final ScheduledExecutorService photoWork = Executors.newSingleThreadScheduledExecutor();
     private final ExecutorService updateWork = Executors.newSingleThreadExecutor();
+    // Gallery writes for the admin's "save photo"; kept off every other lane so a save never delays a sync or a screen read.
+    private final ExecutorService saveWork = Executors.newSingleThreadExecutor();
     // Counts user actions waiting for the work lane so a running sync can step aside for them.
     private final java.util.concurrent.atomic.AtomicInteger waitingActions = new java.util.concurrent.atomic.AtomicInteger();
     private final java.util.concurrent.atomic.AtomicBoolean syncQueued = new java.util.concurrent.atomic.AtomicBoolean();
@@ -114,6 +116,7 @@ public final class MainActivity extends AppCompatActivity {
     private ChatEnvelope.Expiry expiry = ChatEnvelope.Expiry.HOUR_1;
     private SecureSheet openDialog;
     private Bitmap displayedBitmap;
+    private PhotoViewer photoViewer;
     private ScrollView messageScroll;
     private java.util.List<ChatEngine.Entry> shownEntries = java.util.List.of();
     private final Map<UUID, MessageRow> messageRows = new LinkedHashMap<>();
@@ -2718,13 +2721,17 @@ public final class MainActivity extends AppCompatActivity {
     private void openContent(ChatEngine.Entry entry) {
         int generation = screenGeneration;
         submit(() -> {
-            ChatEngine.Content content = engine.content(entry, true);
+            ChatEngine loaded = engine;
+            // Decided before the message is consumed, and off the main thread because it reads the identity key from the vault.
+            boolean admin = entry.image() && loaded.onboarding().verifiedAdmin();
+            ChatEngine.Content content = loaded.content(entry, true);
             ui.post(() -> {
                 if (!resumed || engine == null || generation != screenGeneration || System.currentTimeMillis() >= entry.expiresAt()) {
                     if (content.image() != null) Arrays.fill(content.image(), (byte) 0);
                     return;
                 }
                 try {
+                    if (content.image() != null) { showPhoto(entry, content.image(), admin); queueSync(); return; }
                     LinearLayout panel = vertical();
                     panel.setPadding(dp(24), dp(12), dp(24), dp(20));
                     if (entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE) {
@@ -2736,18 +2743,12 @@ public final class MainActivity extends AppCompatActivity {
                         panel.addView(status);
                         panel.addView(design.spacer(20));
                     }
-                    View view;
-                    if (content.image() == null) view = design.text(content.envelope().text(), 18, 500, INK);
-                    else {
-                        displayedBitmap = SafeImages.display(content.image());
-                        Arrays.fill(content.image(), (byte) 0);
-                        ImageView image = new ImageView(this); image.setImageBitmap(displayedBitmap); image.setAdjustViewBounds(true); image.setMaxHeight(dp(400)); image.setContentDescription("Received photo"); view = image;
-                    }
+                    View view = design.text(content.envelope().text(), 18, 500, INK);
                     panel.addView(view, new LinearLayout.LayoutParams(-1, -2));
                     ScrollView scroll = new ScrollView(this);
                     scroll.addView(panel);
                     openDialog = new SecureSheet.Builder(this).setView(scroll).setPositiveButton("Done", null).create();
-                    openDialog.setOnDismissListener(dialog -> { if (view instanceof TextView text) text.setText(""); if (view instanceof ImageView image) image.setImageDrawable(null); clearBitmap(); });
+                    openDialog.setOnDismissListener(dialog -> { if (view instanceof TextView text) text.setText(""); clearBitmap(); });
                     showDialog(openDialog);
                     SecureSheet current = openDialog;
                     ui.postDelayed(() -> { if (current.isShowing()) current.dismiss(); }, Math.max(1, entry.expiresAt() - System.currentTimeMillis()));
@@ -2755,6 +2756,65 @@ public final class MainActivity extends AppCompatActivity {
                 } catch (Exception failure) { problem("Content unavailable."); }
             });
         }, this::render);
+    }
+
+    // A photo fills the screen with one close button. Only the verified official admin account keeps the bytes so that a long press
+    // can save them; everyone else's copy is wiped as soon as it is decoded, exactly as before.
+    private void showPhoto(ChatEngine.Entry entry, byte[] bytes, boolean admin) throws Exception {
+        Bitmap bitmap;
+        try { bitmap = SafeImages.display(bytes); }
+        catch (Exception failure) { Arrays.fill(bytes, (byte) 0); throw failure; }
+        if (!admin) Arrays.fill(bytes, (byte) 0);
+        closePhoto();
+        PhotoViewer viewer = null;
+        try {
+            viewer = new PhotoViewer(this, bitmap, admin ? bytes : null, this::confirmPhotoSave);
+            PhotoViewer shown = viewer;
+            photoViewer = shown;
+            shown.setOnDismissListener(dialog -> { if (photoViewer == shown) photoViewer = null; });
+            shown.show();
+            ui.postDelayed(() -> { if (shown.isShowing()) shown.dismiss(); }, Math.max(1, entry.expiresAt() - System.currentTimeMillis()));
+        } catch (RuntimeException failure) {
+            // The window could not be shown (for example the activity is finishing): nothing may be left decoded or kept.
+            photoViewer = null;
+            if (viewer != null) viewer.release();
+            else bitmap.recycle();
+            Arrays.fill(bytes, (byte) 0);
+            throw failure;
+        }
+    }
+
+    private void closePhoto() {
+        PhotoViewer viewer = photoViewer; photoViewer = null;
+        if (viewer != null) { viewer.dismiss(); viewer.release(); }
+    }
+
+    private void confirmPhotoSave(PhotoViewer viewer) {
+        if (!resumed || engine == null || photoViewer != viewer || !viewer.canSave() || !engine.onboarding().admin()) return;
+        if (Build.VERSION.SDK_INT < 29) { problem("Saving photos needs Android 10 or later."); return; }
+        showDialog(new SecureSheet.Builder(this).setTitle("Save photo")
+                .setMessage("Save this photo to your gallery? The saved copy is not encrypted and stays after the message expires.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Save", (dialog, which) -> savePhoto(viewer)).create());
+    }
+
+    @androidx.annotation.RequiresApi(29)
+    private void saveToGallery(byte[] copy) {
+        saveWork.execute(() -> {
+            boolean saved;
+            try { SafeImages.saveToGallery(this, copy); saved = true; }
+            catch (Exception failure) { saved = false; }
+            finally { Arrays.fill(copy, (byte) 0); }
+            boolean result = saved;
+            ui.post(() -> { if (!isDestroyed()) problem(result ? "Saved to your gallery." : "The photo could not be saved."); });
+        });
+    }
+
+    private void savePhoto(PhotoViewer viewer) {
+        if (Build.VERSION.SDK_INT < 29) { problem("Saving photos needs Android 10 or later."); return; }
+        byte[] copy = viewer.copyForSave();
+        if (copy == null) { problem("This photo is no longer available."); return; }
+        saveToGallery(copy);
     }
 
     private void queueSync() {
@@ -2979,7 +3039,7 @@ public final class MainActivity extends AppCompatActivity {
         dialog.show();
     }
     private void clearBitmap() { if (displayedBitmap != null) { displayedBitmap.recycle(); displayedBitmap = null; } }
-    private void dismissContent() { if (openDialog != null) { openDialog.setDismissWithAnimation(false); openDialog.dismiss(); openDialog = null; } clearBitmap(); }
+    private void dismissContent() { closePhoto(); if (openDialog != null) { openDialog.setDismissWithAnimation(false); openDialog.dismiss(); openDialog = null; } clearBitmap(); }
 
     private void hideContent() {
         photoAdmin = false; photoRoleAccount = null;
@@ -3026,5 +3086,5 @@ public final class MainActivity extends AppCompatActivity {
         if (hasFocus) resumeAfterPhoneUnlock();
     }
     @Override protected void onSaveInstanceState(Bundle state) { super.onSaveInstanceState(new Bundle()); }
-    @Override protected void onDestroy() { clearProfileAvatars(); selectedProfilePhoto = null; profilePhotoOwner = null; dismissContent(); if (googleCancellation != null) googleCancellation.cancel(); if (googleAttempt != null) googleAttempt.idToken = null; googleAttempt = null; ui.removeCallbacksAndMessages(null); unregisterReceiver(pushRefresh); unregisterReceiver(phoneUnlocked); if (cameraImage != null) Arrays.fill(cameraImage, (byte) 0); work.shutdown(); reader.shutdownNow(); photoWork.shutdownNow(); updateWork.shutdownNow(); super.onDestroy(); }
+    @Override protected void onDestroy() { clearProfileAvatars(); selectedProfilePhoto = null; profilePhotoOwner = null; dismissContent(); if (googleCancellation != null) googleCancellation.cancel(); if (googleAttempt != null) googleAttempt.idToken = null; googleAttempt = null; ui.removeCallbacksAndMessages(null); unregisterReceiver(pushRefresh); unregisterReceiver(phoneUnlocked); if (cameraImage != null) Arrays.fill(cameraImage, (byte) 0); work.shutdown(); reader.shutdownNow(); saveWork.shutdown(); photoWork.shutdownNow(); updateWork.shutdownNow(); super.onDestroy(); }
 }

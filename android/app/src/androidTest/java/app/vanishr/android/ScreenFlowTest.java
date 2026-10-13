@@ -2,6 +2,7 @@ package app.vanishr.android;
 
 import android.content.Context;
 import android.graphics.*;
+import android.net.Uri;
 import android.os.Build;
 import android.security.keystore.*;
 import android.view.*;
@@ -5024,15 +5025,31 @@ public class ScreenFlowTest {
         assertNotNull(engine.photos().contact(peerId));
     }
 
+    // Like entry(), but the content key is already gone when the record is published, so no refresh can ever read it.
+    private ChatEngine.Entry entryWithoutItsKey(String text, long offset) throws Exception {
+        UUID id = UUID.randomUUID(); long created = System.currentTimeMillis() + offset; long deadline = created + ChatEnvelope.Expiry.HOUR_1.milliseconds;
+        String alias = AndroidVault.contentAlias(deadline, id);
+        createFixtureKey(alias);
+        ChatEnvelope envelope = new ChatEnvelope(1, id, peerId, peerDevice, userId, deviceId, created, deadline, ChatEnvelope.Expiry.HOUR_1, text, null);
+        ChatEngine.Entry entry = new ChatEngine.Entry(id, peerId, deadline, ChatEnvelope.Expiry.HOUR_1, false, false, "DELIVERED");
+        byte[] content = RelayApi.JSON.toJson(new ChatEngine.Content(envelope, null)).getBytes(StandardCharsets.UTF_8);
+        byte[] sealed;
+        try { sealed = vault.seal(alias, content); }
+        finally { Arrays.fill(content, (byte) 0); }
+        AndroidVault.deleteContentKey(deadline, id, null);
+        vault.transaction(() -> { write("entry/" + id, entry); vault.put("body/" + id, sealed); return null; });
+        return entry;
+    }
+
     @Test public void aMessageThatVanishesWhileTheChatOpensIsSkippedButARealFailureIsStillReported() throws Exception {
         signedInFixture(); conversationsFixture();
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
             awaitMessages(scenario);
-            // The key of an erased message disappears a moment before its record does.
-            ChatEngine.Entry vanishing = entry(false, "About to vanish", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -5000);
+            // The key of an erased message disappears a moment before its record does. The records are published without their key,
+            // so a background refresh that happens to run now cannot read them and make the outcome depend on timing.
             ChatEngine.Entry visible = entry(false, "Visible after the vanished one", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -4000);
-            AndroidVault.deleteContentKey(vanishing.expiresAt(), vanishing.id(), null);
+            ChatEngine.Entry vanishing = entryWithoutItsKey("About to vanish", -5000);
             var remover = new Thread(() -> {
                 try {
                     Thread.sleep(250);
@@ -5043,19 +5060,20 @@ public class ScreenFlowTest {
             scenario.onActivity(activity -> invoke(activity, "refreshMessages", new Class<?>[]{ChatEngine.Peer.class}, peer));
             awaitMessages(scenario);
             remover.join(5_000);
+            scenario.onActivity(activity -> invoke(activity, "refreshMessages", new Class<?>[]{ChatEngine.Peer.class}, peer));
+            awaitMessages(scenario);
             scenario.onActivity(activity -> {
                 assertNotNull("The rest of the chat must still load", text(root(activity), "Visible after the vanished one"));
                 assertTrue(descendants(root(activity)).stream().noneMatch(view -> view instanceof TextView label && "About to vanish".contentEquals(label.getText())));
             });
             // The same failure on a message that still exists is a real problem and must stop the refresh.
-            ChatEngine.Entry broken = entry(false, "Broken but present", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -3000);
+            ChatEngine.Entry broken = entryWithoutItsKey("Broken but present", -3000);
             ChatEngine.Entry later = entry(false, "Hidden by the failure", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -2000);
-            AndroidVault.deleteContentKey(broken.expiresAt(), broken.id(), null);
             scenario.onActivity(activity -> invoke(activity, "refreshMessages", new Class<?>[]{ChatEngine.Peer.class}, peer));
             awaitMessages(scenario);
             scenario.onActivity(activity -> assertTrue("A real decryption failure must not be hidden",
                     descendants(root(activity)).stream().noneMatch(view -> view instanceof TextView label && "Hidden by the failure".contentEquals(label.getText()))));
-            assertTrue(engine.hasEntry(later.id()));
+            assertTrue(engine.hasEntry(later.id())); assertTrue(engine.hasEntry(broken.id()));
         }
     }
 
@@ -5240,6 +5258,365 @@ public class ScreenFlowTest {
                 assertEquals("The messages must have loaded while the work lane was still blocked", 1, release.getCount());
             } finally { release.countDown(); }
             scenario.onActivity(activity -> invoke(activity, "hideContent"));
+        }
+    }
+
+    private int dpPx(int value) { return Math.round(value * context.getResources().getDisplayMetrics().density); }
+
+    private PhotoViewer openPhoto(ActivityScenario<MainActivity> scenario, ChatEngine.Entry entry, boolean confirmViewOnce) throws Exception {
+        scenario.onActivity(activity -> invoke(activity, "viewContent", new Class<?>[]{ChatEngine.Entry.class}, entry));
+        if (confirmViewOnce) scenario.onActivity(activity -> dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+        awaitMainCondition(scenario, activity -> readField(activity, "photoViewer") != null);
+        PhotoViewer[] viewer = new PhotoViewer[1];
+        scenario.onActivity(activity -> viewer[0] = (PhotoViewer) readField(activity, "photoViewer"));
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        return viewer[0];
+    }
+
+    private void assertNoPopup(MainActivity activity, String message) {
+        SecureSheet sheet = dialog(activity);
+        assertTrue(message, sheet == null || !sheet.isShowing());
+    }
+
+    private View photoClose(PhotoViewer viewer) {
+        return descendants(viewer.getWindow().getDecorView()).stream()
+                .filter(view -> "Close photo".contentEquals(view.getContentDescription() == null ? "" : view.getContentDescription()))
+                .findFirst().orElseThrow(() -> new AssertionError("The photo needs a close button"));
+    }
+
+    private void viewerSnapshot(ActivityScenario<MainActivity> scenario, PhotoViewer viewer, String name) {
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        scenario.onActivity(activity -> {
+            View view = viewer.getWindow().getDecorView();
+            assertTrue((viewer.getWindow().getAttributes().flags & WindowManager.LayoutParams.FLAG_SECURE) != 0);
+            assertTrue("The photo must be laid out", view.getWidth() > 0 && view.getHeight() > 0);
+            Bitmap image = Bitmap.createBitmap(view.getWidth(), view.getHeight(), Bitmap.Config.ARGB_8888);
+            view.draw(new Canvas(image));
+            File folder = new File(context.getExternalFilesDir(null), "ui-qa"); assertTrue(folder.isDirectory() || folder.mkdirs());
+            try (FileOutputStream output = new FileOutputStream(new File(folder, name + ".png"))) { assertTrue(image.compress(Bitmap.CompressFormat.PNG, 100, output)); }
+            catch (IOException failure) { throw new AssertionError(failure); }
+            finally { image.recycle(); }
+        });
+    }
+
+    @androidx.annotation.RequiresApi(29)
+    private List<Uri> galleryCopies() {
+        List<Uri> found = new ArrayList<>();
+        Uri collection = android.provider.MediaStore.Images.Media.getContentUri(android.provider.MediaStore.VOLUME_EXTERNAL_PRIMARY);
+        try (android.database.Cursor cursor = context.getContentResolver().query(collection, new String[]{android.provider.MediaStore.MediaColumns._ID},
+                android.provider.MediaStore.MediaColumns.RELATIVE_PATH + " LIKE ? AND " + android.provider.MediaStore.MediaColumns.DISPLAY_NAME + " LIKE ?",
+                new String[]{"Pictures/Vanishr%", "Vanishr_%"}, null)) {
+            while (cursor != null && cursor.moveToNext()) found.add(android.content.ContentUris.withAppendedId(collection, cursor.getLong(0)));
+        }
+        return found;
+    }
+
+    @androidx.annotation.RequiresApi(29)
+    private void deleteGalleryCopies() { for (Uri copy : galleryCopies()) context.getContentResolver().delete(copy, null, null); }
+
+    private byte[] readGalleryCopy(Uri copy) throws IOException {
+        try (InputStream input = context.getContentResolver().openInputStream(copy)) { return input.readAllBytes(); }
+    }
+
+    @androidx.annotation.RequiresApi(29)
+    private void awaitGalleryCopies(int count) throws Exception {
+        long deadline = android.os.SystemClock.elapsedRealtime() + 15_000;
+        while (galleryCopies().size() < count && android.os.SystemClock.elapsedRealtime() < deadline) Thread.sleep(100);
+        assertEquals(count, galleryCopies().size());
+    }
+
+    @Test public void photosFillTheScreenWithOnlyACloseButtonAndOrdinaryAccountsCannotSaveThem() throws Exception {
+        signedInFixture(); conversationsFixture();
+        assertFalse(engine.onboarding().admin());
+        ChatEngine.Entry regular = entry(false, null, photo, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -30_000);
+        ChatEngine.Entry viewOnce = entry(false, null, photo, ChatEnvelope.Expiry.VIEW_ONCE, "DELIVERED", -20_000);
+        if (Build.VERSION.SDK_INT >= 29) deleteGalleryCopies();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            PhotoViewer viewer = openPhoto(scenario, regular, false);
+            scenario.onActivity(activity -> {
+                assertNoPopup(activity, "A photo is no longer shown in a bottom sheet");
+                assertTrue(viewer.isShowing());
+                View decor = viewer.getWindow().getDecorView();
+                ImageView image = viewer.image();
+                int screen = activity.getWindow().getDecorView().getWidth();
+                assertEquals("The photo view spans the whole screen width", screen, image.getWidth());
+                assertEquals("The viewer window spans the whole screen width", screen, decor.getWidth());
+                assertEquals(0, image.getPaddingLeft()); assertEquals(0, image.getPaddingRight());
+                assertEquals(0, image.getPaddingTop()); assertEquals(0, image.getPaddingBottom());
+                int[] at = new int[2]; image.getLocationOnScreen(at);
+                assertEquals("No border on the left", 0, at[0]);
+                float[] matrix = new float[9]; image.getImageMatrix().getValues(matrix);
+                assertEquals("The picture itself is scaled to the full width", screen, image.getDrawable().getIntrinsicWidth() * matrix[Matrix.MSCALE_X], 1.5f);
+                assertTrue("The viewer must keep the window secure", (viewer.getWindow().getAttributes().flags & WindowManager.LayoutParams.FLAG_SECURE) != 0);
+                assertTrue("There is no Done button", descendants(decor).stream().noneMatch(view -> view instanceof TextView label && "Done".contentEquals(label.getText())));
+                List<View> controls = descendants(decor).stream().filter(view -> view instanceof Button || view instanceof ImageButton).toList();
+                assertEquals("The close cross is the only control", 1, controls.size());
+                View close = controls.get(0);
+                assertEquals("Close photo", close.getContentDescription().toString());
+                int[] closeAt = new int[2]; close.getLocationOnScreen(closeAt);
+                assertTrue("The cross is at the right edge", closeAt[0] + close.getWidth() > screen - dpPx(24) && closeAt[0] + close.getWidth() <= screen);
+                assertTrue("The cross is at the top", closeAt[1] >= 0 && closeAt[1] < dpPx(100));
+                assertTrue("The cross is a comfortable touch target", close.getWidth() >= dpPx(44) && close.getHeight() >= dpPx(44));
+                assertFalse("Ordinary accounts have no save gesture", image.isLongClickable());
+                assertFalse(image.performLongClick());
+                assertNoPopup(activity, "No save popup for an ordinary account");
+                assertFalse(viewer.canSave()); assertNull(readField(viewer, "savable"));
+            });
+            viewerSnapshot(scenario, viewer, "60-photo-viewer");
+            scenario.onActivity(activity -> assertTrue(photoClose(viewer).performClick()));
+            awaitMainCondition(scenario, activity -> readField(activity, "photoViewer") == null);
+            scenario.onActivity(activity -> {
+                assertFalse("The cross closes the photo", viewer.isShowing());
+                assertNull("The picture is released", viewer.image().getDrawable());
+                assertTrue(((Bitmap) readField(viewer, "bitmap")).isRecycled());
+                assertNoPopup(activity, "No popup is open");
+                assertNotNull("The chat is still there", readField(activity, "messageScroll"));
+            });
+            PhotoViewer once = openPhoto(scenario, viewOnce, true);
+            assertNull("A view-once photo is consumed when it is opened", vault.get("body/" + viewOnce.id()));
+            scenario.onActivity(activity -> {
+                assertFalse("An ordinary account keeps no copy of a view-once photo", once.canSave());
+                assertFalse(once.image().performLongClick());
+                assertNoPopup(activity, "No popup is open");
+                assertTrue(photoClose(once).performClick());
+            });
+            awaitMainCondition(scenario, activity -> readField(activity, "photoViewer") == null);
+        }
+        if (Build.VERSION.SDK_INT >= 29) assertTrue("Nothing may be written to the gallery", galleryCopies().isEmpty());
+    }
+
+    @Test public void onlyTheAdminCanSaveAPhotoByLongPressingItEvenWhenItWasViewOnce() throws Exception {
+        Assume.assumeTrue("Saving to the gallery needs Android 10 or later", Build.VERSION.SDK_INT >= 29);
+        SignalClient own = new SignalClient(userId, vault);
+        signedInFixture(adminPin(userId, deviceId, own));
+        conversationsFixture();
+        assertTrue(engine.onboarding().admin());
+        assertTrue("The pinned device and identity match this phone", engine.onboarding().verifiedAdmin());
+        ChatEngine.Entry regular = entry(false, null, photo, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -30_000);
+        ChatEngine.Entry viewOnce = entry(false, null, photo, ChatEnvelope.Expiry.VIEW_ONCE, "DELIVERED", -20_000);
+        ChatEngine.Entry sent = engine.entries(peerId).stream().filter(entry -> entry.outgoing() && entry.image()).findFirst().orElseThrow();
+        deleteGalleryCopies();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            PhotoViewer viewer = openPhoto(scenario, regular, false);
+            byte[][] held = new byte[1][];
+            scenario.onActivity(activity -> {
+                assertTrue(viewer.canSave());
+                held[0] = (byte[]) readField(viewer, "savable"); assertNotNull(held[0]);
+                assertTrue("A long press anywhere on the photo is handled", viewer.image().isLongClickable());
+                assertTrue(viewer.image().performLongClick());
+                SecureSheet confirm = dialog(activity);
+                assertNotNull("The long press opens the save popup", confirm);
+                View popup = confirm.getWindow().getDecorView();
+                assertNotNull(text(popup, "Save photo")); assertNotNull(text(popup, "Cancel")); assertNotNull(text(popup, "Save"));
+                assertTrue(viewer.isShowing());
+                confirm.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+            });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            assertTrue("Cancel must not save anything", galleryCopies().isEmpty());
+            scenario.onActivity(activity -> {
+                assertTrue("The photo stays open behind the popup", viewer.isShowing());
+                assertTrue(viewer.image().performLongClick());
+                dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+            });
+            awaitGalleryCopies(1);
+            Uri saved = galleryCopies().get(0);
+            assertArrayEquals("The saved file is the original photo, not a re-encoded copy", photo, readGalleryCopy(saved));
+            try (android.database.Cursor cursor = context.getContentResolver().query(saved, new String[]{android.provider.MediaStore.MediaColumns.MIME_TYPE,
+                    android.provider.MediaStore.MediaColumns.IS_PENDING, android.provider.MediaStore.MediaColumns.RELATIVE_PATH}, null, null, null)) {
+                assertTrue(cursor.moveToFirst());
+                assertEquals("image/jpeg", cursor.getString(0)); assertEquals("The file is finished, not pending", 0, cursor.getInt(1));
+                assertTrue(cursor.getString(2).startsWith("Pictures/Vanishr"));
+            }
+            scenario.onActivity(activity -> assertTrue(photoClose(viewer).performClick()));
+            awaitMainCondition(scenario, activity -> readField(activity, "photoViewer") == null);
+            for (byte value : held[0]) assertEquals("The kept bytes are wiped when the photo closes", 0, value);
+            assertNull(readField(viewer, "savable"));
+
+            PhotoViewer once = openPhoto(scenario, viewOnce, true);
+            assertNull("A view-once photo is consumed when it is opened", vault.get("body/" + viewOnce.id()));
+            scenario.onActivity(activity -> {
+                assertTrue("The admin can save a view-once photo", once.canSave());
+                assertTrue(once.image().performLongClick());
+                dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+            });
+            awaitGalleryCopies(2);
+            for (Uri copy : galleryCopies()) assertArrayEquals(photo, readGalleryCopy(copy));
+            scenario.onActivity(activity -> assertTrue(photoClose(once).performClick()));
+            awaitMainCondition(scenario, activity -> readField(activity, "photoViewer") == null);
+
+            PhotoViewer outgoing = openPhoto(scenario, sent, false);
+            scenario.onActivity(activity -> {
+                assertTrue("A photo the admin sent can be saved as well", outgoing.canSave());
+                assertTrue(outgoing.image().performLongClick());
+                assertNotNull(dialog(activity)); dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+            });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+
+            byte[][] backgrounded = new byte[1][];
+            scenario.onActivity(activity -> backgrounded[0] = (byte[]) readField(outgoing, "savable"));
+            scenario.moveToState(Lifecycle.State.CREATED);
+            scenario.onActivity(activity -> {
+                assertFalse("Leaving the app closes the photo", outgoing.isShowing());
+                assertNull(readField(activity, "photoViewer"));
+            });
+            for (byte value : backgrounded[0]) assertEquals("Leaving the app wipes the kept bytes", 0, value);
+            assertEquals("Only the two confirmed saves exist", 2, galleryCopies().size());
+        } finally { deleteGalleryCopies(); }
+    }
+
+    @Test public void aGalleryCopyKeepsTheFormatAndAnUnsupportedFormatIsRefused() throws Exception {
+        Assume.assumeTrue("Saving to the gallery needs Android 10 or later", Build.VERSION.SDK_INT >= 29);
+        deleteGalleryCopies();
+        try {
+            Bitmap bitmap = Bitmap.createBitmap(64, 48, Bitmap.Config.ARGB_8888); bitmap.eraseColor(Color.rgb(40, 120, 95));
+            ByteArrayOutputStream png = new ByteArrayOutputStream();
+            assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, png)); bitmap.recycle();
+            Uri jpegCopy = SafeImages.saveToGallery(context, photo);
+            Uri pngCopy = SafeImages.saveToGallery(context, png.toByteArray());
+            assertArrayEquals(photo, readGalleryCopy(jpegCopy)); assertArrayEquals(png.toByteArray(), readGalleryCopy(pngCopy));
+            try (android.database.Cursor cursor = context.getContentResolver().query(pngCopy, new String[]{android.provider.MediaStore.MediaColumns.MIME_TYPE,
+                    android.provider.MediaStore.MediaColumns.DISPLAY_NAME}, null, null, null)) {
+                assertTrue(cursor.moveToFirst());
+                assertEquals("image/png", cursor.getString(0)); assertTrue(cursor.getString(1).endsWith(".png"));
+            }
+            assertEquals(2, galleryCopies().size());
+            assertThrows("Bytes that are not a supported image are refused", IOException.class,
+                    () -> SafeImages.saveToGallery(context, "GIF89a-not-a-supported-photo".getBytes(StandardCharsets.US_ASCII)));
+            assertThrows(IOException.class, () -> SafeImages.saveToGallery(context, new byte[0]));
+            assertEquals("A refused photo leaves nothing behind", 2, galleryCopies().size());
+        } finally { deleteGalleryCopies(); }
+    }
+
+    @Test public void anOpenPhotoClosesWhenItsMessageExpires() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry shortLived = entry(false, null, photo, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -3_594_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            PhotoViewer viewer = openPhoto(scenario, shortLived, false);
+            scenario.onActivity(activity -> assertTrue("The photo opened before it expired", viewer.isShowing()));
+            awaitMainCondition(scenario, activity -> readField(activity, "photoViewer") == null);
+            scenario.onActivity(activity -> {
+                assertFalse("The photo closes at its deadline", viewer.isShowing());
+                assertTrue(((Bitmap) readField(viewer, "bitmap")).isRecycled());
+            });
+        }
+    }
+
+    @Test public void anAccountThatOnlyCarriesTheAdminsUserIdCannotSavePhotos() throws Exception {
+        signedInFixture(); conversationsFixture();
+        SignalClient own = new SignalClient(userId, vault);
+        SignalClient someoneElse = new SignalClient(userId, new DeviceSecurityTest.MemoryVault());
+        ChatEngine.Entry regular = entry(false, null, photo, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -30_000);
+        ChatEngine.Entry viewOnce = entry(false, null, photo, ChatEnvelope.Expiry.VIEW_ONCE, "DELIVERED", -20_000);
+        // The relay chooses the user id at sign-in, so an id that matches the pin proves nothing about this phone's identity.
+        AdminOnboarding.Pin[] forged = {adminPin(userId, deviceId, someoneElse), adminPin(userId, UUID.randomUUID(), own)};
+        if (Build.VERSION.SDK_INT >= 29) deleteGalleryCopies();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            for (AdminOnboarding.Pin pin : forged) {
+                setField(engine.onboarding(), "pin", pin);
+                assertTrue("The signed-in user id matches the pinned admin", engine.onboarding().admin());
+                assertFalse("The device or identity key does not", engine.onboarding().verifiedAdmin());
+                PhotoViewer viewer = openPhoto(scenario, regular, false);
+                scenario.onActivity(activity -> {
+                    assertFalse("No save option without the pinned identity", viewer.canSave());
+                    assertNull(readField(viewer, "savable"));
+                    assertFalse(viewer.image().isLongClickable()); assertFalse(viewer.image().performLongClick());
+                    assertNoPopup(activity, "No save popup");
+                    assertTrue(photoClose(viewer).performClick());
+                });
+                awaitMainCondition(scenario, activity -> readField(activity, "photoViewer") == null);
+            }
+            setField(engine.onboarding(), "pin", adminPin(userId, deviceId, own));
+            assertTrue(engine.onboarding().verifiedAdmin());
+            PhotoViewer genuine = openPhoto(scenario, viewOnce, true);
+            scenario.onActivity(activity -> {
+                assertTrue("The same account with the pinned identity can save", genuine.canSave());
+                assertTrue(photoClose(genuine).performClick());
+            });
+            awaitMainCondition(scenario, activity -> readField(activity, "photoViewer") == null);
+        }
+        if (Build.VERSION.SDK_INT >= 29) assertTrue("Nothing may be written to the gallery", galleryCopies().isEmpty());
+    }
+
+    @Test public void aRealPressAndHoldAnywhereOnTheAdminsPhotoOpensTheSavePopupAndTheCrossClosesIt() throws Exception {
+        SignalClient own = new SignalClient(userId, vault);
+        signedInFixture(adminPin(userId, deviceId, own));
+        conversationsFixture();
+        ChatEngine.Entry regular = entry(false, null, photo, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -30_000);
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            PhotoViewer viewer = openPhoto(scenario, regular, false);
+            int[] at = new int[2]; int[] size = new int[2];
+            scenario.onActivity(activity -> { viewer.image().getLocationOnScreen(at); size[0] = viewer.image().getWidth(); size[1] = viewer.image().getHeight(); });
+            for (float[] spot : new float[][]{{0.5f, 0.5f}, {0.15f, 0.3f}, {0.85f, 0.85f}}) {
+                int x = at[0] + Math.round(size[0] * spot[0]), y = at[1] + Math.round(size[1] * spot[1]);
+                // A swipe that never leaves its start point is a press and hold of about a second, longer than the 400 ms long-press timeout.
+                assertTrue(device.swipe(x, y, x, y, 200));
+                awaitMainCondition(scenario, activity -> dialog(activity) != null && dialog(activity).isShowing());
+                scenario.onActivity(activity -> {
+                    assertNotNull("Holding the photo opens the save popup", text(dialog(activity).getWindow().getDecorView(), "Save photo"));
+                    assertTrue("The photo stays open behind the popup", viewer.isShowing());
+                    dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+                });
+                awaitMainCondition(scenario, activity -> !dialog(activity).isShowing());
+            }
+            int[] cross = new int[2]; View[] close = new View[1];
+            scenario.onActivity(activity -> { close[0] = photoClose(viewer); close[0].getLocationOnScreen(cross); });
+            assertTrue(device.click(cross[0] + close[0].getWidth() / 2, cross[1] + close[0].getHeight() / 2));
+            awaitMainCondition(scenario, activity -> readField(activity, "photoViewer") == null);
+            scenario.onActivity(activity -> assertFalse("Tapping the cross closes the photo", viewer.isShowing()));
+
+            setField(engine.onboarding(), "pin", AdminOnboarding.OFFICIAL);
+            PhotoViewer ordinary = openPhoto(scenario, regular, false);
+            scenario.onActivity(activity -> assertFalse(ordinary.canSave()));
+            int x = at[0] + size[0] / 2, y = at[1] + size[1] / 2;
+            assertTrue(device.swipe(x, y, x, y, 200));
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertNoPopup(activity, "Holding the photo of an ordinary account does nothing");
+                assertTrue(ordinary.isShowing());
+                assertTrue(photoClose(ordinary).performClick());
+            });
+        }
+    }
+
+    @Test public void theCloseCrossFollowsTheReadingDirectionAndTheSideInsets() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            PhotoViewer[] holder = new PhotoViewer[1];
+            scenario.onActivity(activity -> {
+                try { holder[0] = new PhotoViewer(activity, SafeImages.display(photo), null, ignored -> { }); }
+                catch (Exception failure) { throw new AssertionError(failure); }
+                holder[0].show();
+            });
+            PhotoViewer viewer = holder[0];
+            awaitMainCondition(scenario, activity -> viewer.isShowing() && viewer.getWindow().getDecorView().getWidth() > 0);
+            for (boolean rtl : new boolean[]{false, true}) {
+                scenario.onActivity(activity -> {
+                    View decor = viewer.getWindow().getDecorView();
+                    decor.setLayoutDirection(rtl ? View.LAYOUT_DIRECTION_RTL : View.LAYOUT_DIRECTION_LTR);
+                    ViewGroup content = decor.findViewById(android.R.id.content);
+                    androidx.core.view.ViewCompat.dispatchApplyWindowInsets(content.getChildAt(0), new androidx.core.view.WindowInsetsCompat.Builder()
+                            .setInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars(), androidx.core.graphics.Insets.of(dpPx(60), dpPx(24), dpPx(20), 0)).build());
+                    decor.measure(View.MeasureSpec.makeMeasureSpec(decor.getWidth(), View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(decor.getHeight(), View.MeasureSpec.EXACTLY));
+                    decor.layout(decor.getLeft(), decor.getTop(), decor.getRight(), decor.getBottom());
+                    View close = photoClose(viewer);
+                    int width = ((View) close.getParent()).getWidth();
+                    if (rtl) assertEquals("In a right-to-left language the cross sits at the start edge, clear of the left inset", dpPx(60) + dpPx(8), close.getLeft(), 1);
+                    else assertEquals("The cross sits at the right edge, clear of the right inset", width - dpPx(20) - dpPx(8), close.getRight(), 1);
+                    assertEquals("The cross is clear of the status bar", dpPx(24) + dpPx(8), close.getTop(), 1);
+                });
+            }
+            scenario.onActivity(activity -> viewer.dismiss());
         }
     }
 

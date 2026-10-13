@@ -12,6 +12,18 @@ license notices at **https://vanishr-download.vercel.app**.
 The public [update feed](https://vanishr-download.vercel.app/updates.json), not
 the latest Git version, determines which release users can download and discover.
 
+Release **0.6.0/code 41** opens photos full screen: edge to edge on black, no border or
+padding, and one close cross at the top right instead of a white sheet with a Done button.
+On the **official admin's phone only**, pressing and holding a photo offers to save it to
+the gallery, including a photo that was sent as view-once; the saved copy is an ordinary,
+unencrypted file in Pictures/Vanishr that does not expire (Android 10 or later). Every other
+account's app is unchanged: it has no save option and still wipes a photo's decrypted bytes
+as soon as it is drawn. Anyone who messages the admin should assume the admin can keep a photo
+they send; the in-app summary and the privacy and security pages say so. It is a client-only
+change (no relay update); installs of 0.5.6 to 0.5.9 get it from the in-app update prompt. See the
+[threat model](docs/THREAT-MODEL.md#photo-viewer-and-the-admins-save-option-060) and
+[verification](docs/VERIFICATION.md#release-060--full-screen-photos-and-the-admins-save-option).
+
 Release **0.5.9/code 40** fixes the delay after opening the app, when tapping a chat right
 after start-up could wait several seconds before anything responded. Opening a chat, the
 chat list and unread badges no longer wait behind a sync or an encrypted write; chats the

@@ -51,6 +51,13 @@ final class AdminOnboarding {
     boolean enabled() { return engine.account() != null && pin.origin().equals(engine.account().origin()); }
     boolean official(UUID userId) { return enabled() && pin.userId().equals(userId); }
     boolean admin() { return enabled() && pin.userId().equals(engine.account().userId()); }
+    // admin() only compares the signed-in user id, which the relay supplies at sign-in. Anything that unlocks a capability must also
+    // match this phone's own device id and identity key to the pin, and treats any failure as "not the admin".
+    boolean verifiedAdmin() {
+        if (!admin()) return false;
+        try { requireLocalAdmin(); return true; }
+        catch (Exception unavailable) { return false; }
+    }
     boolean automatic(UUID userId) { return vault.get(AUTOMATIC + userId) != null; }
     long generation() { return generation; }
     String problem() { return problem; }

@@ -691,7 +691,7 @@ public class ReleaseWorkflowTest {
             clickText("Photo");
             assertTrue(device.wait(Until.hasObject(By.desc("Received photo")), 15_000));
             capture("05-release-photo");
-            clickText("Done");
+            clickIcon("Close photo");
             assertEquals("READ", eventually(() -> "READ".equals(status(peer, imageId)) ? "READ" : null));
             UUID once = send(peer, outgoing, "One-time release verification", null, ChatEnvelope.Expiry.VIEW_ONCE);
             awaitText("View once");
