@@ -437,7 +437,8 @@ final class GroupChat {
         Snapshot current=api().call("GET",path(groupId),null,Snapshot.class); snapshot(current);
         if (current.ownerId().equals(user())) approveOwner(current);
         if (!ready(get(groupId))) throw new SecurityException("Wait for verified group membership");
-        if (current.active().size()<2 || vault.names("entry/").size()>=100) throw new IllegalStateException("Group or local message capacity unavailable");
+        if (current.active().size()<2) throw new IllegalStateException("Group capacity unavailable");
+        if (!engine.makeRoom(image==null ? 0 : image.length*2L)) throw new ChatEngine.CapacityReached();
         long deadline=Math.addExact(createdAt,expiry.milliseconds);
         UUID mediaId=image==null ? null : UUID.randomUUID();
         ImageCipher.EncryptedImage encrypted=image==null ? null : ImageCipher.encrypt(mediaId,image);
@@ -486,8 +487,7 @@ final class GroupChat {
 
     private void receive(Snapshot current,Message message) throws Exception {
         boolean blocked=engine.safety().isBlocked(message.senderId());
-        if (message.expiresAt()<=System.currentTimeMillis() || marked("seen/"+message.id())
-                || !blocked && vault.names("entry/").size()>=100) return;
+        if (message.expiresAt()<=System.currentTimeMillis() || marked("seen/"+message.id())) return;
         if (!current.id().equals(message.groupId())) throw new SecurityException("Group routing changed");
         if (message.id()==null || message.expiresAt()>System.currentTimeMillis()+86_400_000L)
             throw new SecurityException("Invalid group message deadline");
@@ -502,7 +502,9 @@ final class GroupChat {
             if (blocked) vault.transaction(() -> { discardBlockedMessage(message); return null; });
             return;
         }
+        if (!blocked && !engine.makeRoom(0)) return;
         byte[] imageCiphertext=blocked || message.mediaId()==null ? null : api().groupMedia(message.groupId(),message.id());
+        if (imageCiphertext!=null && !engine.makeRoom(imageCiphertext.length*2L)) return;
         try {
             vault.transaction(() -> {
                 engine.safety().requireNotDeleting();
@@ -535,13 +537,22 @@ final class GroupChat {
     void acknowledge(ChatEngine.Entry entry,String action) { write("group-ack/"+entry.id(),new Ack(entry.peerId(),entry.id(),entry.expiresAt(),action)); }
     private void flushAcks(UUID group) throws Exception {
         for (String name : vault.names("group-ack/")) {
-            Ack ack=read(name,Ack.class); if (ack==null || !ack.groupId().equals(group)) continue;
+            Ack ack=read(name,Ack.class); if (ack==null || !ack.groupId().equals(group) || ack.action().equals(ChatEngine.HELD)) continue;
+            boolean refused=false;
             try { api().call("POST",path(group)+"/messages/"+ack.id()+"/"+ack.action(),null,Void.class); }
             catch (RelayApi.ApiFailure failure) {
                 if (failure.status!=404 && failure.status!=410 && !(failure.status==403 && ack.action().equals("delete"))) throw failure;
+                // Refused is not the same as done: a block makes the relay answer "not found" and hand the message over again later,
+                // so the receipt is kept (held, never sent again) and the message's "seen" marker with it. See ChatEngine.HELD.
+                refused=!ack.action().equals("delete");
             }
             // A read receipt stored while "delivered" was in flight replaces it under the same name; keep it for the next pass.
-            vault.transaction(() -> { if (ack.equals(read(name,Ack.class))) vault.remove(name); return null; });
+            boolean hold=refused;
+            vault.transaction(() -> {
+                if (!ack.equals(read(name,Ack.class))) return null;
+                if (hold) write(name,new Ack(ack.groupId(),ack.id(),ack.expiresAt(),ChatEngine.HELD)); else vault.remove(name);
+                return null;
+            });
         }
         for (String name : vault.names("group-control-ack/")) {
             Ack ack=read(name,Ack.class); if (!ack.groupId().equals(group)) continue;

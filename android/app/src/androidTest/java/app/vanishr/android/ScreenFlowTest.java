@@ -2790,6 +2790,14 @@ public class ScreenFlowTest {
             assertNotNull("The generic notification must be visible in the shade", alert);
             alert.click();
             assertTrue(device.wait(androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.desc("Conversation options")), 15_000));
+            // The header is there as soon as the chat opens; its messages are prepared on the reader lane and follow a moment later.
+            boolean[] rowShown = new boolean[1];
+            long rowDeadline = android.os.SystemClock.elapsedRealtime() + 15_000;
+            while (!rowShown[0] && android.os.SystemClock.elapsedRealtime() < rowDeadline) {
+                instrumentation.runOnMainSync(() -> rowShown[0] = descendants(root(launched.get())).stream()
+                        .anyMatch(view -> view instanceof TextView label && "View once".contentEquals(label.getText())));
+                if (!rowShown[0]) Thread.sleep(20);
+            }
             instrumentation.runOnMainSync(() -> {
                 MainActivity activity = launched.get(); assertNotNull(activity);
                 assertEquals(peerId, readField(activity, "selectedPeer"));
@@ -5260,6 +5268,783 @@ public class ScreenFlowTest {
             scenario.onActivity(activity -> invoke(activity, "hideContent"));
         }
     }
+
+    // ==== 0.6.1: long chats, keyboard, capacity ====
+
+    private void longChat(int total) throws Exception {
+        for (int index = 7; index < total; index++)
+            bulkEntry(peerId, peerDevice, index % 2 == 0, "Synthetic message " + index + " with several words so that the chat is long enough",
+                    -(total - index) * 1000L, "READ");
+    }
+
+    private ScrollView messageScroll(MainActivity activity) { return (ScrollView) readField(activity, "messageScroll"); }
+
+    private int hiddenBelowViewport(ActivityScenario<MainActivity> scenario) {
+        int[] hidden = new int[1];
+        scenario.onActivity(activity -> {
+            ScrollView scroll = messageScroll(activity);
+            hidden[0] = scroll.getChildAt(0).getHeight() - (scroll.getScrollY() + scroll.getHeight());
+        });
+        return hidden[0];
+    }
+
+    private int imeBottom(MainActivity activity) {
+        WindowInsets insets = activity.getWindow().getDecorView().getRootWindowInsets();
+        return insets == null ? 0 : insets.getInsets(WindowInsets.Type.ime()).bottom;
+    }
+
+    // The keyboard animates in; wait until its height has stopped changing.
+    private void awaitKeyboardSettled(ActivityScenario<MainActivity> scenario, boolean open) throws Exception {
+        int[] last = {-1}; int stable = 0;
+        long deadline = android.os.SystemClock.elapsedRealtime() + 20_000;
+        while (stable < 5 && android.os.SystemClock.elapsedRealtime() < deadline) {
+            int[] now = new int[1];
+            scenario.onActivity(activity -> now[0] = imeBottom(activity));
+            boolean expected = open ? now[0] > 0 : now[0] == 0;
+            stable = expected && now[0] == last[0] ? stable + 1 : 0;
+            last[0] = now[0];
+            Thread.sleep(100);
+        }
+        assertEquals("The keyboard must finish " + (open ? "opening" : "closing"), 5, stable);
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+    }
+
+    private void openKeyboard(ActivityScenario<MainActivity> scenario) throws Exception {
+        java.util.concurrent.CountDownLatch visible = new java.util.concurrent.CountDownLatch(1);
+        int[] center = new int[2];
+        ViewTreeObserver.OnGlobalLayoutListener[] listener = new ViewTreeObserver.OnGlobalLayoutListener[1];
+        scenario.onActivity(activity -> {
+            EditText input = (EditText) readField(activity, "composer"); input.requestFocus();
+            input.getLocationOnScreen(center); center[0] += input.getWidth() / 2; center[1] += input.getHeight() / 2;
+            View decor = activity.getWindow().getDecorView();
+            listener[0] = () -> { if (imeBottom(activity) > 0) visible.countDown(); };
+            decor.getViewTreeObserver().addOnGlobalLayoutListener(listener[0]);
+            input.post(() -> androidx.core.view.WindowCompat.getInsetsController(activity.getWindow(), input)
+                    .show(androidx.core.view.WindowInsetsCompat.Type.ime()));
+        });
+        androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation()).click(center[0], center[1]);
+        try { assertTrue("Keyboard should open", visible.await(15, java.util.concurrent.TimeUnit.SECONDS)); }
+        finally { scenario.onActivity(activity -> activity.getWindow().getDecorView().getViewTreeObserver().removeOnGlobalLayoutListener(listener[0])); }
+        awaitKeyboardSettled(scenario, true);
+    }
+
+    private void closeKeyboard(ActivityScenario<MainActivity> scenario) throws Exception {
+        scenario.onActivity(activity -> activity.getSystemService(android.view.inputmethod.InputMethodManager.class)
+                .hideSoftInputFromWindow(((View) readField(activity, "composer")).getWindowToken(), 0));
+        awaitKeyboardSettled(scenario, false);
+    }
+
+    @Test @androidx.test.filters.SdkSuppress(minSdkVersion = 30)
+    public void theKeyboardPushesTheNewestMessagesUpWithTheComposer() throws Exception {
+        signedInFixture(); conversationsFixture(); longChat(40);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            assertEquals("A chat opens at its newest message", 0, hiddenBelowViewport(scenario));
+            openKeyboard(scenario);
+            int hidden = hiddenBelowViewport(scenario);
+            perf("newest messages hidden behind the keyboard (px)", hidden);
+            assertTrue("The newest messages must stay above the composer when the keyboard opens; " + hidden + "px were hidden", hidden <= 2);
+            scenario.onActivity(activity -> {
+                LinearLayout list = (LinearLayout) readField(activity, "messages");
+                View newest = list.getChildAt(list.getChildCount() - 1);
+                ScrollView scroll = messageScroll(activity);
+                int[] newestAt = new int[2], scrollAt = new int[2];
+                newest.getLocationOnScreen(newestAt); scroll.getLocationOnScreen(scrollAt);
+                assertTrue("The newest message ends above the composer, not behind the keyboard",
+                        newestAt[1] + newest.getHeight() <= scrollAt[1] + scroll.getHeight() + 2);
+            });
+            snapshot(scenario, "61-keyboard-newest-visible");
+            entry(false, "A brand new reply while the keyboard is open", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", 0);
+            scenario.onActivity(activity -> invoke(activity, "refreshMessages", new Class<?>[]{ChatEngine.Peer.class}, peer));
+            awaitMessages(scenario);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            assertTrue("A message that arrives with the keyboard open is followed", hiddenBelowViewport(scenario) <= 2);
+            scenario.onActivity(activity -> {
+                assertTrue("The keyboard stays open", imeBottom(activity) > 0);
+                assertTrue("Typing is not interrupted", ((EditText) readField(activity, "composer")).hasFocus());
+                assertNotNull(text(root(activity), "A brand new reply while the keyboard is open"));
+            });
+            closeKeyboard(scenario);
+            assertTrue("Closing the keyboard keeps the newest message in view", hiddenBelowViewport(scenario) <= 2);
+        }
+    }
+
+    @Test @androidx.test.filters.SdkSuppress(minSdkVersion = 30)
+    public void aChatScrolledUpKeepsTheSameMessagesAboveTheComposerWhenTheKeyboardOpens() throws Exception {
+        signedInFixture(); conversationsFixture(); longChat(40);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> messageScroll(activity).scrollTo(0, 3000));
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            int[] anchor = new int[2];
+            // The last message that starts above the bottom edge of the list, and how far above that edge it starts.
+            java.util.function.Consumer<int[]> measure = result -> scenario.onActivity(activity -> {
+                ScrollView scroll = messageScroll(activity); LinearLayout list = (LinearLayout) readField(activity, "messages");
+                int bottomEdge = scroll.getScrollY() + scroll.getHeight();
+                if (result[0] == 0) for (int index = 0; index < list.getChildCount(); index++) if (list.getChildAt(index).getTop() < bottomEdge) result[0] = index + 1;
+                result[1] = bottomEdge - list.getChildAt(result[0] - 1).getTop();
+            });
+            measure.accept(anchor);
+            assertTrue("A message sits on the bottom edge of the list", anchor[0] > 0);
+            openKeyboard(scenario);
+            int[] after = {anchor[0], 0};
+            measure.accept(after);
+            assertEquals("The message that was on the bottom edge is still the one just above the composer", anchor[1], after[1], 2);
+            closeKeyboard(scenario);
+            int[] closed = {anchor[0], 0};
+            measure.accept(closed);
+            assertEquals("Closing the keyboard puts it back", anchor[1], closed[1], 2);
+        }
+    }
+
+    @Test public void aLongChatShowsItsNewestMessagesBeforeTheOlderOnesAreReady() throws Exception {
+        signedInFixture(); conversationsFixture(); longChat(100);
+        List<ChatEngine.Entry> expected = engine.entries(peerId);
+        assertEquals(100, expected.size());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            List<Integer> sizes = Collections.synchronizedList(new ArrayList<>());
+            long[] started = new long[2];
+            var finished = new java.util.concurrent.CountDownLatch(1);
+            scenario.onActivity(activity -> {
+                android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
+                started[0] = android.os.SystemClock.elapsedRealtime();
+                setField(activity, "selectedPeer", peerId); invoke(activity, "render");
+                new Runnable() {
+                    @Override public void run() {
+                        int size = ((Map<?, ?>) readField(activity, "messageRows")).size();
+                        if (size > 0 && (sizes.isEmpty() || sizes.get(sizes.size() - 1) != size)) {
+                            sizes.add(size);
+                            if (sizes.size() == 1) started[1] = android.os.SystemClock.elapsedRealtime();
+                        }
+                        if (size > 0 && !(boolean) readField(activity, "messageRefreshQueued")) finished.countDown();
+                        else handler.postDelayed(this, 2);
+                    }
+                }.run();
+            });
+            assertTrue("The whole chat must finish loading", finished.await(60, java.util.concurrent.TimeUnit.SECONDS));
+            perf("first rows of a 100 message chat appear after (ms)", started[1] - started[0]);
+            perf("all 100 rows are ready after (ms)", android.os.SystemClock.elapsedRealtime() - started[0]);
+            assertTrue("The first messages must appear after one small batch, not after the whole history: " + sizes, sizes.get(0) <= 32);
+            assertTrue("The rest must follow in several steps: " + sizes, sizes.size() >= 3);
+            scenario.onActivity(activity -> {
+                Map<?, ?> rows = (Map<?, ?>) readField(activity, "messageRows");
+                assertEquals(100, rows.size());
+                LinearLayout list = (LinearLayout) readField(activity, "messages");
+                List<View> order = new ArrayList<>();
+                for (int index = 0; index < list.getChildCount(); index++) if (list.getChildAt(index).getTag() instanceof Long) order.add(list.getChildAt(index));
+                assertEquals(expected.size(), order.size());
+                for (int index = 0; index < expected.size(); index++)
+                    assertSame("Messages stay in the order they were sent, however they were loaded; row " + index,
+                            readField(rows.get(expected.get(index).id()), "alignment"), order.get(index));
+                assertNotNull(text(root(activity), "Synthetic message 99 with several words so that the chat is long enough"));
+                ScrollView shown = messageScroll(activity);
+                int hiddenBelow = shown.getChildAt(0).getHeight() - (shown.getScrollY() + shown.getHeight());
+                assertTrue("The chat is scrolled to its newest message: " + hiddenBelow + " px hidden below, scrollY " + shown.getScrollY()
+                        + ", content " + shown.getChildAt(0).getHeight() + ", viewport " + shown.getHeight() + ", stages " + sizes, hiddenBelow <= 2);
+            });
+        }
+    }
+
+    // The reader can post the next stage in the few milliseconds between one stage's rows being added and the scroll to the bottom for
+    // that stage being queued, so a stage can be applied after the previous rows have been laid out but before their scroll has run.
+    // It must still follow the bottom instead of treating the chat as scrolled away from it. The two stages are applied by hand
+    // with a layout pass in between so that the order is the same every time.
+    @Test public void aStageAppliedBeforeTheScrollForThePreviousOneHasRunStillFollowsTheBottom() throws Exception {
+        signedInFixture(); conversationsFixture(); longChat(100);
+        List<ChatEngine.Entry> all = engine.entries(peerId);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                invoke(activity, "resetConversation");
+                LinearLayout list = (LinearLayout) readField(activity, "messages");
+                list.removeAllViews();
+                messageScroll(activity).scrollTo(0, 0);
+                View decor = activity.getWindow().getDecorView();
+                int widthSpec = View.MeasureSpec.makeMeasureSpec(decor.getWidth(), View.MeasureSpec.EXACTLY);
+                int heightSpec = View.MeasureSpec.makeMeasureSpec(decor.getHeight(), View.MeasureSpec.EXACTLY);
+                decor.measure(widthSpec, heightSpec); decor.layout(0, 0, decor.getWidth(), decor.getHeight());
+                assertTrue("A chat that has just been opened is at its end", list.getHeight() - messageScroll(activity).getScrollY() - messageScroll(activity).getHeight() < dpPx(100));
+                Map<UUID, String> text = new java.util.HashMap<>();
+                for (ChatEngine.Entry entry : all)
+                    text.put(entry.id(), "Synthetic message with several words so that the chat is long enough to wrap onto a second line here");
+                Class<?>[] types = {ChatEngine.Peer.class, List.class, Map.class, Map.class};
+                invoke(activity, "applyMessages", types, peer, new ArrayList<>(all.subList(all.size() - 16, all.size())), text, new java.util.HashMap<UUID, String>());
+                decor.measure(widthSpec, heightSpec); decor.layout(0, 0, decor.getWidth(), decor.getHeight());
+                assertTrue("The first stage must be taller than the screen for this to be the case being tested",
+                        list.getHeight() > messageScroll(activity).getHeight() + dpPx(100));
+                invoke(activity, "applyMessages", types, peer, new ArrayList<>(all.subList(all.size() - 32, all.size())), text, new java.util.HashMap<UUID, String>());
+            });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> assertEquals(32, ((Map<?, ?>) readField(activity, "messageRows")).size()));
+            int hidden = hiddenBelowViewport(scenario);
+            assertTrue("The newest message is in view, not the oldest of what was loaded first: " + hidden + " px hidden below", hidden <= 2);
+        }
+    }
+
+    @Test public void olderMessagesBeyondTheFirstPageLoadWhenTheUserScrollsUpToThem() throws Exception {
+        signedInFixture(); conversationsFixture(); longChat(130);
+        List<ChatEngine.Entry> expected = engine.entries(peerId);
+        assertEquals(130, expected.size());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                Map<?, ?> rows = (Map<?, ?>) readField(activity, "messageRows");
+                assertEquals("Only the newest page is prepared when the chat opens", 100, rows.size());
+                assertFalse("The oldest messages are not decrypted yet", rows.containsKey(expected.get(0).id()));
+                assertTrue(rows.containsKey(expected.get(expected.size() - 1).id()));
+                assertTrue((boolean) readField(activity, "historyMore"));
+            });
+            ChatEngine.Entry firstShown = expected.get(30);
+            int[] offset = new int[1];
+            scenario.onActivity(activity -> {
+                ScrollView scroll = messageScroll(activity);
+                scroll.scrollTo(0, 0);
+                View row = (View) readField(((Map<?, ?>) readField(activity, "messageRows")).get(firstShown.id()), "alignment");
+                offset[0] = row.getTop() - scroll.getScrollY();
+            });
+            awaitMainCondition(scenario, activity -> ((Map<?, ?>) readField(activity, "messageRows")).size() == 130
+                    && !(boolean) readField(activity, "messageRefreshQueued"));
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                Map<?, ?> rows = (Map<?, ?>) readField(activity, "messageRows");
+                assertTrue(rows.containsKey(expected.get(0).id()));
+                assertFalse((boolean) readField(activity, "historyMore"));
+                ScrollView scroll = messageScroll(activity);
+                View row = (View) readField(rows.get(firstShown.id()), "alignment");
+                assertEquals("The message the user was looking at has not moved", offset[0], row.getTop() - scroll.getScrollY(), 2);
+                assertTrue("Older messages are above it", ((View) readField(rows.get(expected.get(0).id()), "alignment")).getTop() < row.getTop());
+            });
+        }
+    }
+
+    // Relay and remote contact for a back-and-forth chat with the real engine.
+    private final class ToFro {
+        final SignalClient remote;
+        final List<ChatEngine.Incoming> incoming = new ArrayList<>();
+        final List<ChatEngine.Send> outgoing = new ArrayList<>();
+        volatile java.util.concurrent.CountDownLatch statusGate;
+        final java.util.concurrent.CountDownLatch statusReached = new java.util.concurrent.CountDownLatch(1);
+        final java.util.concurrent.atomic.AtomicInteger ackCalls = new java.util.concurrent.atomic.AtomicInteger();
+        volatile int failAckCall = -1;
+        // Messages whose receipts the relay answers "not found" to, as it does while two accounts are blocked from each other.
+        final Set<UUID> refused = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+        ToFro(boolean localStarts) throws Exception {
+            remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+            peer = new ChatEngine.Peer(peerId, peerDevice, Base64.getEncoder().encodeToString(remote.publicIdentity()), "Aarav Mehta");
+            vault.transaction(() -> { engine.groupSignal().verifyPeer(peerId, remote.publicIdentity()); write("contact/" + peerId, peer); return null; });
+            remote.verifyPeer(userId, engine.groupSignal().publicIdentity());
+            if (localStarts) engine.groupSignal().establish(peerId, remote.generatePreKey(Instant.now()), Instant.now());
+            else remote.establish(userId, engine.groupSignal().generatePreKey(Instant.now()), Instant.now());
+            setField(engine, "nextProfileCheck", System.currentTimeMillis() + 300_000);
+            engine.groupApi().close();
+            setField(engine, "api", syntheticApi(chain -> {
+                var request = chain.request(); String path = request.url().encodedPath();
+                if (path.equals("/messages/pending")) { synchronized (incoming) { return syntheticResponse(request, 200, new ArrayList<>(incoming)); } }
+                if (path.equals("/messages") && request.method().equals("POST")) {
+                    okio.Buffer body = new okio.Buffer(); request.body().writeTo(body);
+                    ChatEngine.Send sent = RelayApi.JSON.fromJson(body.readUtf8(), ChatEngine.Send.class);
+                    synchronized (outgoing) { outgoing.add(sent); }
+                    return syntheticResponse(request, 200, new ChatEngine.Status(sent.id(), "QUEUED", sent.expiresAt()));
+                }
+                if (path.equals("/messages/status")) {
+                    statusReached.countDown();
+                    java.util.concurrent.CountDownLatch gate = statusGate;
+                    if (gate != null) {
+                        try { gate.await(30, java.util.concurrent.TimeUnit.SECONDS); }
+                        catch (InterruptedException failure) { Thread.currentThread().interrupt(); throw new IOException("Synthetic status call interrupted"); }
+                    }
+                    synchronized (outgoing) { return syntheticResponse(request, 200, outgoing.stream().map(sent -> new ChatEngine.Status(sent.id(), "QUEUED", sent.expiresAt())).toList()); }
+                }
+                if (path.matches("/messages/[0-9a-f-]+/[a-z]+") || request.method().equals("DELETE") && path.startsWith("/messages/")) {
+                    int call = ackCalls.incrementAndGet();
+                    if (call == failAckCall) return syntheticResponse(request, 500, Map.of("error", "synthetic"));
+                    UUID id = UUID.fromString(path.split("/")[2]);
+                    if (refused.contains(id)) return syntheticResponse(request, 404, Map.of("error", "not_found"));
+                    synchronized (incoming) { incoming.removeIf(message -> message.id().equals(id)); }
+                    return syntheticResponse(request, 200, null);
+                }
+                if (path.equals("/keys")) return syntheticResponse(request, 200, new ChatEngine.KeyCount(16));
+                if (path.equals("/account/profile")) return syntheticResponse(request, 200, new ChatEngine.Profile(userId, "alex", "Alex"));
+                if (path.equals("/users/id/" + peerId + "/profile")) return syntheticResponse(request, 200, new ChatEngine.Profile(peerId, "friend", peer.name()));
+                if (path.equals("/users/id/" + peerId)) return syntheticResponse(request, 200, new ChatEngine.Contact(peerId, peerDevice, peer.identityKey()));
+                if (Set.of("/groups", "/profile/packets", "/remote-photos", "/presence").contains(path)) return syntheticResponse(request, 200, List.of());
+                if (path.equals("/events")) return syntheticResponse(request, 503, Map.of("error", "fixture_offline"));
+                return syntheticResponse(request, 404, Map.of("error", "unhandled_in_fixture"));
+            }));
+        }
+
+        // The remote contact has to read the first message it was sent before it can answer on that session.
+        void readFirst() throws Exception {
+            ChatEngine.Send sent; synchronized (outgoing) { sent = outgoing.get(0); }
+            byte[] plaintext = remote.decrypt(userId, new SignalClient.Packet(sent.type(), sent.ciphertext()));
+            Arrays.fill(plaintext, (byte) 0);
+        }
+
+        ChatEngine.Incoming reply(String text) throws Exception {
+            UUID id = UUID.randomUUID(); long now = System.currentTimeMillis(), deadline = now + ChatEnvelope.Expiry.HOUR_1.milliseconds;
+            ChatEnvelope envelope = new ChatEnvelope(1, id, peerId, peerDevice, userId, deviceId, now, deadline, ChatEnvelope.Expiry.HOUR_1, text, null);
+            SignalClient.Packet packet = remote.encrypt(userId, RelayApi.JSON.toJson(envelope).getBytes(StandardCharsets.UTF_8), Instant.now());
+            ChatEngine.Incoming message = new ChatEngine.Incoming(id, peerId, peerDevice, userId, deviceId, ChatEnvelope.Expiry.HOUR_1, now, deadline, packet.type(), packet.ciphertext(), null);
+            synchronized (incoming) { incoming.add(message); }
+            return message;
+        }
+    }
+
+    @Test public void aReceivedMessageIsShownBeforeTheRestOfTheSyncPassFinishes() throws Exception {
+        signedInFixture();
+        ToFro relay = new ToFro(false);
+        // An earlier message of ours makes the pass ask the relay for receipts, after incoming messages have been stored.
+        entry(true, "Our earlier message", null, ChatEnvelope.Expiry.HOUR_1, "QUEUED", -30_000);
+        var gate = new java.util.concurrent.CountDownLatch(1);
+        relay.statusGate = gate;
+        relay.reply("A reply that must not wait for the rest of the pass");
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            long woke = android.os.SystemClock.elapsedRealtime();
+            scenario.onActivity(activity -> invoke(activity, "queueSync"));
+            try {
+                assertTrue("The pass must reach its receipts step", relay.statusReached.await(20, java.util.concurrent.TimeUnit.SECONDS));
+                awaitMainCondition(scenario, activity -> hasRowText(activity, "A reply that must not wait for the rest of the pass"));
+                perf("received message shown while the rest of the sync pass is still running (ms)", android.os.SystemClock.elapsedRealtime() - woke);
+                assertEquals("The pass is still waiting, yet the message is already on screen", 1, gate.getCount());
+            } finally { gate.countDown(); }
+            awaitMessages(scenario);
+        }
+    }
+
+    private boolean hasRowText(MainActivity activity, String text) {
+        for (Object row : ((Map<?, ?>) readField(activity, "messageRows")).values())
+            if (text.contentEquals(((TextView) readField(row, "body")).getText())) return true;
+        return false;
+    }
+
+    @Test public void typingAndSendingStayQuickInAChatOfThreeHundredMessages() throws Exception {
+        signedInFixture(); conversationsFixture(); longChat(300);
+        assertEquals(300, engine.entries(peerId).size());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            long[] worst = new long[2];
+            for (int round = 0; round < 4; round++) {
+                scenario.onActivity(activity -> {
+                    EditText input = (EditText) readField(activity, "composer"); input.requestFocus();
+                    long started = android.os.SystemClock.elapsedRealtime();
+                    for (int index = 0; index < 12; index++) input.append("a");
+                    worst[0] = Math.max(worst[0], android.os.SystemClock.elapsedRealtime() - started);
+                    started = android.os.SystemClock.elapsedRealtime();
+                    ((View) readField(activity, "sendControl")).performClick();
+                    worst[1] = Math.max(worst[1], android.os.SystemClock.elapsedRealtime() - started);
+                    assertNotNull(text(root(activity), "Sending"));
+                });
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+                Thread.sleep(250);
+            }
+            perf("12 keystrokes in a 300 message chat, worst of 4 (ms)", worst[0]);
+            perf("send tap in a 300 message chat, worst of 4 (ms)", worst[1]);
+            assertTrue("Typing must not depend on the length of the chat; took " + worst[0] + "ms", worst[0] < 250);
+            assertTrue("The send tap must not depend on the length of the chat; took " + worst[1] + "ms", worst[1] < 250);
+        }
+    }
+
+    @Test public void theExpiryTickOnlyWalksTheMessagesWhenOneIsDue() throws Exception {
+        signedInFixture(); conversationsFixture(); longChat(60);
+        // Eight seconds left: long enough to measure the idle ticks first, short enough to watch it expire.
+        ChatEngine.Entry soon = entry(false, "About to expire", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -(3_600_000L - 8_000L));
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            int[] scans = new int[1];
+            scenario.onActivity(activity -> {
+                assertTrue(((Map<?, ?>) readField(activity, "messageRows")).containsKey(soon.id()));
+                Runnable tick = (Runnable) readField(activity, "expiryTick");
+                scans[0] = (int) readField(activity, "rowScans");
+                for (int index = 0; index < 40; index++) tick.run();
+                assertEquals("With nothing due the tick must not walk the messages", scans[0], (int) readField(activity, "rowScans"));
+            });
+            awaitMainCondition(scenario, activity -> !((Map<?, ?>) readField(activity, "messageRows")).containsKey(soon.id()));
+            scenario.onActivity(activity -> {
+                assertTrue("The tick walked the messages when one expired", (int) readField(activity, "rowScans") > scans[0]);
+                assertNull(descendants(root(activity)).stream().filter(view -> view instanceof TextView label && "About to expire".contentEquals(label.getText())).findFirst().orElse(null));
+                int again = (int) readField(activity, "rowScans");
+                Runnable tick = (Runnable) readField(activity, "expiryTick");
+                for (int index = 0; index < 40; index++) tick.run();
+                assertEquals("Idle again until the next one is due", again, (int) readField(activity, "rowScans"));
+            });
+        }
+    }
+
+    private ChatEngine.Entry plainRecord(boolean outgoing, String state, long deadline, boolean image) {
+        return new ChatEngine.Entry(UUID.randomUUID(), peerId, deadline, ChatEnvelope.Expiry.HOUR_1, outgoing, image, state);
+    }
+
+    private void storeRecords(List<ChatEngine.Entry> records) throws Exception {
+        vault.transaction(() -> { for (ChatEngine.Entry record : records) write("entry/" + record.id(), record); return null; });
+    }
+
+    // Plain records are enough to count against the limit: it is about how many a phone holds, not what they say.
+    @Test public void aFullPhoneMakesRoomByRemovingWhatWouldExpireSoonestInsteadOfRefusing() throws Exception {
+        signedInFixture();
+        ToFro relay = new ToFro(true);
+        engine.liveLimit = 40;
+        long base = System.currentTimeMillis() + 600_000L;
+        List<ChatEngine.Entry> unread = new ArrayList<>(), unsent = new ArrayList<>(), removable = new ArrayList<>(), all = new ArrayList<>();
+        // The earliest deadlines of all, but not yet read: never taken.
+        for (int index = 0; index < 5; index++) unread.add(plainRecord(false, "DELIVERED", base + index * 1000L, false));
+        // Still waiting to be sent: never taken either.
+        for (int index = 0; index < 3; index++) unsent.add(plainRecord(true, "PENDING", base + 10_000L + index * 1000L, false));
+        for (int index = 0; index < 32; index++) removable.add(plainRecord(index % 2 == 0, index % 2 == 0 ? "QUEUED" : "READ", base + 100_000L + index * 1000L, false));
+        all.addAll(unread); all.addAll(unsent); all.addAll(removable);
+        storeRecords(all);
+        vault.transaction(() -> {
+            for (ChatEngine.Entry waiting : unsent)
+                write("outbox/" + waiting.id(), new ChatEngine.Outbox(new ChatEngine.Send(waiting.id(), peerId, peerDevice, ChatEnvelope.Expiry.HOUR_1, waiting.expiresAt(), 1, new byte[]{1}, null), null));
+            return null;
+        });
+        assertEquals(40, vault.names("entry/").size());
+        engine.send(peer, "A message that needs room", null, ChatEnvelope.Expiry.HOUR_1);
+        assertEquals("Two were made room for and one was added", 39, vault.names("entry/").size());
+        for (int index = 0; index < 2; index++) assertNull("The messages that would expire soonest go first", vault.get("entry/" + removable.get(index).id()));
+        for (ChatEngine.Entry kept : all) if (!removable.subList(0, 2).contains(kept)) assertNotNull(vault.get("entry/" + kept.id()));
+        assertTrue("Nobody is told that a message was removed", vault.names("ack/").isEmpty());
+        assertTrue("The new message is stored", engine.entries(peerId).stream().anyMatch(entry -> all.stream().noneMatch(record -> record.id().equals(entry.id()))));
+        assertTrue("The new message really was sent", relay.outgoing.stream().anyMatch(sent -> all.stream().noneMatch(record -> record.id().equals(sent.id()))));
+        // Sending again does not remove more: there is room now.
+        engine.send(peer, "And another", null, ChatEnvelope.Expiry.HOUR_1);
+        assertEquals(40, vault.names("entry/").size());
+    }
+
+    @Test public void anIncomingMessageAtTheLimitIsStoredAfterMakingRoom() throws Exception {
+        signedInFixture();
+        ToFro relay = new ToFro(false);
+        engine.liveLimit = 40;
+        long base = System.currentTimeMillis() + 600_000L;
+        List<ChatEngine.Entry> read = new ArrayList<>();
+        for (int index = 0; index < 40; index++) read.add(plainRecord(index % 2 == 0, index % 2 == 0 ? "QUEUED" : "READ", base + index * 1000L, false));
+        storeRecords(read);
+        ChatEngine.Incoming arriving = relay.reply("Arrives at a phone that is full");
+        engine.sync();
+        assertTrue("The message is stored, not left waiting", engine.entries(peerId).stream().anyMatch(entry -> entry.id().equals(arriving.id())));
+        assertEquals(39, vault.names("entry/").size());
+        for (int index = 0; index < 2; index++) assertNull(vault.get("entry/" + read.get(index).id()));
+        assertNotNull(vault.get("seen/" + arriving.id()));
+        synchronized (relay.incoming) { assertTrue("It was acknowledged", relay.incoming.isEmpty()); }
+    }
+
+    @Test public void aPhoneHoldingOnlyUnreadMessagesNeverRemovesThemAndRefusesWithAnExplanation() throws Exception {
+        signedInFixture();
+        ToFro relay = new ToFro(true);
+        engine.liveLimit = 40;
+        long base = System.currentTimeMillis() + 600_000L;
+        List<ChatEngine.Entry> unread = new ArrayList<>();
+        for (int index = 0; index < 40; index++) unread.add(plainRecord(false, "DELIVERED", base + index * 1000L, false));
+        storeRecords(unread);
+        ChatEngine.CapacityReached full = assertThrows(ChatEngine.CapacityReached.class,
+                () -> engine.send(peer, "There is nothing that may be removed", null, ChatEnvelope.Expiry.HOUR_1));
+        assertEquals("Local message capacity reached", full.getMessage());
+        assertEquals("Not one unread message was touched", 40, vault.names("entry/").size());
+        assertTrue("Nothing was sent", relay.outgoing.isEmpty());
+        assertTrue("A refused message leaves nothing queued", vault.names("outbox/").isEmpty());
+    }
+
+    @Test public void anIncomingMessageWaitsAtTheRelayWhileEverythingIsUnreadAndArrivesOnceOneHasBeenRead() throws Exception {
+        signedInFixture();
+        ToFro relay = new ToFro(false);
+        engine.liveLimit = 40;
+        long base = System.currentTimeMillis() + 600_000L;
+        List<ChatEngine.Entry> unread = new ArrayList<>();
+        for (int index = 0; index < 40; index++) unread.add(plainRecord(false, "DELIVERED", base + index * 1000L, false));
+        storeRecords(unread);
+        ChatEngine.Incoming waiting = relay.reply("Waits at the relay");
+        engine.sync();
+        assertEquals(40, vault.names("entry/").size());
+        assertNull(vault.get("seen/" + waiting.id()));
+        synchronized (relay.incoming) { assertEquals("The relay keeps what was not accepted", 1, relay.incoming.size()); }
+        engine.markRead(List.of(unread.get(5)));
+        engine.sync();
+        assertTrue(engine.entries(peerId).stream().anyMatch(entry -> entry.id().equals(waiting.id())));
+        assertNull("The one that had been read made room", vault.get("entry/" + unread.get(5).id()));
+        assertNotNull("An unread one was not touched", vault.get("entry/" + unread.get(4).id()));
+        synchronized (relay.incoming) { assertTrue("Once stored it is acknowledged", relay.incoming.isEmpty()); }
+    }
+
+    @Test public void aStoreFullOfPhotosMakesRoomBeforeItsHardLimit() throws Exception {
+        signedInFixture();
+        ToFro relay = new ToFro(true);
+        long base = System.currentTimeMillis() + 600_000L;
+        byte[] body = new byte[3 << 20];
+        List<ChatEngine.Entry> photos = new ArrayList<>(), texts = new ArrayList<>();
+        ChatEngine.Entry unreadPhoto = plainRecord(false, "DELIVERED", base, true);
+        for (int index = 0; index < 6; index++) photos.add(plainRecord(index % 2 == 0, index % 2 == 0 ? "QUEUED" : "READ", base + 1000L + index * 1000L, true));
+        for (int index = 0; index < 5; index++) texts.add(plainRecord(true, "QUEUED", base + 500L + index * 100L, false));
+        vault.transaction(() -> {
+            write("entry/" + unreadPhoto.id(), unreadPhoto); vault.put("body/" + unreadPhoto.id(), body);
+            for (ChatEngine.Entry photo : photos) { write("entry/" + photo.id(), photo); vault.put("body/" + photo.id(), body); }
+            for (ChatEngine.Entry text : texts) write("entry/" + text.id(), text);
+            return null;
+        });
+        assertTrue("The store is past its soft limit", vault.sizeBytes() > (20L << 20));
+        engine.send(peer, "Needs room for its commit", null, ChatEnvelope.Expiry.HOUR_1);
+        assertTrue("The store was brought down well below its limit: " + vault.sizeBytes(), vault.sizeBytes() <= (13L << 20));
+        assertNotNull("An unread photo is never taken", vault.get("body/" + unreadPhoto.id()));
+        for (ChatEngine.Entry text : texts) assertNotNull("Making room for size removes photos, not short messages", vault.get("entry/" + text.id()));
+        int kept = 0;
+        for (ChatEngine.Entry photo : photos) if (vault.get("entry/" + photo.id()) != null) kept++;
+        assertTrue("The photos that would expire soonest were the ones removed", kept >= 1 && kept <= 3
+                && vault.get("entry/" + photos.get(photos.size() - 1).id()) != null && vault.get("entry/" + photos.get(0).id()) == null);
+        assertEquals("The send went through", 1, relay.outgoing.size());
+    }
+
+    @Test public void theOpenChatDropsTheMessagesThatWereMadeRoomForAndTheirKeysAreGone() throws Exception {
+        signedInFixture();
+        ToFro relay = new ToFro(true);
+        engine.liveLimit = 40;
+        List<ChatEngine.Entry> stored = new ArrayList<>();
+        for (int index = 0; index < 40; index++)
+            stored.add(entry(index % 2 == 0, "Stored message " + index, null, ChatEnvelope.Expiry.HOUR_1, index % 2 == 0 ? "QUEUED" : "READ", -(40 - index) * 1000L));
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                assertEquals(40, ((Map<?, ?>) readField(activity, "messageRows")).size());
+                ((EditText) readField(activity, "composer")).setText("A message that needs room");
+                ((View) readField(activity, "sendControl")).performClick();
+            });
+            awaitMainCondition(scenario, activity -> ((Map<?, ?>) readField(activity, "messageRows")).size() == 39
+                    && hasRowText(activity, "A message that needs room") && !(boolean) readField(activity, "messageRefreshQueued"));
+            scenario.onActivity(activity -> {
+                Map<?, ?> rows = (Map<?, ?>) readField(activity, "messageRows");
+                for (int index = 0; index < 2; index++) assertFalse("The oldest message left the screen", rows.containsKey(stored.get(index).id()));
+                assertTrue("The next oldest is still there", rows.containsKey(stored.get(2).id()));
+                assertTrue(((List<?>) readField(activity, "pendingSends")).isEmpty());
+                assertTrue("No send failed", descendants(root(activity)).stream().noneMatch(view -> view instanceof TextView label && "Not sent".contentEquals(label.getText())));
+            });
+        }
+        KeyStore keys = KeyStore.getInstance("AndroidKeyStore"); keys.load(null);
+        for (int index = 0; index < 2; index++)
+            assertFalse("A removed message's key is deleted, so nothing can decrypt it any more",
+                    keys.containsAlias(AndroidVault.currentAlias(AndroidVault.contentAlias(stored.get(index).expiresAt(), stored.get(index).id()))));
+        assertTrue(keys.containsAlias(AndroidVault.currentAlias(AndroidVault.contentAlias(stored.get(2).expiresAt(), stored.get(2).id()))));
+    }
+
+    @Test public void acknowledgementsAreRemovedInOneCommitAndWhatTheRelayAcceptedSurvivesARejection() throws Exception {
+        signedInFixture();
+        ToFro relay = new ToFro(true);
+        Method flush = ChatEngine.class.getDeclaredMethod("flushAcks"); flush.setAccessible(true);
+        java.util.function.Supplier<List<UUID>> queue = () -> {
+            List<UUID> ids = new ArrayList<>();
+            try {
+                vault.transaction(() -> {
+                    for (int index = 0; index < 5; index++) {
+                        UUID id = UUID.randomUUID(); ids.add(id);
+                        write("ack/" + id, new ChatEngine.Ack(id, System.currentTimeMillis() + 3_600_000L, "delivered"));
+                    }
+                    return null;
+                });
+            } catch (Exception failure) { throw new AssertionError(failure); }
+            return ids;
+        };
+        queue.get();
+        long revision = vault.revision();
+        flush.invoke(engine);
+        assertTrue(vault.names("ack/").isEmpty());
+        assertEquals("Five receipts are one encrypted commit, not five", revision + 1, vault.revision());
+        assertEquals(5, relay.ackCalls.get());
+        queue.get();
+        relay.failAckCall = relay.ackCalls.get() + 3;
+        revision = vault.revision();
+        InvocationTargetException rejected = assertThrows(InvocationTargetException.class, () -> flush.invoke(engine));
+        assertTrue(rejected.getCause() instanceof RelayApi.ApiFailure);
+        assertEquals("The two the relay accepted are removed, the rest wait for the next pass", 3, vault.names("ack/").size());
+        assertEquals("...in a single commit", revision + 1, vault.revision());
+    }
+
+    @Test public void unchangedMessageRecordsAreNotParsedAgainWhenAChatIsListed() throws Exception {
+        signedInFixture(); conversationsFixture(); longChat(150);
+        long started = android.os.SystemClock.elapsedRealtime();
+        assertEquals(150, engine.entries(peerId).size());
+        long cold = android.os.SystemClock.elapsedRealtime() - started;
+        int before = engine.entryParses.get();
+        started = android.os.SystemClock.elapsedRealtime();
+        List<ChatEngine.Entry> again = engine.entries(peerId);
+        long warm = android.os.SystemClock.elapsedRealtime() - started;
+        perf("listing a 150 message chat, first call (ms)", cold);
+        perf("listing a 150 message chat, second call (ms)", warm);
+        assertEquals("Nothing changed, so nothing is parsed again", before, engine.entryParses.get());
+        ChatEngine.Entry changed = again.get(10);
+        vault.transaction(() -> { write("entry/" + changed.id(), changed.withState("QUEUED")); return null; });
+        List<ChatEngine.Entry> listed = engine.entries(peerId);
+        assertEquals("Only the record that changed is parsed", before + 1, engine.entryParses.get());
+        assertEquals("QUEUED", listed.stream().filter(entry -> entry.id().equals(changed.id())).findFirst().orElseThrow().state());
+        engine.erase(changed, null);
+        assertEquals(149, engine.entries(peerId).size());
+        assertNull(engine.entry(changed.id()));
+        int parsed = engine.entryParses.get();
+        engine.purge();
+        assertEquals("Purging reads from the same cache", parsed, engine.entryParses.get());
+        assertEquals(149, engine.entries(peerId).size());
+    }
+
+    @Test public void aRemovedMessageKeepsItsSeenMarkerOnlyWhileTheRelayCouldStillHandItOverAgain() throws Exception {
+        signedInFixture();
+        ToFro relay = new ToFro(false);
+        List<ChatEngine.Incoming> received = new ArrayList<>();
+        for (int index = 0; index < 6; index++) { received.add(relay.reply("Received " + index)); Thread.sleep(5); }
+        // The relay will accept the receipts for the first three and answer "not found" to the other three, as it does while the two
+        // accounts are blocked from each other, and then it still has those and lists them again.
+        for (int index = 3; index < 6; index++) relay.refused.add(received.get(index).id());
+        engine.sync();
+        assertEquals(6, engine.entries(peerId).size());
+        assertEquals("Only the refused receipts are kept", 3, vault.names("ack/").size());
+        for (int index = 0; index < 6; index++) {
+            assertNotNull(vault.get("seen/" + received.get(index).id()));
+            byte[] ack = vault.get("ack/" + received.get(index).id());
+            if (index < 3) assertNull("Accepted, so the receipt is gone", ack);
+            else assertEquals("Refused, so it is held rather than dropped", ChatEngine.HELD,
+                    RelayApi.JSON.fromJson(new String(ack, StandardCharsets.UTF_8), ChatEngine.Ack.class).action());
+        }
+        assertEquals(6, relay.ackCalls.get());
+        engine.markRead(engine.entries(peerId));
+        engine.sync();
+        assertEquals("Six receipts for the read messages, and the held ones were not sent a second time before that", 12, relay.ackCalls.get());
+        engine.sync();
+        assertEquals("A held receipt is never sent again", 12, relay.ackCalls.get());
+        assertEquals(3, vault.names("ack/").size());
+        synchronized (relay.incoming) { assertEquals("The relay still lists the three it refused", 3, relay.incoming.size()); }
+
+        // A full phone removes the four that expire first: three whose receipts the relay accepted and one it refused.
+        engine.liveLimit = 3;
+        assertTrue(engine.makeRoom(0));
+        assertEquals(2, vault.names("entry/").size());
+        for (int index = 0; index < 4; index++) assertNull(vault.get("entry/" + received.get(index).id()));
+        for (int index = 0; index < 3; index++) assertNull("Nothing can hand it over again, so no marker is kept", vault.get("seen/" + received.get(index).id()));
+        assertNotNull("The relay may hand this one over again, so its marker stays with its held receipt", vault.get("seen/" + received.get(3).id()));
+        assertNotNull(vault.get("ack/" + received.get(3).id()));
+        for (int index = 4; index < 6; index++) assertNotNull(vault.get("seen/" + received.get(index).id()));
+        assertEquals(3, vault.names("seen/").size());
+        KeyStore keys = KeyStore.getInstance("AndroidKeyStore"); keys.load(null);
+        for (int index = 0; index < 6; index++)
+            assertEquals("A removed message has lost its key, the others still have theirs", index >= 4,
+                    keys.containsAlias(AndroidVault.currentAlias(AndroidVault.contentAlias(received.get(index).expiresAt(), received.get(index).id(), userId))));
+
+        // And it does: the removed message comes back from the relay and is recognised instead of failing to decrypt a second time.
+        engine.sync();
+        assertEquals("It was not stored again", 2, engine.entries(peerId).size());
+        assertNull(vault.get("entry/" + received.get(3).id()));
+        assertEquals(12, relay.ackCalls.get());
+
+        // A message whose receipt is still waiting to be sent keeps its marker too, however the relay will answer it.
+        ChatEngine.Incoming waiting = relay.reply("Received and read, its read receipt not sent yet");
+        engine.sync();
+        engine.markRead(engine.entries(peerId).stream().filter(entry -> entry.id().equals(waiting.id())).toList());
+        assertNotNull(vault.get("ack/" + waiting.id()));
+        engine.liveLimit = 1;
+        assertTrue(engine.makeRoom(0));
+        assertTrue(engine.entries(peerId).isEmpty());
+        assertNotNull("Its receipt has not gone out yet, so the marker stays", vault.get("seen/" + waiting.id()));
+        assertNotNull(vault.get("ack/" + waiting.id()));
+    }
+
+    @Test public void aRemovalThatDoesNotCommitNeverCostsAMessageItsKey() throws Exception {
+        signedInFixture();
+        ToFro relay = new ToFro(true);
+        engine.liveLimit = 40;
+        List<ChatEngine.Entry> stored = new ArrayList<>();
+        for (int index = 0; index < 40; index++)
+            stored.add(entry(index % 2 == 0, "Stored message " + index, null, ChatEnvelope.Expiry.HOUR_1, index % 2 == 0 ? "QUEUED" : "READ", -(40 - index) * 1000L));
+        KeyStore keys = KeyStore.getInstance("AndroidKeyStore"); keys.load(null);
+        // The removal runs inside an outer transaction that then fails, so the commit that would remove the records never happens.
+        IOException failed = assertThrows(IOException.class, () -> vault.transaction(() -> {
+            assertTrue(engine.makeRoom(0));
+            throw new IOException("The commit failed");
+        }));
+        assertEquals("The commit failed", failed.getMessage());
+        assertEquals(40, vault.names("entry/").size());
+        for (int index = 0; index < 2; index++) {
+            ChatEngine.Entry victim = stored.get(index);
+            assertTrue("The rolled back message is still there", engine.hasEntry(victim.id()));
+            assertTrue("...and its key was not touched",
+                    keys.containsAlias(AndroidVault.currentAlias(AndroidVault.contentAlias(victim.expiresAt(), victim.id()))));
+            assertEquals("...so a screen can still open it", "Stored message " + index, engine.content(victim, false, false).envelope().text());
+        }
+        // Done for real, the same removal takes the records and then the keys.
+        assertTrue(engine.makeRoom(0));
+        assertEquals(38, vault.names("entry/").size());
+        for (int index = 0; index < 2; index++) {
+            ChatEngine.Entry victim = stored.get(index);
+            assertFalse(engine.hasEntry(victim.id()));
+            assertFalse(keys.containsAlias(AndroidVault.currentAlias(AndroidVault.contentAlias(victim.expiresAt(), victim.id()))));
+        }
+        assertTrue(engine.hasEntry(stored.get(2).id()));
+    }
+
+    @Test public void aGroupReceiptTheRelayRefusedIsHeldAndItsMessageIsNotReceivedAgainAfterBeingRemovedForRoom() throws Exception {
+        signedInFixture();
+        SignalClient owner=new SignalClient(peerId,new DeviceSecurityTest.MemoryVault());
+        owner.verifyPeer(userId,engine.groupSignal().publicIdentity()); engine.groupSignal().verifyPeer(peerId,owner.publicIdentity());
+        owner.establish(userId,engine.groupSignal().generatePreKey(Instant.now()),Instant.now());
+        UUID groupId=UUID.randomUUID(); UUID epoch=UUID.randomUUID(); UUID messageId=UUID.randomUUID();
+        long created=System.currentTimeMillis(); long deadline=created+3_600_000;
+        GroupChat.Snapshot group=new GroupChat.Snapshot(groupId,peerId,2,epoch,false,List.of(
+            new GroupChat.Member(peerId,peerDevice,Base64.getEncoder().encodeToString(owner.publicIdentity()),"owner",null,"ACTIVE",0),
+            new GroupChat.Member(userId,deviceId,Base64.getEncoder().encodeToString(engine.groupSignal().publicIdentity()),"alex",null,"ACTIVE",0)));
+        vault.transaction(() -> { write("contact/"+peerId,new ChatEngine.Peer(peerId,peerDevice,group.member(peerId).identityKey(),"Owner","owner",null)); return null; });
+        SignalGroup sending=new SignalGroup(new DeviceSecurityTest.MemoryVault(),groupId,epoch,peerId);
+        List<GroupChat.Control> controls=new ArrayList<>();
+        for (String kind : List.of("ROSTER","KEY")) {
+            GroupChat.ControlBody body=new GroupChat.ControlBody(1,kind,groupId,epoch,2,peerId,userId,"Verified group",group.roster().digest(),kind.equals("KEY") ? sending.distribution() : null,deadline);
+            SignalClient.Packet encrypted=owner.encrypt(userId,RelayApi.JSON.toJson(body).getBytes(StandardCharsets.UTF_8),Instant.now());
+            controls.add(new GroupChat.Control(UUID.randomUUID(),groupId,peerId,peerDevice,userId,deviceId,epoch,2,deadline,encrypted.type(),encrypted.ciphertext()));
+        }
+        GroupEnvelope envelope=new GroupEnvelope(1,groupId,epoch,2,new ChatEnvelope(1,messageId,peerId,peerDevice,groupId,epoch,created,deadline,ChatEnvelope.Expiry.HOUR_1,"Protected group hello",null));
+        GroupChat.Message message=new GroupChat.Message(messageId,groupId,epoch,2,peerId,peerDevice,ChatEnvelope.Expiry.HOUR_1,deadline,
+                sending.encrypt(RelayApi.JSON.toJson(envelope).getBytes(StandardCharsets.UTF_8)),null);
+        List<String> acknowledgements=new ArrayList<>();
+        ((RelayApi) readField(engine,"api")).close();
+        setField(engine,"api",syntheticApi(chain -> {
+            okhttp3.Request request=chain.request(); String path=request.url().encodedPath();
+            if (path.equals("/groups")) return syntheticResponse(request,200,List.of(group));
+            if (path.endsWith("/controls") && request.method().equals("GET")) return syntheticResponse(request,200,controls);
+            if (path.contains("/controls") || path.endsWith("/status")) return syntheticResponse(request,200,List.of());
+            if (path.endsWith("/messages") && request.method().equals("GET")) return syntheticResponse(request,200,List.of(message));
+            if (path.endsWith("/delivered") || path.endsWith("/read")) {
+                acknowledgements.add(path);
+                return syntheticResponse(request,404,Map.of("error","not_found"));
+            }
+            throw new IOException("Unexpected synthetic group request");
+        }));
+        createFixtureKey(AndroidVault.contentAlias(deadline,messageId,userId));
+        engine.groups().sync();
+        assertEquals(1,acknowledgements.size());
+        assertNotNull("A refused receipt is kept",vault.get("group-ack/"+messageId));
+        assertEquals("A refused receipt is held, not dropped",ChatEngine.HELD,
+                RelayApi.JSON.fromJson(new String(vault.get("group-ack/"+messageId),StandardCharsets.UTF_8),GroupChat.Ack.class).action());
+        engine.groups().sync();
+        assertEquals("A held receipt is not sent again",1,acknowledgements.size());
+        // Read (set directly, since opening it would queue a new receipt) and then removed to make room, with the relay still listing it.
+        ChatEngine.Entry stored=engine.entries(groupId).get(0);
+        vault.transaction(() -> { write("entry/"+stored.id(),stored.withState("READ")); return null; });
+        engine.liveLimit=1;
+        assertTrue(engine.makeRoom(0));
+        assertTrue(engine.entries(groupId).isEmpty());
+        assertNotNull("The relay may hand it over again, so its marker stays",vault.get("seen/"+messageId));
+        engine.groups().sync();
+        assertTrue("It is recognised, not received a second time",engine.entries(groupId).isEmpty());
+        assertEquals(1,acknowledgements.size());
+    }
+
+    // ==== end 0.6.1 ====
 
     private int dpPx(int value) { return Math.round(value * context.getResources().getDisplayMetrics().density); }
 

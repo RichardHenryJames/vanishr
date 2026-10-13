@@ -12,6 +12,23 @@ license notices at **https://vanishr-download.vercel.app**.
 The public [update feed](https://vanishr-download.vercel.app/updates.json), not
 the latest Git version, determines which release users can download and discover.
 
+Release **0.6.1/code 42** keeps long chats fast and fixes the keyboard. A chat opens with its
+newest messages first (on the test emulator a 100-message chat showed nothing for 3 to 4 seconds
+before; the first screen now appears in about half a second and older messages are prepared as
+you scroll up), a message that arrives is shown as soon as it is stored instead of after the rest
+of the sync pass, and the work a busy chat repeated on every refresh (re-reading every stored
+message, walking every row four times a second) is gone. Opening the keyboard now pushes the
+newest messages up with the composer instead of leaving them behind it. The phone keeps up to 300
+live messages (it was 100, which a busy one-hour chat reaches, and then sending stopped with a
+generic error). A full phone no longer stops or shows an error: it quietly removes the messages
+that would expire soonest, only ones already read or sent and never an unread one, so in a very
+busy phone the oldest read messages can vanish a little before their timer. Who can read what, the
+per-message keys and every expiry are unchanged. It is a client-only change (no relay update); installs of
+0.5.6 to 0.6.0 get it from the in-app update prompt. Measured on an emulator with a software
+Keystore only; physical phones, where each Keystore operation is slower, were not tested. See the
+[threat model](docs/THREAT-MODEL.md#long-chats-the-message-limit-and-the-keyboard-061) and
+[verification](docs/VERIFICATION.md#release-061--long-chats-and-the-keyboard).
+
 Release **0.6.0/code 41** opens photos full screen: edge to edge on black, no border or
 padding, and one close cross at the top right instead of a white sheet with a Done button.
 On the **official admin's phone only**, pressing and holding a photo offers to save it to

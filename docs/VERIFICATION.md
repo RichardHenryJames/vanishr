@@ -3,6 +3,182 @@
 Evidence refreshed on Windows, 2026-10-13 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
+## Release 0.6.1 / Long chats and the keyboard
+
+Release 0.6.1 / code 42 answers a complaint that a chat got slower the longer two people went
+back and forth, and a second report that opening the keyboard pushed only the message box up
+and left the chat behind it. It is a **client-only change**: no relay or schema change (the relay
+stays at schema 13; `git diff ab93146 HEAD -- relay/src/main infra` is empty) and no Azure
+operation. Installs of 0.5.6 to 0.6.0 can update through the in-app prompt; see the publication
+notes for what was and was not tested.
+
+**What was wrong, measured on the unmodified 0.6.0 code first** (dedicated Android 16 / API 36
+emulator, software-backed Keystore, synthetic accounts, a synthetic relay and a real second Signal
+contact; temporary probe tests that became the permanent tests below):
+
+- Opening a chat decrypted every message one after another before showing anything. One decrypt is
+  **18.7 ms** (`KeyStore` lookup 0.1, `containsAlias` 2.2, `getKey` 1.8, cipher setup 0.1, `init` 4.0,
+  `doFinal` 6.4), because every message has its own Keystore key. A chat of 20 messages took 703 ms to
+  appear, **100 messages 2.8 to 4.4 s** (three runs) and **300 messages 7.5 s**, with nothing on screen
+  until all of them were ready. This repeated each time the app came back from the background.
+- The phone stopped at **100 live messages across all chats** (`vault.names("entry/").size() >= 100`).
+  A to-fro chat reaches that within a one-hour expiry. At the limit a send ended in the generic
+  "request could not be completed" toast and the "Not sent" bubble (the 101st send in the probe never
+  completed), and an incoming message was silently not stored or acknowledged, so the relay kept
+  retrying it. Group messages had a second, separate copy of the same limit.
+- Every refresh, purge and sync pass parsed every stored message record again (`entries()` took 32 to
+  36 ms at 100 messages and 72 ms at 300), a send did one more full listing just to find the message it had
+  stored, and the timer that expires messages walked every row four times a second (7 to 10 ms per tick
+  at 100 rows, 26 to 31 ms at 300 on the cold emulator). Across 52 back-and-forth cycles the main thread
+  had **1,187 tasks of 16 ms or more** (20 to 38 per cycle).
+- A received message was shown only after the **whole sync pass** had finished (acknowledgements,
+  receipts for all sent messages, groups, profiles, photos): 420 to 823 ms after the wake-up on the
+  emulator, typically 650 to 750, and the send path took about 500 ms from tap to a stored message.
+- The keyboard: the list's height shrank from 1,748 px to 928 px while its scroll position stayed, so
+  **820 px of the newest messages were hidden** behind the composer, and a message that then arrived ended
+  1,001 px out of view because the list no longer counted as "at the end".
+- Not a cause: typing and the send tap. Twelve keystrokes took 21 to 96 ms and the tap 7 to 65 ms, the same
+  at 100 and at 300 messages. What the vault costs per write was measured too: one encrypted commit is about
+  27 ms plus 170 ms per MB of vault on this emulator (1 KB 27 ms, 500 KB 104 ms, 1 MB 191 ms, 2 MB 357 ms), and
+  a message cycle makes six or seven of them.
+
+**What changed** (see [THREAT-MODEL.md](THREAT-MODEL.md#long-chats-the-message-limit-and-the-keyboard-061)
+and [ARCHITECTURE.md](ARCHITECTURE.md#client-threading-and-the-open-vault)):
+
+- [MainActivity](../android/app/src/main/java/app/vanishr/android/MainActivity.java): a chat loads **newest
+  first in batches of 16**, each batch decrypted on the reader lane one message at a time, its read
+  receipts committed once, then shown; the next batch is queued behind whatever else the lane has to do. Only
+  the newest 100 messages are prepared at open and older ones load when the user scrolls up to them, with the
+  message they were looking at staying where it is. The expiry tick walks the rows only when one is due.
+  A send looks up the one message it stored instead of listing the conversation. A scroll to the bottom that has been
+  queued but has not run yet counts as being at the bottom for the next batch (`bottomScrollsPending`): the reader can
+  post a batch in the few milliseconds between one batch's rows being added and its scroll being queued, and measuring
+  the list at that moment finds it laid out but not yet scrolled, which left the chat showing the oldest of the
+  messages loaded so far instead of the newest. The first full QA run found this as an intermittent failure of the
+  long-chat test while two other emulators were using most of the host's CPU; it was then reproduced deterministically
+  (below) and fixed.
+- [ChatScroll](../android/app/src/main/java/app/vanishr/android/ChatScroll.java) (new): the message list keeps
+  its bottom edge where it was when its own height changes, so the keyboard pushes the newest messages up with
+  the composer (and, scrolled up, keeps the same messages just above it).
+- [ChatEngine](../android/app/src/main/java/app/vanishr/android/ChatEngine.java): a sync pass shows each received
+  message as soon as it is stored; parsed message records are kept while their stored bytes are unchanged (ids,
+  deadlines and states only); acknowledgements the relay accepted are removed in one commit instead of one each;
+  and the limit is **300 messages with `makeRoom`**: when a phone is full, or its encrypted store passes 16 MB
+  (photos), the messages that would expire soonest are removed before the next one is stored, 15 at a time (or
+  the earliest photos until 4 MB are free). Only a message already read, or one this phone sent that is no longer
+  waiting to be sent, is ever removed; unread messages (including an unopened view-once one) and unsent ones are
+  never taken. "Read" means what it always has: opening a chat marks the messages it shows (the newest 100) read as
+  they are prepared, so one that was shown but not yet scrolled to can be removed early; the earliest deadlines go
+  first, and the newest messages of a chat that was just opened expire last, which is what limits that. All the
+  records go in one commit and the keys are deleted only after it is durable (`afterCommit`, so a removal made inside
+  a transaction that then rolls back also keeps its keys), and the sender is told nothing. The "seen" marker that stops
+  the relay handing a message over twice is removed with the message once its acknowledgement has been **accepted**
+  (the relay's `acknowledge.lua` takes the message out of the recipient's inbox on the first accepted acknowledgement,
+  and `pending()` lists only that inbox), so markers of removed messages cannot pile up towards the vault's 4,000-record
+  limit. It is kept while an acknowledgement is still waiting to be sent and for one the relay **refused**: the relay
+  answers "not found" both when it no longer has the message and while the two accounts are blocked from each other
+  (`AccountDirectory.requireInteraction`), and then lists the message again once they are not, so `flushAcks` (and the
+  group one) now keeps a refused `delivered` or `read` receipt as a `held` receipt that is never sent again and is removed
+  at its deadline, instead of dropping it.
+  (with a specific message) and an incoming message wait at the relay. Group sending and receiving use the same
+  rule; the group copy of the old limit is gone.
+- [AndroidVault](../android/app/src/main/java/app/vanishr/android/AndroidVault.java): a key is fetched with one
+  `getKey` instead of `containsAlias` plus `getKey`, one fewer round trip to the keystore on every use, and the vault
+  can report its size.
+- Unchanged: every message keeps its own hardware key, deleted at its deadline; text is decrypted only for the open
+  chat and wiped on the same events; no parallel Keystore use was added (parallel decrypts were measured, 40 bodies
+  in 927 ms on one thread and 301 ms on four, but hardware-backed stores limit concurrent operations, so it was
+  not used); and the vault is still re-encrypted whole on each commit.
+
+**Measured after, same emulator and scenarios.** The first screen of a 100-message chat appears after
+**388 ms** in the permanent test (668 to 818 ms in the probe) and the whole page is ready after 2.3 s, in the
+background; a 300-message chat prepares only its newest 100. Back and forth, a message is stored about
+**200 ms** after the tap (was about 500), a reply is on screen **about 280 ms** after the wake-up
+(248 to 323 ms; was 650 to 750) and 314 ms with the rest of the sync pass deliberately held up, and the main
+thread had **169 tasks of 16 ms or more** over the same 52 cycles (was 1,187). The 101st send and beyond went
+through. With 300 messages on screen, twelve keystrokes took 34 ms and the send tap 22 ms (worst of four); the
+expiry tick took 0.3 to 0.8 ms (was 26 to 31). Listing 150 messages took 52 ms the first time and 12 ms the next.
+With the keyboard open, **0 px** of the newest messages were hidden (was 820), a message arriving with the keyboard
+open stayed in view and the keyboard stayed open with focus in the message box.
+
+Demonstrated on 2026-10-13 (synthetic accounts and an emulator only):
+
+- Nineteen permanent tests were added to `ScreenFlowTest` (220 tests in the suite now):
+  `theKeyboardPushesTheNewestMessagesUpWithTheComposer` and
+  `aChatScrolledUpKeepsTheSameMessagesAboveTheComposerWhenTheKeyboardOpens` (real keyboard, pixel positions, a new
+  message with the keyboard open, closing it again); `aLongChatShowsItsNewestMessagesBeforeTheOlderOnesAreReady`
+  (the first rows appear after one batch, the rest in further steps, in the order they were sent);
+  `aStageAppliedBeforeTheScrollForThePreviousOneHasRunStillFollowsTheBottom` (two batches applied by hand with a layout
+  pass in between and no chance for the queued scroll to run: the newest message must still be in view; without the
+  fix 2,248 px of the newest messages were below the screen);
+  `olderMessagesBeyondTheFirstPageLoadWhenTheUserScrollsUpToThem` (only the newest 100 are prepared, scrolling up
+  loads the rest and the message being looked at does not move);
+  `aReceivedMessageIsShownBeforeTheRestOfTheSyncPassFinishes` (the receipts call is blocked and the message is already
+  on screen); `typingAndSendingStayQuickInAChatOfThreeHundredMessages`; `theExpiryTickOnlyWalksTheMessagesWhenOneIsDue`
+  (a counter shows 40 idle ticks walk nothing and an expiry is still removed on time);
+  `acknowledgementsAreRemovedInOneCommitAndWhatTheRelayAcceptedSurvivesARejection`;
+  `unchangedMessageRecordsAreNotParsedAgainWhenAChatIsListed` (a changed record is parsed once, a removed one leaves
+  the cache); and six `makeRoom` tests: the earliest-deadline read or sent messages go first while unread and unsent ones
+  never do, an incoming message at the limit is stored and acknowledged, a phone holding only unread messages still
+  refuses with a specific message and leaves nothing queued, an incoming message waits at the relay until one has been
+  read, a 21 MB store of photos is brought under 13 MB before it can hit its hard limit (earliest photos first, short
+  messages untouched), and the open chat drops the removed messages from the screen with no failed send while their
+  keys are really gone from the Keystore. Three more came from the independent review (below):
+  `aRemovedMessageKeepsItsSeenMarkerOnlyWhileTheRelayCouldStillHandItOverAgain` (real Signal messages through the
+  real receive, acknowledge and removal path: the relay accepts the receipts for three and answers "not found" to three,
+  the refused ones are kept as held receipts and not sent again, a full phone removes four of the six, the markers of
+  the three accepted ones go, the one refused one keeps its marker, the removed messages' keys are gone from the
+  Keystore and the others' are not, a message whose read receipt is still waiting to be sent keeps its marker too, and
+  when the relay lists the removed message again
+  it is recognised and not decrypted a second time);
+  `aRemovalThatDoesNotCommitNeverCostsAMessageItsKey` (the removal runs inside an outer transaction that fails: every
+  record is back, every key is still in the Keystore and a screen can still open the message; run for real, records
+  and keys both go); and `aGroupReceiptTheRelayRefusedIsHeldAndItsMessageIsNotReceivedAgainAfterBeingRemovedForRoom`
+  (the same for a group message, with a real sender-key group fixture). The relay stub of the earlier receipt tests now
+  also counts every receipt call, so a receipt sent a second time is visible.
+- Mutation checks, each failing the matching test and then reverted: the plain scroll view (820 px hidden again, the
+  anchored position 58 px becoming -762 px); a first batch of 100,000 (the first rows appeared all at once); a history
+  page of 100,000 (130 rows at open); no hook after each received message (the message never appeared while the pass
+  was held); a limit of 100 again; per-acknowledgement commits (12 revisions instead of 8); a tick that walks every
+  time (7 walks became 47); the queued-scroll rule removed (2,248 px of the newest messages below the screen); and,
+  for `makeRoom`, unread messages made removable, the photo branch switched off, key
+  deletion removed and the receive path not making room. For the review fixes: refused receipts dropped again (the
+  held receipts were gone), refused group receipts dropped again, held receipts sent again (12 receipt calls became 15
+  in the 1-1 test, an unexpected request in the group test), a `seen` cleanup that ignored a waiting or held
+  receipt (the marker of a message the relay would hand over again was lost, 1-1 and group), no `seen` cleanup at all
+  (the marker stayed), and keys deleted before the commit again (the rolled-back message had lost its key); each failed
+  the matching test for the expected reason. (An earlier version of these fixes used a ten-minute read grace and
+  a "being removed" flag; the review showed that the grace was lost on every pause and could refuse a send right after a
+  chat had been opened, and both were replaced by the earliest-deadline order and the commit-then-keys order above.)
+  A timing-only check of the expiry tick passed under that mutation on the fast emulator, so it was replaced by the counter
+  above.
+- Full QA run on the final source on the dedicated Android 16 / API 36 emulator: **220 tests (174 screen-flow, 41
+  account-safety, 5 backup); 218 passed and 2 failed.** Both failures are the ones recorded for 0.5.8, 0.5.9 and 0.6.0
+  and are unrelated: `compactClassicProfilesOpenAsSecureBottomSheetsAndKeepTheChatDraft` (a pixel check of a sheet
+  button that fails inside a full run) and `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`. No source file
+  changed between that build and the run. An earlier full run of the same code before the scroll fix and before the
+  notification test was changed (219 tests) had two more failures, both intermittent while two other emulators on the
+  host, not part of this project, were using most of its CPU: `aLongChatShowsItsNewestMessagesBeforeTheOlderOnesAreReady`,
+  which was the scroll race described above (it failed in 2 of the first 5 runs, the full run and one of four paired
+  reruns, and in none of 16 later runs; the race was then reproduced and fixed), and
+  `notificationShadeTapLaunchesTheExactChatThroughItsImmutablePendingIntent`, a test that existed before this release and
+  asserted that the "View once" row was on screen the moment the chat header appeared, although the rows are prepared on
+  the reader lane and follow a moment later (3 to 362 ms later in the 8 runs that measured it; before the change it
+  failed in 4 of 15 runs). It now waits for the row, for up to 15 seconds, before making the same assertions, and passed
+  in the final full run. An earlier full run on the build before `makeRoom` existed (211 tests) had only the two known
+  failures.
+
+**Not verified:** any physical phone, and in particular a phone whose Keystore is hardware backed or uses StrongBox,
+where each decrypt and key creation is slower than the 19 ms measured here (the first screen of a long chat is the part
+that matters, and it no longer waits for the rest); the vault's cost per commit, which still grows with its size and with
+photos and is the remaining reason a very photo-heavy chat is slower (it is only kept from failing at its size limit, not
+made cheaper); a phone with several saved accounts at the limit; a group chat at the limit end to end (the group
+receipt and marker behavior has its own test, but a group message removed by a real full phone was only exercised
+with a lowered limit); a relay that really refuses a receipt because of a block (the relay's `not_found` for a block
+was read from its code and stubbed, not run against a relay); and the early removal itself on a real busy phone. A very
+busy phone now removes its oldest read messages a little before their timer instead of stopping; that is a behavior
+change to be aware of and is stated on the public Android and security pages.
+
 ## Release 0.6.0 / Full-screen photos and the admin's save option
 
 Release 0.6.0 / code 41 changes how a photo from a chat is shown and adds one option for the

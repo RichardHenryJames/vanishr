@@ -125,6 +125,35 @@ public final class MainActivity extends AppCompatActivity {
     private volatile int conversationGeneration;
     private boolean messageRefreshQueued;
     private boolean messageRefreshRequested;
+    // A chat shows its newest messages first and fills in the rest in the background; text is decrypted in small batches so a long
+    // history never keeps the newest messages waiting. Older ones beyond the first page are loaded when the user scrolls up to them.
+    private static final int FIRST_BATCH = 16, NEXT_BATCH = 16, HISTORY_PAGE = 100;
+    private int historyLimit = HISTORY_PAGE;
+    private boolean historyMore;
+    // Scrolls to the bottom that have been queued after a stage was applied but have not run yet. A stage that is applied while one is
+    // still waiting is following the bottom too: measuring the list at that moment would find it laid out but not yet scrolled.
+    private int bottomScrollsPending;
+    private long nextRowExpiry = Long.MAX_VALUE;
+    // Counts how often the expiry tick had to walk the rows, so a test can show that it does so only when a message is due.
+    private int rowScans;
+    private static final class MessageLoad {
+        final ChatEngine engine;
+        final int generation;
+        final ChatEngine.Peer peer;
+        final int limit;
+        final Map<UUID, ChatEngine.Entry> known = new HashMap<>();
+        final java.util.List<ChatEngine.Entry> entries = new ArrayList<>();
+        final java.util.ArrayDeque<ChatEngine.Entry> waiting = new java.util.ArrayDeque<>();
+        final Set<UUID> unresolved = new HashSet<>();
+        final Set<UUID> skipped = new HashSet<>();
+        final Map<UUID, ChatEngine.Entry> resolved = new HashMap<>();
+        final Map<UUID, String> senders = new HashMap<>();
+        boolean first = true;
+        int hidden;
+        MessageLoad(ChatEngine engine, int generation, ChatEngine.Peer peer, int limit) {
+            this.engine = engine; this.generation = generation; this.peer = peer; this.limit = limit;
+        }
+    }
     private static final class MessageRow {
         ChatEngine.Entry entry;
         final View alignment;
@@ -242,15 +271,20 @@ public final class MainActivity extends AppCompatActivity {
                 pending.clear();
                 return true;
             });
-            if (resumed && messages != null) {
+            if (resumed && messages != null && System.currentTimeMillis() >= nextRowExpiry) {
+                long now = System.currentTimeMillis();
+                rowScans++;
                 messageRows.values().removeIf(row -> {
-                    if (row.entry.expiresAt() > System.currentTimeMillis()) return false;
+                    if (row.entry.expiresAt() > now) return false;
                     messages.removeView(row.alignment); row.clear(); return true;
                 });
+                long soonest = Long.MAX_VALUE;
                 for (int index = messages.getChildCount() - 1; index >= 0; index--) {
                     View row = messages.getChildAt(index);
-                    if (row.getTag() instanceof Long deadline && deadline <= System.currentTimeMillis()) messages.removeViewAt(index);
+                    if (!(row.getTag() instanceof Long deadline)) continue;
+                    if (deadline <= now) messages.removeViewAt(index); else soonest = Math.min(soonest, deadline);
                 }
+                nextRowExpiry = soonest;
             }
             if (!isDestroyed()) ui.postDelayed(this, 250);
         }
@@ -1074,8 +1108,11 @@ public final class MainActivity extends AppCompatActivity {
             if (group==null) conversationMenu(peer,header); else groupMenu(peer.userId(),header);
         }));
         root.addView(header); root.addView(design.divider());
-        messageScroll = new ScrollView(this);
+        messageScroll = new ChatScroll(this);
         messageScroll.setFillViewport(true); messageScroll.setClipToPadding(false);
+        messageScroll.setOnScrollChangeListener((view, x, y, oldX, oldY) -> {
+            if (y < oldY && y < dp(900)) loadOlderMessages(peer);
+        });
         messages = vertical();
         messages.setPadding(dp(18), dp(24), dp(18), dp(24));
         messageScroll.addView(messages, new ScrollView.LayoutParams(-1, -2));
@@ -1230,8 +1267,8 @@ public final class MainActivity extends AppCompatActivity {
                 image = pending.copyImage();
                 if (pending.cancelled) return;
                 Runnable stored = () -> {
-                    ChatEngine.Entry durable = current.entries(pending.peer.userId()).stream()
-                            .filter(entry -> entry.id().equals(pending.id)).findFirst().orElseThrow();
+                    ChatEngine.Entry durable = current.entry(pending.id);
+                    if (durable == null) throw new java.util.NoSuchElementException();
                     String preparedText = pending.text;
                     ui.post(() -> {
                         if (!resumed || generation != screenGeneration || engine != current) return;
@@ -1300,6 +1337,7 @@ public final class MainActivity extends AppCompatActivity {
         bubble.addView(state); alignment.addView(bubble, new LinearLayout.LayoutParams(-2, -2));
         LinearLayout.LayoutParams placement = new LinearLayout.LayoutParams(-1, -2); placement.setMargins(0, dp(4), 0, dp(4));
         pending.row = alignment; messages.addView(alignment, placement);
+        nextRowExpiry = Math.min(nextRowExpiry, pending.expiresAt());
     }
 
     private String expiryName(ChatEnvelope.Expiry value) { return switch (value) { case VIEW_ONCE -> "View once"; case HOUR_1 -> "1 hour"; case HOURS_6 -> "6 hours"; case HOURS_24 -> "24 hours"; }; }
@@ -1462,64 +1500,108 @@ public final class MainActivity extends AppCompatActivity {
         if (messageRefreshQueued) { messageRefreshRequested = true; return; }
         messageRefreshQueued = true;
         messageRefreshRequested = false;
-        ChatEngine current = engine;
-        int generation = conversationGeneration;
-        Map<UUID, ChatEngine.Entry> known = new HashMap<>();
-        messageRows.forEach((id, row) -> known.put(id, row.entry));
-        onReader(() -> {
-            Map<UUID, String> text = new HashMap<>();
-            Map<UUID, String> senders = new HashMap<>();
-            Map<UUID, String> senderNames = new HashMap<>();
-            java.util.List<ChatEngine.Entry> entries = new ArrayList<>();
-            java.util.List<ChatEngine.Entry> receipts = new ArrayList<>();
-            try {
-                if (!conversationCurrent(current, generation)) return;
-                for (ChatEngine.Entry entry : current.entries(peer.userId())) {
-                    if (!conversationCurrent(current, generation)) { text.clear(); return; }
-                    if (entry.groupEpoch() != null && !entry.outgoing()) {
-                        String senderName = senderNames.get(entry.senderId());
-                        if (senderName == null) {
-                            senderName = current.groups().senderName(entry.peerId(), entry.senderId());
-                            senderNames.put(entry.senderId(), senderName);
-                        }
-                        senders.put(entry.id(), senderName);
-                    }
-                    if (!sameMessage(entry, known.get(entry.id()))) {
-                        if (!entry.image() && entry.expiry() != ChatEnvelope.Expiry.VIEW_ONCE) {
-                            try { text.put(entry.id(), current.content(entry, false, false).envelope().text()); }
-                            catch (Exception failure) {
-                                // Cleared, forgotten, blocked or expired meanwhile: nothing left to show, so it is not a failure.
-                                if (entry.expiresAt() <= System.currentTimeMillis() || vanished(current, generation, entry.id())) continue;
-                                throw failure;
-                            }
-                            if (!entry.outgoing()) {
-                                if (!entry.state().equals("READ")) receipts.add(entry);
-                                entry = entry.withState("READ");
-                            }
-                        }
-                    }
-                    entries.add(entry);
-                }
-                // One durable commit for everything that became visible, not one encrypted write per message.
-                if (!conversationCurrent(current, generation)) { text.clear(); return; }
-                current.markRead(receipts);
-                ui.post(() -> {
-                    try {
-                        if (!conversationCurrent(current, generation)) return;
-                        messageRefreshQueued = false;
-                        applyMessages(peer, entries, text, senders);
-                        if (messageRefreshRequested) refreshMessages(peer);
-                    } finally { text.clear(); }
-                });
-            } catch (Exception failure) {
-                text.clear();
-                ui.post(() -> {
-                    if (!conversationCurrent(current, generation)) return;
-                    messageRefreshQueued = false;
-                    showFailure(failure);
-                });
+        MessageLoad load = new MessageLoad(engine, conversationGeneration, peer, historyLimit);
+        messageRows.forEach((id, row) -> load.known.put(id, row.entry));
+        onReader(() -> listMessages(load));
+    }
+
+    // Reader lane: list the conversation once, then decrypt and show it a few messages at a time, newest first.
+    private void listMessages(MessageLoad load) {
+        try {
+            if (!conversationCurrent(load.engine, load.generation)) return;
+            java.util.List<ChatEngine.Entry> all = load.engine.entries(load.peer.userId());
+            int start = Math.max(0, all.size() - load.limit);
+            for (int index = 0; index < all.size(); index++) {
+                ChatEngine.Entry entry = all.get(index);
+                if (index < start && !load.known.containsKey(entry.id())) { load.hidden++; continue; }
+                load.entries.add(entry);
             }
+            Map<UUID, String> senderNames = new HashMap<>();
+            for (ChatEngine.Entry entry : load.entries) {
+                if (entry.groupEpoch() == null || entry.outgoing()) continue;
+                if (!conversationCurrent(load.engine, load.generation)) return;
+                String senderName = senderNames.get(entry.senderId());
+                if (senderName == null) {
+                    senderName = load.engine.groups().senderName(entry.peerId(), entry.senderId());
+                    senderNames.put(entry.senderId(), senderName);
+                }
+                load.senders.put(entry.id(), senderName);
+            }
+            for (int index = load.entries.size() - 1; index >= 0; index--) {
+                ChatEngine.Entry entry = load.entries.get(index);
+                if (sameMessage(entry, load.known.get(entry.id())) || entry.image() || entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE) continue;
+                load.waiting.add(entry); load.unresolved.add(entry.id());
+            }
+            loadStage(load);
+        } catch (Exception failure) { messagesFailed(load, failure); }
+    }
+
+    // One batch: decrypt, record the receipts, show it. The next batch is queued behind whatever else the reader lane has to do,
+    // so presence and avatar reads are never held up by a long history.
+    private void loadStage(MessageLoad load) {
+        Map<UUID, String> text = new HashMap<>();
+        try {
+            int size = load.first ? FIRST_BATCH : NEXT_BATCH;
+            load.first = false;
+            java.util.List<ChatEngine.Entry> receipts = new ArrayList<>();
+            for (int taken = 0; taken < size && !load.waiting.isEmpty(); taken++) {
+                ChatEngine.Entry entry = load.waiting.poll();
+                if (!conversationCurrent(load.engine, load.generation)) { text.clear(); return; }
+                try { text.put(entry.id(), load.engine.content(entry, false, false).envelope().text()); }
+                catch (Exception failure) {
+                    // Cleared, forgotten, blocked or expired meanwhile: nothing left to show, so it is not a failure.
+                    if (entry.expiresAt() <= System.currentTimeMillis() || vanished(load.engine, load.generation, entry.id())) {
+                        load.unresolved.remove(entry.id()); load.skipped.add(entry.id()); continue;
+                    }
+                    throw failure;
+                }
+                load.unresolved.remove(entry.id());
+                if (!entry.outgoing()) {
+                    if (!entry.state().equals("READ")) receipts.add(entry);
+                    load.resolved.put(entry.id(), entry.withState("READ"));
+                }
+            }
+            if (!conversationCurrent(load.engine, load.generation)) { text.clear(); return; }
+            // One durable commit for everything this batch made visible, not one encrypted write per message.
+            load.engine.markRead(receipts);
+            java.util.List<ChatEngine.Entry> visible = new ArrayList<>(load.entries.size());
+            for (ChatEngine.Entry entry : load.entries) {
+                if (load.unresolved.contains(entry.id()) || load.skipped.contains(entry.id())) continue;
+                visible.add(load.resolved.getOrDefault(entry.id(), entry));
+            }
+            boolean last = load.waiting.isEmpty();
+            ui.post(() -> {
+                try {
+                    if (!conversationCurrent(load.engine, load.generation)) return;
+                    if (last) messageRefreshQueued = false;
+                    applyMessages(load.peer, visible, text, load.senders);
+                    historyMore = load.hidden > 0;
+                    if (last && messageRefreshRequested) refreshMessages(load.peer);
+                    // Someone already at the top when the page finishes gets the next one without having to scroll again. It is
+                    // checked after the scroll to the bottom has been applied, so a freshly opened chat does not load history early.
+                    else if (last && historyMore && messageScroll != null) {
+                        ScrollView scroll = messageScroll;
+                        scroll.post(() -> { if (messageScroll == scroll && scroll.getScrollY() < dp(900)) loadOlderMessages(load.peer); });
+                    }
+                } finally { text.clear(); }
+            });
+            if (!last) onReader(() -> loadStage(load));
+        } catch (Exception failure) { text.clear(); messagesFailed(load, failure); }
+    }
+
+    private void messagesFailed(MessageLoad load, Exception failure) {
+        ui.post(() -> {
+            if (!conversationCurrent(load.engine, load.generation)) return;
+            messageRefreshQueued = false;
+            showFailure(failure);
         });
+    }
+
+    private void loadOlderMessages(ChatEngine.Peer peer) {
+        if (!historyMore || messageRefreshQueued || !resumed || messages == null) return;
+        historyLimit += HISTORY_PAGE;
+        historyMore = false;
+        refreshMessages(peer);
     }
 
     private boolean conversationCurrent(ChatEngine current, int generation) {
@@ -1544,6 +1626,7 @@ public final class MainActivity extends AppCompatActivity {
     private void resetConversation() {
         conversationGeneration++;
         messageRefreshQueued = false; messageRefreshRequested = false; presenceRefreshQueued = false;
+        historyLimit = HISTORY_PAGE; historyMore = false; nextRowExpiry = Long.MAX_VALUE; bottomScrollsPending = 0;
         for (MessageRow row : messageRows.values()) row.clear();
         messageRows.clear(); messageDates.clear(); messageEmpty = null;
         shownConversationPeer = null; shownConversationGroup = null; shownPresence = null; checkedPresence = null;
@@ -1552,8 +1635,17 @@ public final class MainActivity extends AppCompatActivity {
     private void applyMessages(ChatEngine.Peer peer, java.util.List<ChatEngine.Entry> loaded,
                                Map<UUID, String> text, Map<UUID, String> senders) {
         java.util.List<ChatEngine.Entry> entries = loaded.stream().filter(entry -> entry.expiresAt() > System.currentTimeMillis()).toList();
-        boolean atEnd = messageScroll == null || messages.getHeight() - messageScroll.getScrollY() - messageScroll.getHeight() < dp(100);
+        boolean atEnd = bottomScrollsPending > 0 || messageScroll == null
+                || messages.getHeight() - messageScroll.getScrollY() - messageScroll.getHeight() < dp(100);
         int position = messageScroll == null ? 0 : messageScroll.getScrollY();
+        // Away from the bottom, the message at the top of the screen stays where it is even when older ones are added above it.
+        View anchor = null; int anchorOffset = 0;
+        if (!atEnd) {
+            for (int index = 0; index < messages.getChildCount(); index++) {
+                View child = messages.getChildAt(index);
+                if (child.getBottom() > position && child.getTag() instanceof Long) { anchor = child; anchorOffset = child.getTop() - position; break; }
+            }
+        }
         shownEntries = entries;
         Set<UUID> retained = new HashSet<>();
         for (ChatEngine.Entry entry : entries) retained.add(entry.id());
@@ -1617,11 +1709,20 @@ public final class MainActivity extends AppCompatActivity {
         }
         ScrollView scroll = messageScroll;
         int generation = conversationGeneration;
-        if (changed && scroll != null) scroll.post(() -> {
-            if (messageScroll == scroll && generation == conversationGeneration) {
-                if (atEnd) scroll.fullScroll(View.FOCUS_DOWN); else scroll.scrollTo(0, position);
-            }
-        });
+        long soonest = Long.MAX_VALUE;
+        for (View row : ordered) if (row.getTag() instanceof Long deadline && deadline < soonest) soonest = deadline;
+        nextRowExpiry = soonest;
+        View kept = anchor; int keptOffset = anchorOffset;
+        if (changed && scroll != null) {
+            if (atEnd) bottomScrollsPending++;
+            scroll.post(() -> {
+                if (atEnd && generation == conversationGeneration && bottomScrollsPending > 0) bottomScrollsPending--;
+                if (messageScroll != scroll || generation != conversationGeneration || scroll.getChildCount() == 0) return;
+                if (atEnd) scroll.scrollTo(0, scroll.getChildAt(0).getHeight());
+                else if (kept != null && kept.getParent() == messages) scroll.scrollTo(0, kept.getTop() - keptOffset);
+                else scroll.scrollTo(0, position);
+            });
+        }
     }
 
     private void updateReceipt(MessageRow row, ChatEngine.Entry entry) {
@@ -2884,12 +2985,21 @@ public final class MainActivity extends AppCompatActivity {
         });
     }
 
+    // A message that has just been stored is shown in the open chat at once; the rest of the sync pass carries on behind it.
+    private void showReceived(ChatEngine current, int generation) {
+        ui.post(() -> {
+            if (!resumed || engine != current || generation != screenGeneration || busy || selectedPeer == null) return;
+            ChatEngine.Peer open = conversationPeer(selectedPeer);
+            if (open != null) refreshMessages(open);
+        });
+    }
+
     private void syncOnce() {
         int generation = screenGeneration;
         ChatEngine current = engine;
         if (!resumed || current == null || !current.safety().termsAccepted(PlayPolicy.VERSION)) return;
         boolean completed = true;
-        try { completed = current.sync(() -> waitingActions.get() > 0); }
+        try { completed = current.sync(() -> waitingActions.get() > 0, () -> showReceived(current, generation)); }
         catch (GeneralSecurityException | AndroidVault.PhoneLockedException failure) {
             ui.post(() -> { if (engine == current && generation == screenGeneration && !busy) { hideContent(); storageFailure(failure); } }); return;
         }
@@ -3005,6 +3115,8 @@ public final class MainActivity extends AppCompatActivity {
         if (failure instanceof AccountSafety.DeletionPendingException) { deletionFailed(failure); }
         else if (failure instanceof GeneralSecurityException || failure instanceof AndroidVault.PhoneLockedException
                 || failure instanceof AndroidVault.PhoneLockRequiredException) { hideContent(); storageFailure(failure); }
+        else if (failure instanceof ChatEngine.CapacityReached)
+            problem("This phone is holding the most unread messages it can. Open your chats to read them, then try again.");
         else if (failure instanceof SecurityException) problem("Identity verification or secure storage check failed.");
         else if (failure instanceof RelayApi.ApiFailure apiFailure) {
             if (apiFailure.status == 401 && engine != null && engine.account() != null) {

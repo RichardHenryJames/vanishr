@@ -228,6 +228,20 @@ introduction over the network on the `work` lane. User actions are counted while
 wait, and a running sync stops at its next step boundary (between relay calls, which is
 equivalent to a dropped connection at that point) and resumes right behind them.
 
+A conversation is loaded newest first, a few messages at a time (0.6.1). The reader lane
+lists the chat once, then decrypts 16 messages, records their read receipts as one write
+and shows them; each next batch of 16 is queued behind whatever else the lane has to do,
+so presence and avatar reads are never held up by a long history. Only the newest 100
+messages are prepared when a chat opens; older ones load when the user scrolls up to
+them, and the message the user was looking at stays where it is while they are added
+above it. A message received during a sync is shown as soon as it is stored, not after
+the rest of the pass (acknowledgements, receipts, groups, profiles) has finished. The
+message list is a `ChatScroll` that keeps the bottom of its content where it was when its
+own height changes, so the keyboard pushes the newest messages up with the composer. The
+chat's expiry tick only walks the rows when one is due, and parsed message records are
+kept while their stored bytes are unchanged (ids, deadlines and states only, never content),
+so listing, purging and syncing a chat of hundreds of messages does not parse them again.
+
 The open vault serves reads from an immutable snapshot of the last committed state,
 so a read never waits for an encrypted commit on another thread. A transaction still
 sees its own uncommitted writes; other threads see them only after the commit has
@@ -257,7 +271,10 @@ fake them; a malicious recipient can retain content regardless of expiry.
 ## Availability and limits
 
 The MVP intentionally uses a single relay/Redis instance, one device per account,
-100 local content entries, 2 MiB images, 16 KiB UTF-8 text, bounded prekey batches,
+300 local content entries (each one encrypted record pair plus its own hardware key; a
+phone that is full, or whose encrypted store has passed 16 MB, makes room by itself by
+removing the messages that would expire soonest among those already read or sent, never
+an unread or unsent one, so a chat does not stop), 2 MiB images, 16 KiB UTF-8 text, bounded prekey batches,
 and bounded IP/account/device rate limits. Foreground polling every 15 seconds
 backs up WSS wake-ups. FCM is optional and generic; credentials must be supplied.
 An authenticated existing session can queue encrypted outgoing content offline.

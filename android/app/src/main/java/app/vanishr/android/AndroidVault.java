@@ -68,7 +68,9 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
     private SecretKey key(String alias, boolean create) throws Exception {
         requirePhoneUnlocked();
         KeyStore store = keyStore();
-        if (store.containsAlias(alias)) return (SecretKey) store.getKey(alias, null);
+        // A single lookup: asking whether the alias exists first costs a second round trip to the keystore for every key use.
+        java.security.Key existing = store.getKey(alias, null);
+        if (existing != null) return (SecretKey) existing;
         if (!create) throw new SecurityException("Secure key is unavailable");
         boolean strongBox = context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE);
         try { return generate(alias, strongBox); }
@@ -236,6 +238,22 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
             for (String name : view.keySet()) if (name.startsWith(prefix)) result.add(name);
             return result;
         });
+    }
+
+    /** Total size of the stored records, so a caller can make room well before the store's hard size limit. */
+    long sizeBytes() {
+        requireOpen();
+        return readSnapshot(view -> {
+            long total = 0;
+            for (Map.Entry<String, byte[]> record : view.entrySet()) total += record.getKey().length() + record.getValue().length;
+            return total;
+        });
+    }
+
+    /** Size of one stored record, or 0 when there is none. */
+    long length(String name) {
+        requireOpen();
+        return readSnapshot(view -> { byte[] value = view.get(name); return value == null ? 0L : (long) value.length; });
     }
 
     @Override public synchronized <Result> Result transaction(Operation<Result> operation) throws Exception {

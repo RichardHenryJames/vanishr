@@ -615,6 +615,79 @@ come from an emulator with software-backed Keystore. A phone whose Keystore is
 hardware-backed (including StrongBox) encrypts and decrypts more slowly, and the vault
 is still re-encrypted whole on each commit; that was not measured and is not addressed.
 
+### Long chats, the message limit and the keyboard (0.6.1)
+
+After 0.5.9 a busy chat still got slower the longer it ran. Opening it decrypted every
+message one after another (each message has its own Keystore key, about 20 ms each on the
+emulator), so a 100-message chat showed nothing for several seconds, and every refresh,
+purge and sync pass parsed every stored message record again. The phone also stopped
+working at 100 live messages, because the limit was 100 across all chats and a to-fro chat
+reaches that within the hour. These are bounded now without changing what is protected:
+
+- **Per-message keys are unchanged.** Every message still has its own hardware key, deleted
+  at its deadline, so expiry still erases it cryptographically. Text is still decrypted
+  only for the open chat, still held only in that chat's views, and still cleared on
+  expiry, leaving the chat and backgrounding. Decryption happens in batches on the same
+  background-priority lane, one message at a time (the reader adds no parallel Keystore
+  operations of its own, which hardware-backed stores limit), and every message re-checks
+  that the chat is still the one on screen, and every Keystore use that the phone is
+  unlocked, before anything is decrypted.
+- **Newest first, in batches.** The first 16 messages are shown before the rest are
+  decrypted. Read receipts are recorded per batch before that batch is shown, so a
+  message that is on screen has its receipt durable exactly as before.
+- **A window of history.** Only the newest 100 messages are prepared when a chat opens;
+  older ones are decrypted when the user scrolls up to them. Messages outside the window
+  stay encrypted until then.
+- **Parsed records.** A parsed message record (id, deadline, state, flags) is kept in
+  memory while its stored bytes are exactly the same, and dropped when the record is
+  removed or the engine closes. It never holds message content, so this is not a message
+  cache.
+- **Limit raised to 300, and a full phone makes room.** The limit is per phone, not per
+  chat. When a phone holds 300 live messages, or its encrypted store passes 16 MB (photos are
+  what make it large), it does not stop: before it stores the next message it removes the ones
+  that would expire soonest, which loses the least of their lifetime, 15 at a time (or the
+  earliest photos until 4 MB are free). Only a message already read, or one this phone sent that
+  is no longer waiting to be sent, is ever removed this way; an unread message, an unopened
+  view-once message and an unsent one are never taken. "Read" means what it always has: a chat
+  that is opened marks the messages it shows (the newest 100) read as they are prepared, so a
+  message that was shown but not yet scrolled to can be removed early. Removing the earliest
+  deadlines first is what limits that: the newest messages of a chat that was just opened expire
+  last, so the ones that go first are normally the oldest. The sender is told nothing.
+  A removal commits all the records in one encrypted write and deletes the keys only after that
+  write is durable. Done the other way round, a failed write would leave messages that are still
+  listed but whose keys are gone, which a screen could only report as a failure; this way a
+  message whose key is gone has already been removed, and a failure between the two steps leaves
+  a key with nothing left to open, which is deleted at its message's deadline like any other.
+  The "seen" marker that stops the relay handing a message over twice has to last as long as the
+  relay could still do that. The relay takes a message out of the recipient's inbox when it
+  accepts the first acknowledgement (`acknowledge.lua`), so once an acknowledgement has been
+  accepted the marker is removed together with the message, and the markers of removed messages
+  cannot pile up towards the vault's 4000-record limit. While an acknowledgement is still waiting
+  to be sent, the marker stays until the message's deadline. So does it for an acknowledgement
+  the relay refused: the relay also answers "not found" while the two accounts are blocked from
+  each other and lists the message again once they are not, so a refused acknowledgement is no
+  longer thrown away but kept as a "held" receipt (never sent again, removed at the message's
+  deadline) for exactly that purpose.
+  The cost is that in a very busy phone the oldest read messages can disappear a little before
+  their timer; a message is never kept longer than its deadline. Only if every stored message is
+  unread or unsent does the old behavior remain: a send is refused with an explanation and an
+  incoming message stays at the relay, which keeps it until its deadline. 300 messages are at
+  most about 900 vault records, well inside the vault's 4000-record bound, and the 16 MB soft
+  limit keeps photo-heavy chats well clear of the vault's hard 32 MB limit, where every write
+  would fail.
+- **Keyboard.** The message list keeps its bottom edge in place when its height changes.
+  This is layout only.
+
+Unchanged: no plaintext message cache, no new logging, deadlines rechecked at display,
+fail-closed behavior for expired content, failed authentication, changed identities and
+unavailable secure storage, and the whole-vault commit.
+
+Not claimed: the numbers in [VERIFICATION.md](VERIFICATION.md#release-061--long-chats-and-the-keyboard)
+are from an emulator with a software Keystore. On a phone with hardware-backed or StrongBox
+keys each Keystore operation is slower, so the first screen of a long chat is the part that
+matters, and the commit of a large vault (many photos) is still the cost this release does not
+remove.
+
 ## Notification navigation
 
 From 0.3.6, an absent notification preference defaults to enabled. Existing saved

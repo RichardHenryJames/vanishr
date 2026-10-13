@@ -64,7 +64,29 @@ final class ChatEngine implements AutoCloseable {
     }
     record Content(ChatEnvelope envelope, byte[] image) { }
     record Ack(UUID id, long expiresAt, String action) { }
+    /**
+     * What a receipt the relay refused is turned into: kept, never sent again, and removed at its deadline like any receipt. The relay
+     * answers "not found" both when it no longer has the message and while the two accounts cannot interact (a block), and in the second
+     * case it hands the message over again once they can. A receipt that is still there is what keeps the "seen" marker of that message
+     * from being removed with the message when it is removed to make room.
+     */
+    static final String HELD = "held";
     record NotificationDestination(UUID userId, UUID deviceId, UUID conversationId, UUID messageId, long expiresAt) { }
+
+    /**
+     * Messages this phone keeps at once, across every chat. A message is two encrypted records and one hardware key, so this bounds
+     * the encrypted storage and the key count; opening a chat only decrypts the newest page, so a long chat does not slow it down.
+     * When the phone is full, or its encrypted store is getting large (photos), the messages that would expire soonest are removed to
+     * make room, so a chat never stops for want of space; see {@link #makeRoom}.
+     */
+    static final int MAX_LIVE_MESSAGES = 300;
+    private static final long SOFT_STORE_BYTES = 16L << 20, FREED_STORE_BYTES = 4L << 20, SAFE_STORE_BYTES = 28L << 20;
+    // Not final so a test can use a small phone; production never changes it.
+    int liveLimit = MAX_LIVE_MESSAGES;
+    /** Thrown only when every stored message is still unread or waiting to be sent, so none can be removed to make room. */
+    static final class CapacityReached extends IllegalStateException {
+        CapacityReached() { super("Local message capacity reached"); }
+    }
 
     private final AndroidVault vault;
     private final GroupChat groups;
@@ -264,6 +286,30 @@ final class ChatEngine implements AutoCloseable {
     private <Value> Value read(String key, Class<Value> type) {
         byte[] value = vault.get(key);
         return value == null ? null : JSON.fromJson(new String(value, StandardCharsets.UTF_8), type);
+    }
+
+    // Listing a chat, purging and every sync pass read every message record. Parsing them again each time dominated the cost of a
+    // long chat, so a parsed record is kept for as long as its stored bytes are exactly the same. It holds ids, deadlines and
+    // states only, never message content, and is dropped with the engine.
+    private record ParsedEntry(byte[] stored, Entry entry) { }
+    private final Map<String, ParsedEntry> parsedEntries = new java.util.concurrent.ConcurrentHashMap<>();
+    /** Counts real parses, so a test can show that unchanged records are not parsed again. */
+    final java.util.concurrent.atomic.AtomicInteger entryParses = new java.util.concurrent.atomic.AtomicInteger();
+
+    private Entry readEntry(String name) {
+        byte[] value = vault.get(name);
+        if (value == null) { parsedEntries.remove(name); return null; }
+        ParsedEntry cached = parsedEntries.get(name);
+        if (cached != null && Arrays.equals(cached.stored(), value)) return cached.entry();
+        entryParses.incrementAndGet();
+        Entry parsed = JSON.fromJson(new String(value, StandardCharsets.UTF_8), Entry.class);
+        parsedEntries.put(name, new ParsedEntry(value, parsed));
+        return parsed;
+    }
+
+    private void forgetParsedEntries(Collection<String> present) {
+        Set<String> names = new HashSet<>(present);
+        parsedEntries.keySet().removeIf(name -> name.startsWith("entry/") && !names.contains(name));
     }
     private void write(String key, Object value) {
         if (safety != null && (safety.deletionPending() || safety.deletionCompleted()))
@@ -542,7 +588,6 @@ final class ChatEngine implements AutoCloseable {
         if (expiresAt <= System.currentTimeMillis()) throw new IllegalArgumentException("Message expired");
         purge();
         onboarding.prepare(peer);
-        if (vault.names("entry/").size() >= 100) throw new IllegalStateException("Local message capacity reached");
         try {
             Contact current = api.call("GET", "/users/id/" + peer.userId(), null, Contact.class);
             onboarding.requireCurrent(peer.userId(), current);
@@ -566,6 +611,8 @@ final class ChatEngine implements AutoCloseable {
         envelope.verify(id, account.userId(), account.deviceId(), peer.userId(), peer.deviceId(), expiry, expiresAt, mediaId, now);
         Entry entry = new Entry(id, peer.userId(), expiresAt, expiry, true, image != null, "PENDING", account.userId());
         try {
+            // Only once the send is certain to be stored, so a send that fails earlier never costs anyone an old message.
+            if (!makeRoom(image == null ? 0 : image.length * 2L)) throw new CapacityReached();
             vault.transaction(() -> {
                 safety.requireAllowed(peer.userId());
                 SignalClient.Packet encrypted = signal.encrypt(peer.userId(), bytes(envelope), now);
@@ -602,14 +649,19 @@ final class ChatEngine implements AutoCloseable {
         List<Entry> result = new ArrayList<>();
         Map<UUID, Boolean> blocked = new HashMap<>();
         long now = System.currentTimeMillis();
-        for (String name : vault.names("entry/")) {
-            Entry entry = read(name, Entry.class);
+        List<String> names = vault.names("entry/");
+        for (String name : names) {
+            Entry entry = readEntry(name);
             if (entry == null || entry.expiresAt() <= now || (peerId != null && !peerId.equals(entry.peerId()))) continue;
             if (!blocked.computeIfAbsent(entry.groupEpoch() == null ? entry.peerId() : entry.senderId(), safety::isBlocked)) result.add(entry);
         }
+        forgetParsedEntries(names);
         result.sort(Comparator.comparingLong(entry -> entry.expiresAt() - entry.expiry().milliseconds));
         return result;
     }
+
+    /** One stored message record, or null; far cheaper than listing a whole conversation to find a single message. */
+    Entry entry(UUID id) { return readEntry("entry/" + id); }
 
     /** True while the message record exists; a screen refresh uses it to tell a vanished message from a real failure. */
     boolean hasEntry(UUID id) { return vault.get("entry/" + id) != null; }
@@ -658,6 +710,7 @@ final class ChatEngine implements AutoCloseable {
         vault.transaction(() -> {
             vault.remove("body/" + entry.id());
             vault.remove("entry/" + entry.id());
+            parsedEntries.remove("entry/" + entry.id());
             vault.remove("outbox/" + entry.id());
             vault.remove("group-out/" + entry.id());
             if (acknowledgement != null && entry.expiresAt() > System.currentTimeMillis()) {
@@ -666,6 +719,90 @@ final class ChatEngine implements AutoCloseable {
             }
             return null;
         });
+    }
+
+    /**
+     * Makes room for one more message so a chat never stops for want of space. When the phone holds the most live messages, or its
+     * encrypted store passes a soft size (photos are what make it large), this removes the messages that would expire soonest, which
+     * loses the least of their lifetime: a batch when the count is the problem, the earliest photos until some megabytes are free
+     * when size is. Only messages already seen, or sent by this phone and no longer waiting to be sent, are ever removed; an unread
+     * message is never taken. The records go in one commit and the keys right after it, and the sender is told nothing.
+     * Returns false only when there is nothing that may be removed, so the old behavior (refuse to send, leave incoming messages at
+     * the relay) is the last resort rather than the usual one.
+     */
+    boolean makeRoom(long incomingBytes) throws Exception {
+        List<String> names = vault.names("entry/");
+        long used = vault.sizeBytes();
+        boolean tooMany = names.size() >= liveLimit, tooBig = used + incomingBytes > SOFT_STORE_BYTES;
+        if (!tooMany && !tooBig) return true;
+        Set<String> unsent = new HashSet<>();
+        for (String name : vault.names("outbox/")) unsent.add(name.substring("outbox/".length()));
+        for (String name : vault.names("group-out/")) unsent.add(name.substring("group-out/".length()));
+        List<Entry> removable = new ArrayList<>();
+        for (String name : names) {
+            Entry entry = readEntry(name);
+            if (entry != null && !unsent.contains(entry.id().toString()) && (entry.outgoing() || entry.state().equals("READ"))) removable.add(entry);
+        }
+        removable.sort(Comparator.comparingLong(Entry::expiresAt).thenComparingLong(entry -> entry.expiresAt() - entry.expiry().milliseconds));
+        Set<UUID> chosenIds = new HashSet<>();
+        List<Entry> chosen = new ArrayList<>();
+        long freed = 0;
+        if (tooMany) {
+            int batch = Math.max(1, liveLimit / 20);
+            int wanted = names.size() - (liveLimit - batch);
+            for (Entry entry : removable) {
+                if (chosen.size() >= wanted) break;
+                chosen.add(entry); chosenIds.add(entry.id());
+                if (entry.image()) freed += vault.length("body/" + entry.id());
+            }
+        }
+        if (tooBig) {
+            for (Entry entry : removable) {
+                if (used - freed + incomingBytes <= SOFT_STORE_BYTES - FREED_STORE_BYTES) break;
+                if (!entry.image() || !chosenIds.add(entry.id())) continue;
+                chosen.add(entry); freed += vault.length("body/" + entry.id());
+            }
+        }
+        int removed = chosen.isEmpty() ? 0 : evict(chosen);
+        return names.size() - removed < liveLimit && used - freed + incomingBytes <= SAFE_STORE_BYTES;
+    }
+
+    // All the records go in one encrypted commit, so removing a batch costs one write, not one per message, and the keys are deleted
+    // only once that commit is durable (afterCommit also covers a call made inside an outer transaction that later rolls back). The
+    // other order would leave messages that are still listed but whose keys are gone when a commit fails, and a screen opening such a
+    // message could only report a failure; this way a message whose key is gone has already been removed, and a failure between the
+    // two steps leaves a key with nothing left to open, which expires with its message like any other.
+    // A received message's "seen" marker has to outlast the relay's copy of it, no longer. Once the receipt for it has been accepted
+    // the relay takes it out of the recipient's inbox, so the marker goes with the message and a busy phone cannot fill the store with
+    // markers of messages it has already removed. While a receipt is still waiting, or was refused and held (see HELD), it stays.
+    private int evict(List<Entry> victims) throws Exception {
+        List<Entry> removed = new ArrayList<>();
+        for (Entry entry : victims) {
+            try { contentKey(entry); }
+            catch (SecurityException foreign) { continue; }
+            removed.add(entry);
+        }
+        Exception[] failure = new Exception[1];
+        vault.transaction(() -> {
+            for (Entry entry : removed) {
+                vault.remove("body/" + entry.id());
+                vault.remove("entry/" + entry.id());
+                parsedEntries.remove("entry/" + entry.id());
+                vault.remove("outbox/" + entry.id());
+                vault.remove("group-out/" + entry.id());
+                if (!entry.outgoing() && vault.get("ack/" + entry.id()) == null && vault.get("group-ack/" + entry.id()) == null)
+                    vault.remove("seen/" + entry.id());
+            }
+            vault.afterCommit(() -> {
+                for (Entry entry : removed) {
+                    try { vault.deleteOwnedContentKey(entry, account.userId()); }
+                    catch (Exception error) { if (failure[0] == null) failure[0] = error; else failure[0].addSuppressed(error); }
+                }
+            });
+            return null;
+        });
+        if (failure[0] != null) throw failure[0];
+        return removed.size();
     }
 
     void purge() throws Exception {
@@ -679,9 +816,10 @@ final class ChatEngine implements AutoCloseable {
                 Renewal pending = read(prefix + "session-renewal", Renewal.class);
                 if (pending != null && pending.expiresAt() <= now) vault.remove(prefix + "session-renewal");
                 for (String name : vault.names(prefix + "entry/")) {
-                    Entry entry = read(name, Entry.class);
+                    Entry entry = readEntry(name);
                     if (entry.expiresAt() <= now) {
                         vault.remove(name);
+                        parsedEntries.remove(name);
                         vault.remove(prefix + "body/" + entry.id());
                         vault.remove(prefix + "outbox/" + entry.id());
                     }
@@ -749,19 +887,42 @@ final class ChatEngine implements AutoCloseable {
     }
 
     private void flushAcks() throws Exception {
-        for (String name : vault.names("ack/")) {
-            Ack acknowledgement = read(name, Ack.class);
-            if (acknowledgement == null) continue;
-            try {
-                api.call(acknowledgement.action().equals("delete") ? "DELETE" : "POST", "/messages/" + acknowledgement.id()
-                        + (acknowledgement.action().equals("delete") ? "" : "/" + acknowledgement.action()), null, Void.class);
-            } catch (RelayApi.ApiFailure failure) {
-                if (failure.status != 404 && failure.status != 410
-                        && !(failure.status == 403 && acknowledgement.action().equals("delete"))) throw failure;
+        // Everything the relay accepted is removed in one encrypted commit at the end, not one commit per receipt; an acknowledgement
+        // whose removal is lost to a crash is simply sent again, and the relay already treats a repeat as done.
+        Map<String, Ack> sent = new LinkedHashMap<>(), refused = new LinkedHashMap<>();
+        Exception failure = null;
+        try {
+            for (String name : vault.names("ack/")) {
+                Ack acknowledgement = read(name, Ack.class);
+                if (acknowledgement == null || acknowledgement.action().equals(HELD)) continue;
+                boolean delete = acknowledgement.action().equals("delete");
+                try {
+                    api.call(delete ? "DELETE" : "POST", "/messages/" + acknowledgement.id()
+                            + (delete ? "" : "/" + acknowledgement.action()), null, Void.class);
+                    sent.put(name, acknowledgement);
+                } catch (RelayApi.ApiFailure rejected) {
+                    if (rejected.status != 404 && rejected.status != 410 && !(rejected.status == 403 && delete)) throw rejected;
+                    // Refused is not the same as done: a block makes the relay answer "not found" and hand the message over again later.
+                    (delete ? sent : refused).put(name, acknowledgement);
+                }
             }
-            // A read receipt stored while "delivered" was in flight replaces it under the same name; keep it for the next pass.
-            vault.transaction(() -> { if (acknowledgement.equals(read(name, Ack.class))) vault.remove(name); return null; });
+        } catch (Exception error) { failure = error; }
+        if (!sent.isEmpty() || !refused.isEmpty()) {
+            try {
+                vault.transaction(() -> {
+                    // A read receipt stored while "delivered" was in flight replaces it under the same name; keep it for the next pass.
+                    for (Map.Entry<String, Ack> done : sent.entrySet())
+                        if (done.getValue().equals(read(done.getKey(), Ack.class))) vault.remove(done.getKey());
+                    for (Map.Entry<String, Ack> held : refused.entrySet())
+                        if (held.getValue().equals(read(held.getKey(), Ack.class)))
+                            write(held.getKey(), new Ack(held.getValue().id(), held.getValue().expiresAt(), HELD));
+                    return null;
+                });
+            } catch (Exception error) {
+                if (failure == null) failure = error; else failure.addSuppressed(error);
+            }
         }
+        if (failure != null) throw failure;
     }
 
     private void receive(Incoming message) throws Exception {
@@ -787,8 +948,9 @@ final class ChatEngine implements AutoCloseable {
         Peer sender = read("contact/" + message.senderId(), Peer.class);
         if (!signal.isVerified(message.senderId()) || sender == null || !sender.deviceId().equals(message.senderDeviceId())) { unverifiedIncoming = true; return; }
         if (vault.get("seen/" + message.id()) != null) return;
-        if (vault.names("entry/").size() >= 100) return;
+        if (!makeRoom(0)) return;
         byte[] imageCiphertext = message.mediaId() == null ? null : api.download(message.mediaId());
+        if (imageCiphertext != null && !makeRoom(imageCiphertext.length * 2L)) return;
         try {
             vault.transaction(() -> {
                 safety.requireNotDeleting();
@@ -813,11 +975,15 @@ final class ChatEngine implements AutoCloseable {
 
     void sync() throws Exception { sync(() -> false); }
 
+    boolean sync(java.util.function.BooleanSupplier yield) throws Exception { return sync(yield, () -> { }); }
+
     /**
      * One sync pass. The caller can ask it to yield: it then stops between steps and returns false, which is
      * equivalent to a dropped connection at that point, and the next pass resumes from the stored state.
+     * {@code received} runs after each incoming message has been handled, so a screen can show it straight away instead
+     * of after the rest of the pass (acknowledgements, receipts, groups, profiles) has finished.
      */
-    boolean sync(java.util.function.BooleanSupplier yield) throws Exception {
+    boolean sync(java.util.function.BooleanSupplier yield, Runnable received) throws Exception {
         safety.requireNotDeleting();
         purge();
         if (!authenticated()) {
@@ -836,6 +1002,7 @@ final class ChatEngine implements AutoCloseable {
             Incoming[] pending = api.call("GET", "/messages/pending", null, Incoming[].class);
             for (Incoming message : pending) {
                 receive(message);
+                received.run();
                 if (yield.getAsBoolean()) return false;
             }
             flushAcks();
@@ -1056,6 +1223,7 @@ final class ChatEngine implements AutoCloseable {
         api = null;
         signal = null;
         account = null;
+        parsedEntries.clear();
         vault.close();
     }
 }
