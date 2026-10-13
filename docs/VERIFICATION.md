@@ -96,6 +96,52 @@ Demonstrated on 2026-10-12 and 2026-10-13 (synthetic accounts and an emulator on
   `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`. An earlier full run of the same code, before the
   real-touch test existed, had the same result (200 tests, the same two failures).
 
+**Publication, 2026-10-13 (UTC):**
+
+- **Relay.** Unchanged: `git diff ab93146 HEAD -- relay/src/main infra` is empty, so the deployed schema-13 relay
+  was not redeployed and no Azure operation ran.
+- **Build and stage.** `verify.ps1 -Android` passed (client-core 19 tests, relay 101 tests with the two opt-in live
+  tests skipped, lint with no finding in the new code, 13 JVM unit tests, instrumentation compilation). Its first
+  attempt stopped at the relay integration tests because Docker Desktop was not running (Testcontainers found no
+  engine); it passed after Docker Desktop was started. `:app:testDebugUnitTest`, `:app:exportDependencyInventory`
+  and notice generation (116 components; the committed notices did not change) also passed. `package-apk.ps1`
+  built the signed APK from commit `14e5ad3`: **44,485,276 bytes**, SHA-256
+  `f9837b10a69e58143fa7ff61d37183a48a6a54a1ee9219af351af0b540b80004`, min API 28, target API 36, exactly the same 15
+  permissions as 0.5.9 (compared one by one) and the same certificate (SHA-256
+  `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`). `.tools\vercel-download-0.6.0` holds 31
+  files / 59,791,638 bytes (limit 99,000,000), no hidden file and no `.env`. The source ZIP has 453 entries: 235
+  source files, each byte-identical to its blob in commit `14e5ad3` (one more than 0.5.9: `PhotoViewer.java`), plus
+  218 dependency-source files. Name, content and known-private-value scans of the stage, the ZIP and the APK found
+  nothing, and the dependency inventory (116) and the 16 unavailable-source entries equal 0.5.9's. This is
+  recorded in `.tools\distribution-audit-0.6.0.json`; it was an inspection by the release agent with automated
+  scans, not an independent audit.
+- **Vercel.** Deployment `dpl_EvK55GC53osuWVyKPgUhdccwraPK` (production, READY) was uploaded from that stage with the
+  existing Vanishr project link (project and team IDs checked, no downgrade against the published 0.5.9 feed). The
+  CLI moved only the team alias, which is behind Vercel Authentication, so the canonical alias
+  `vanishr-download.vercel.app`, which still served 0.5.9, was moved explicitly.
+- **Public verification** (`.tools\public-release-verification-0.6.0.json`). The canonical feed reports 0.6.0 / 41
+  with `no-store`; the 30 served files (`vercel.json` is configuration and is not served) are byte-identical to
+  the audit; the downloaded APK verifies with the original certificate; CSP, nosniff, referrer, HSTS and the APK
+  download headers are present; ten private or missing paths return 404; and the Android, security and privacy
+  pages carry the 0.6.0 notes, including that the admin's app can save a received photo.
+- **Over-the-air update, 0.5.6 / 0.5.7 / 0.5.8 / 0.5.9 to 0.6.0**
+  (`.tools\ota-check-0.6.0\ota-verification-0.6.0.json`). On the dedicated Android 16 / API 36 emulator, with a
+  temporary screen lock that was cleared afterwards, the published release APKs of 0.5.6 (code 37), 0.5.7 (38),
+  0.5.8 (39) and 0.5.9 (40) were installed one at a time. Each, with no manual trigger, fetched the live feed and
+  showed the **Update available / Vanishr 0.6.0** sheet with **Download** and **Later**. Tapping **Download** launched
+  an `ACTION_VIEW` browsable intent to `https://vanishr-download.vercel.app/...` in Chrome (Android redacts the path
+  in its log; the app's feed validation accepts only the exact versioned URL on this host, and well-formed size
+  and SHA-256 fields, but it does not hash the downloaded file itself; the public verification above hashed that
+  file). The published 0.6.0 APK was then installed over each with `adb install -r`: it succeeded in place, the
+  version code became 41, the first-install time was kept (so the app data stays), the app launched and was still
+  running after 12 seconds, the crash buffer was empty and the update was no longer offered.
+- **What this does not show.** The browser download itself and Android's installation approval screen were not
+  completed by hand. The update is not silent: the prompt opens the browser and Android asks the user to approve
+  the install, and an app only checks automatically once a day, so an older install can take up to a day to show
+  the prompt unless the user opens My profile and chooses Check for updates. No account existed on the emulator, so
+  an update of a phone holding real account data, and the new viewer with a real account on a real relay, were not
+  exercised. Nothing was measured on a physical phone.
+
 **Not verified:** any physical phone, including how the gallery app and any gallery backup show or copy the
 saved file (the tests read it back through MediaStore); an Android 9 device, where the option only explains that
 it needs Android 10 (the emulator is API 36); the "Save to gallery" accessibility action with a screen reader (it

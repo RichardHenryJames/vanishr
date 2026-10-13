@@ -20,7 +20,10 @@ unencrypted file in Pictures/Vanishr that does not expire (Android 10 or later).
 account's app is unchanged: it has no save option and still wipes a photo's decrypted bytes
 as soon as it is drawn. Anyone who messages the admin should assume the admin can keep a photo
 they send; the in-app summary and the privacy and security pages say so. It is a client-only
-change (no relay update); installs of 0.5.6 to 0.5.9 get it from the in-app update prompt. See the
+change (no relay update); installs of 0.5.6 to 0.5.9 get it from the in-app update prompt, which
+opens the browser and still needs the user's install approval (the prompt and an in-place update
+were checked on an emulator against the published feed; the automatic check runs at most once a
+day). Physical phones were not tested. See the
 [threat model](docs/THREAT-MODEL.md#photo-viewer-and-the-admins-save-option-060) and
 [verification](docs/VERIFICATION.md#release-060--full-screen-photos-and-the-admins-save-option).
 
