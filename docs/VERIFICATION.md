@@ -179,6 +179,77 @@ was read from its code and stubbed, not run against a relay); and the early remo
 busy phone now removes its oldest read messages a little before their timer instead of stopping; that is a behavior
 change to be aware of and is stated on the public Android and security pages.
 
+**Independent review.** A separate read-only code-review agent (an AI reviewer, not a human audit) read the change in
+three rounds. It found no defect in the staged load, the expiry tick, the scroll anchoring, the parsed-record cache, the
+batched receipts, the sync hook or the make-room selection, order and cost, but three Medium problems in what the first
+version of make-room left behind or did around a removal (the "seen" markers of removed messages could pile up towards
+the vault's record limit; opening a chat marks its whole window read, so never-scrolled messages counted as seen; keys
+were deleted before the commit, so a screen decrypting a victim could see a failure). My first fixes for those had three
+further Medium problems
+that the second round found (a receipt the relay refused could let a removed message come back after a block and
+break every sync until it expired; the ten-minute read grace was lost on every pause and could refuse a send right
+after a chat was opened; a failed commit after the keys were deleted left listed messages without keys). Those were
+fixed by changing the design, not by patching it (earliest-deadline order instead of the grace, records first and keys
+after the commit, refused receipts held) and the third round, on the new state, found no defect in it. It left one
+low-severity note that was not acted on: an `Error` (not an `Exception`) thrown by a Keystore call while the keys are
+deleted after a commit would skip the remaining keys, which then expire with their messages. The scroll race above
+was not found by the review but by analysing an intermittent test failure.
+
+**Publication, 2026-10-13 (UTC):**
+
+- **Relay.** Unchanged: `git diff ab93146 HEAD -- relay/src/main infra` is empty, so the deployed schema-13 relay
+  was not redeployed and no Azure operation ran.
+- **Build and stage.** `verify.ps1 -Android` passed (client-core 19 tests, relay 101 tests with the two opt-in live
+  tests skipped, lint with 0 errors and 18 warnings, none of them in the new code, instrumentation compilation) with Docker Desktop started for
+  the relay integration tests and stopped afterwards. `:app:testDebugUnitTest` (13 tests, no failure),
+  `:app:exportDependencyInventory` and notice generation (116 components) also passed. `package-apk.ps1` built the
+  signed APK from commit `711dba1` (release lint included): **44,501,660 bytes**, SHA-256
+  `d04225dd4f873112b21985497fe90119dca77529cd9c4b20132568bb7d986040`, version 0.6.1 / code 42, min API 28, target API
+  36, exactly the same 15 permissions as 0.6.0 (compared one by one) and the same certificate (SHA-256
+  `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`). `.tools\vercel-download-0.6.1` holds 31 files /
+  59,837,224 bytes (limit 99,000,000), no hidden file and no `.env` (the Vercel project link was added after the
+  audit, as for earlier releases). The source ZIP has 454 entries: 236 source files, each byte-identical to its blob
+  in commit `711dba1` (one more than 0.6.0: `ChatScroll.java`), plus 218 dependency-source files. Name, content and
+  known-private-value scans of the stage, the ZIP and the APK found nothing. This is recorded in
+  `.tools\distribution-audit-0.6.1.json`; it was an inspection by the release agent with automated scans, not an
+  independent audit.
+- **Vercel.** Deployment `dpl_27sV3eXNZbJBH2BZqGE8LZdMKHPT` (production, READY) was uploaded from that stage with the
+  existing Vanishr project link (project and team IDs checked, no downgrade against the published 0.6.0 feed). The
+  canonical alias `vanishr-download.vercel.app`, which still served 0.6.0, was moved to it explicitly.
+- **Public verification** (`.tools\public-release-verification-0.6.1.json`). The canonical feed reports 0.6.1 / 42
+  with `no-store`; the 30 served files (`vercel.json` is configuration and is not served) are byte-identical to
+  the audit; the downloaded APK verifies with the original certificate; the security headers and the APK download
+  headers are present; ten private or missing paths return 404; and the Android page carries the 0.6.1 notes
+  (smoother long chats, the 300-message limit and the early removal of already read messages) and the security page the
+  matching sentence.
+- **Over-the-air update, 0.5.6 / 0.5.7 / 0.5.8 / 0.5.9 / 0.6.0 to 0.6.1**
+  (`.tools\ota-check-0.6.1\ota-verification-0.6.1.json`). On the dedicated Android 16 / API 36 emulator, with a
+  temporary screen lock that was cleared afterwards, the published release APKs of 0.5.6 (code 37), 0.5.7 (38),
+  0.5.8 (39), 0.5.9 (40) and 0.6.0 (41) were installed one at a time. Each, with no manual trigger, fetched the live
+  feed and showed the **Update available / Vanishr 0.6.1** sheet with **Download** and **Later**. Tapping **Download**
+  launched an `ACTION_VIEW` browsable intent to `https://vanishr-download.vercel.app/...` in Chrome (Android redacts
+  the path in its log; the app's feed validation accepts only the exact versioned URL on this host, and well-formed
+  size and SHA-256 fields, but it does not hash the downloaded file itself; the public verification above hashed that
+  file). The published 0.6.1 APK was then installed over each with `adb install -r`: it succeeded in place, the
+  version code became 42, the first-install time was kept (so the app data stays), the app launched and was still
+  running after 12 seconds, the crash buffer was empty and the update was no longer offered.
+- **Google Play bundle** (`.tools\play-store-0.6.1\`, not uploaded anywhere and not part of the Vercel stage).
+  `package-apk.ps1 -Bundle -PlayStore` produced `vanishr-0.6.1.aab`: **45,804,473 bytes**, SHA-256
+  `2eacf626b1713f9004af951a6fd932d03f429d306b78a2fba3915da36adfdf0f`. The official bundletool 1.18.3 `validate` passed;
+  the manifest says package `app.vanishr.android`, version 0.6.1 / code 42, min API 28, target API 36; the JAR
+  signature verifies with the same certificate as the APK; the four 64-bit native libraries are 16 KiB aligned
+  (`PAGE_ALIGNMENT_16K`, as in the 0.5.6 bundle); the notices match the source; the manifest has no external-updater
+  permission and no update-feed text; and the Google/Firebase client values are present and equal to the validated
+  configuration. `verification.json` there records these results with the same fields as the 0.5.6 bundle, and
+  `playConsoleSubmitted`, `affectedMotorolaOutcomeVerified` and `realGoogleAccountLoginTested` remain `false`: a
+  signed bundle is not Play approval.
+- **What this does not show.** The browser download itself and Android's installation approval screen were not
+  completed by hand. The update is not silent: the prompt opens the browser and Android asks the user to approve
+  the install, and an app only checks automatically once a day, so an older install can take up to a day to show
+  the prompt unless the user opens My profile and chooses Check for updates. No account existed on the emulator, so
+  an update of a phone holding real account data, and a long chat on a real relay, were not exercised. Nothing was
+  measured on a physical phone, and the bundle was not installed or uploaded.
+
 ## Release 0.6.0 / Full-screen photos and the admin's save option
 
 Release 0.6.0 / code 41 changes how a photo from a chat is shown and adds one option for the
