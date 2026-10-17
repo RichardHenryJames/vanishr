@@ -32,7 +32,8 @@ script that installs the relay's settings on the VM now accepts a list of them (
 exactly one before, which would have made that publish fail). One change made by the owner
 after 0.6.1 ships with it: the in-app policy summary no longer carries the paragraph about the
 admin (that the admin sees a user's status and can save a photo sent to it); the privacy and
-security pages still say so.
+security pages still say so. Website installs of 0.5.6 to 0.6.1 get 0.6.2 from the in-app update
+prompt (tested on an emulator only); Play installs update only through Google Play.
 
 Release **0.6.1/code 42** keeps long chats fast and fixes the keyboard. A chat opens with its
 newest messages first (on the test emulator a 100-message chat showed nothing for 3 to 4 seconds

@@ -251,7 +251,9 @@ checks or the relay address, and a bug fix or a new screen still needs a new ver
   a UiAutomator wait of 5 seconds for a "Photos" entry in the conversation menu). Both are **unresolved**:
   neither is fixed here, and the cause of neither is established. The first full run of this release had 233
   tests and the same two failures.
-- **The gate.** `verify.ps1 -Android` passed on the final tree, with Docker Desktop started for the relay
+- **The gate.** `verify.ps1 -Android` passed on the final sources (the only change to the build since is the raising of
+  the version constants to 0.6.2 / 43, and the signed build below ran from the committed tree), with Docker Desktop
+  started for the relay
   integration tests and stopped afterwards: relay 101 tests, 0 failures, the 2 opt-in live-relay tests skipped; the
   Android build and lint with 0 errors and **19 warnings, one more than the 18 of 0.6.1**. The extra one is
   `ViewConstructor` on the new `BoundedScrollView`, which is created only in code and never from a layout file, so
@@ -313,14 +315,98 @@ checks or the relay address, and a bug fix or a new screen still needs a new ver
   proof: it found real problems in all four rounds, fewer and less serious each time, which is not evidence that
   none remain.
 
+**Publication, 2026-10-17 (UTC):**
+
+- **Relay.** Unchanged: `git diff ab93146 HEAD -- relay/src/main` is empty, so the deployed schema-13 relay was not
+  redeployed and no Azure operation ran. (`infra/azure/install-artifact.sh` did change, as described above; it is not
+  deployed.)
+- **Build and stage.** The gate above passed. `package-apk.ps1` built the signed APK from
+  commit `2cd09c4` (release lint included): **44,518,588 bytes**, SHA-256
+  `061c3128f23ee48f15eeeeda801f63e9125674119464d52c04ab767bfa43f379`, version 0.6.2 / code 43, min API 28, target API
+  36, exactly the same 15 permissions as 0.6.1 (compared one by one) and the same certificate as 0.6.0 and 0.6.1
+  (SHA-256 `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`; `apksigner` reports the v2 scheme only,
+  as it did for those two). `.tools\vercel-download-0.6.2` holds 32 files / 59,957,440 bytes (limit 99,000,000), no
+  hidden file and no `.env` (the Vercel project link was added after the audit, as for earlier releases). The source
+  ZIP has 467 entries: 249 source files, each byte-identical to its blob in commit `2cd09c4` (13 more than 0.6.1,
+  the files of the signed-settings work), plus 218 dependency-source files. Name, content and known-private-value
+  scans of the stage, the ZIP and the APK, with seven private values searched for by value (the signing password,
+  the Firebase API key and service-account values, the deployment e-mail address and, new in this release, the
+  settings signing key and its password), found nothing. This is recorded in `.tools\distribution-audit-0.6.2.json`;
+  it was an inspection by the release agent with automated scans, not an independent audit.
+- **Vercel.** Deployment `dpl_6v6nEjprYRwip3YD7UrPaoJ6efNW` (production, READY) was uploaded from that stage with
+  the existing Vanishr project link (project and team IDs checked; the live feed served 0.6.1 / code 42, so
+  code 43 is no downgrade). The canonical alias `vanishr-download.vercel.app`, which still served 0.6.1, was moved to
+  it explicitly.
+- **Public verification** (`.tools\public-release-verification-0.6.2.json`). The canonical feed reports 0.6.2 / 43
+  with `no-store`; the 31 served files (`vercel.json` is configuration and is not served) are byte-identical to the
+  audit; the downloaded APK verifies with the original certificate; the security headers and the APK download
+  headers are present; 18 private or missing paths (secret folders and keys, including the settings signing key; the
+  signing, installer and publish scripts; the settings source and rule table; `google-services.json`; and a path
+  that does not exist) return 404; and the Android page carries the
+  "Settings that can change without an update" notes. **The signed settings file is live**:
+  `https://vanishr-download.vercel.app/ota/settings.json` answers 200 with `application/json; charset=utf-8`,
+  `Cache-Control: no-store` and `nosniff`, is byte-identical to the committed file (SHA-256
+  `75923248c667b6ae90b901b7c3aa4a0e8fce275674678b050df2c3f9569cf8cf`, 320 bytes) and its signature verifies under the
+  public key embedded in the app (key `ke4057b2b4ec1`, sequence 1, issued 2026-10-17 06:28:06 UTC, expires
+  2026-12-01, which was 44.6 days away when checked). `sign-ota-settings.ps1 -Check -Live -RequireIdentical`
+  agrees: the website serves exactly the committed file, in force. It holds no notice and leaves all three
+  features on, so no phone sees a change. **It has to be renewed before 2026-12-01** (see the deployment guide);
+  after that date an installed 0.6.2 simply behaves as built.
+- **Over-the-air update, 0.5.6 / 0.5.7 / 0.5.8 / 0.5.9 / 0.6.0 / 0.6.1 to 0.6.2**
+  (`.tools\ota-check-0.6.2\ota-verification-0.6.2.json`). On the dedicated Android 16 / API 36 emulator, with a
+  temporary screen lock that was cleared afterwards, the published release APKs of 0.5.6 (code 37), 0.5.7 (38),
+  0.5.8 (39), 0.5.9 (40), 0.6.0 (41) and 0.6.1 (42) were installed one at a time. Each, with no manual trigger,
+  fetched the live feed and showed the **Update available / Vanishr 0.6.2** sheet with **Download** and **Later**.
+  Tapping **Download** launched an `ACTION_VIEW` browsable intent to `https://vanishr-download.vercel.app/...` in
+  Chrome (Android redacts the path in its log; the app's feed validation accepts only the exact versioned URL on this
+  host, and well-formed size and SHA-256 fields, but it does not hash the downloaded file itself; the public
+  verification above hashed that file). The published 0.6.2 APK was then installed over each with `adb install -r`:
+  it succeeded in place, the version code became 43, the first-install time was kept (so the app data stays), the app
+  launched and was still running after 12 seconds and the update was no longer offered. **The check was run in full
+  four times, and the 0.5.6 step twice more on its own.** In the **first** run all six steps passed except that the
+  crash buffer was **not empty after the 0.5.6 step** (empty after the other five); the script kept only a yes/no
+  flag, so what was in the buffer, and in which process, **was not recorded and is unknown**. It was not
+  reproduced: the 0.5.6 step run again on its own, and again after Chrome's data had been cleared (a guess at a
+  first-launch crash), had an empty crash buffer, and **three further complete runs** (the script now keeps the
+  text of any crash) had an empty one for all 18 steps, with the other results the same. The record
+  `ota-verification-0.6.2.json` is the second run; the first, third and fourth runs and the two single-step
+  repeats are kept beside it. Earlier releases' runs had an empty buffer throughout, so this was not dismissed as
+  noise, but it was not explained either. A crash of the new version after the 0.5.6 update is **not excluded** by
+  this evidence, only not seen again in the 20 further steps that were run (the 0.5.6 step five times, each other
+  step three times).
+- **Google Play bundle** (`.tools\play-store-0.6.2\`, not uploaded anywhere and not part of the Vercel stage).
+  `package-apk.ps1 -Bundle -PlayStore` produced `vanishr-0.6.2.aab`: **45,826,747 bytes**, SHA-256
+  `b685f08b18268fbc2b3eeee39544d80274017e7c68177f40ef9817df9987f707`. The official bundletool 1.18.3 `validate` passed;
+  the manifest says package `app.vanishr.android`, version 0.6.2 / code 43, min API 28, target API 36 and differs from
+  the 0.6.1 bundle's manifest only in the version, with the same 14 permissions and an identical bundle
+  configuration; the JAR signature verifies with the same certificate as the APK; the four 64-bit native libraries
+  are 16 KiB aligned (`PAGE_ALIGNMENT_16K`); the notices match the source; the manifest has no external-updater
+  permission and the code holds no update-feed text; the signed-settings client is present (the Play build does
+  contact the download site, as the privacy page now says); the embedded settings public-key file is, byte for byte,
+  the committed one; and the Google/Firebase client values are present and equal to the validated configuration.
+  A scan of every decompressed entry (883 entries, about 127 MB) found none of six known private values; the scan
+  was itself checked with a planted value and a tampered key file, which it found. `verification.json` there records
+  these results, and `playConsoleSubmitted`, `affectedMotorolaOutcomeVerified` and `realGoogleAccountLoginTested`
+  remain `false`: a signed bundle is not Play approval. **This bundle does not fix Google sign-in on a Play
+  install by itself**: it carries the same Google/Firebase configuration as 0.6.1 (the upload-key client only), and
+  the fix is the owner's registration of the Play app-signing certificate and a relay publish (above).
+- **What this does not show.** The browser download itself and Android's installation approval screen were not
+  completed by hand. The update is not silent: the prompt opens the browser and Android asks the user to approve
+  the install, and an app only checks automatically once a day, so an older install can take up to a day to show
+  the prompt unless the user opens My profile and chooses Check for updates. No account existed on the emulator, so
+  an update of a phone holding real account data, and a long chat on a real relay, were not exercised, and the
+  0.6.2 app's own first fetch of the live settings file was not observed (the emulator is a production build and its
+  app data cannot be read; only the file, its headers and its signature were checked). Nothing was measured on a
+  physical phone, and the bundle was not installed or uploaded.
+
 **Not verified, and not claimed:** that any of this works on a physical phone (everything above ran on one
 dedicated emulator, with synthetic accounts, synthetic settings files and signing keys made for the test); a real
 Google sign-in on a Google Play install (the owner's steps in GOOGLE-SETUP.md are not done, so it is expected to
 keep failing until they are); a relay publish with the new allow-list or the changed installer script on the VM;
 the Google Play listing's Data safety form, which has to be revisited because the Play build now contacts the
 download site once a day; the behavior of the Google Play bundle on a Play-installed phone; and a settings file
-published to the real site and read by a real installed app (the settings file is not on the public site until the
-release is published, and what is checked then is the file and its headers, not a phone).
+read by a real installed app (the file is on the public site now, and what was checked is the file, its headers and
+its signature under the embedded key, not a phone).
 
 **Changed by the owner, not by this work:** after 0.6.1 the owner's commit `c457e6c` removed a paragraph from the
 in-app policy summary (`PlayPolicy.SUMMARY`) that said that new accounts are introduced to the admin, that the admin
