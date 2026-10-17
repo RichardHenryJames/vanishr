@@ -31,7 +31,7 @@ if [ -n "${googleConfiguration:-}" ]; then
     jq -e '
         .projectId == "vanishr-b7616" and
         (.webClientId | test("\\A167823115834-[A-Za-z0-9_-]+\\.apps\\.googleusercontent\\.com\\z")) and
-        (.androidClientIds | test("\\A167823115834-[A-Za-z0-9_-]+\\.apps\\.googleusercontent\\.com\\z")) and
+        (.androidClientIds | test("\\A167823115834-[A-Za-z0-9_-]+\\.apps\\.googleusercontent\\.com(,167823115834-[A-Za-z0-9_-]+\\.apps\\.googleusercontent\\.com){0,2}\\z")) and
         .credential.type == "service_account" and .credential.project_id == .projectId and
         .credential.client_email == "vanishr-push-sender@vanishr-b7616.iam.gserviceaccount.com" and
         .credential.client_id == "104536232033671436023" and

@@ -141,6 +141,53 @@ C7:85:86:EB:E2:9B:1F:AA:F3:E8:28:A3:92:83:66:EB:71:C5:60:46:17:93:ED:85:66:08:E0
 These are public certificate hashes, not private signing keys. Preserve the
 existing private app-signing identity for compatible updates.
 
+## Phone installs from Google Play (Play App Signing)
+
+Symptom: Continue with Google ends with **Google sign-in cancelled.** on a phone
+that installed the app from Google Play, although the same account works in the
+direct-download APK. Nothing is wrong with the bundle: Google Play re-signs every
+upload with its own **app-signing key**, and Google sign-in only works for a
+signing certificate that has its own Android OAuth client in this project. The
+client configuration only knows the upload/release certificate above, so Google
+refuses the Play-signed copy (Android reports that as a cancelled request). The
+relay is the second gate: it accepts an ID token only if the Android client that
+asked for it (`azp`) is in `GOOGLE_ANDROID_CLIENT_IDS`.
+
+To fix it, once and for good:
+
+1. In Google Play Console open **Test and release > App integrity > Play app
+   signing** and copy the **SHA-1** of the *App signing key certificate* (not the
+   upload key certificate; that one is the release certificate above).
+2. In the Firebase console, **Project settings > Your apps >
+   app.vanishr.android > Add fingerprint**, paste that SHA-1 and save. Firebase
+   creates the matching Android OAuth client.
+3. Download the app's updated `google-services.json` again and replace the one
+   in `.secrets/firebase/` or the repository root. It now lists two Android
+   OAuth clients.
+4. Put the SHA-1 in lower case, without colons, as `playAppSigningSha1` in
+   [scripts/google-certificates.json](../scripts/google-certificates.json) and run
+   `.\scripts\test-google-config.ps1`. Packaging and publication now insist on
+   an Android OAuth client for it and pass **both** client IDs to the relay.
+5. Publish the relay's allow-list (this restarts the relay briefly):
+   `.\scripts\publish-azure.ps1 -Action Publish -GoogleServicesFile .\google-services.json -FcmCredentialFile .\.secrets\firebase\fcm-sender.json`.
+   Without this step the account picker works but the relay answers 401 and the
+   app says Google sign-in could not be verified. The script that runs on the VM,
+   [install-artifact.sh](../infra/azure/install-artifact.sh), checks the list before it writes
+   it to the relay's environment, and until 0.6.2 it accepted exactly one client ID, so this
+   publish would have failed with a generic "Artifact installation failed" and changed nothing.
+   It now accepts one to three comma-separated IDs of this project (checked with a real `jq`
+   and by `test-google-config.ps1`); the relay itself already read a comma-separated list.
+6. In **Google Cloud > APIs & Services > Credentials**, if the Android API key
+   has an application restriction, add the Play app-signing SHA-1 there too, or
+   notification registration fails on Play installs. While the OAuth consent
+   screen is in Testing, the account used for the Play test must be a listed
+   test user.
+
+No new app build is needed for the sign-in part: the values the app is built with
+(web client, project, app ID, API key) do not change when a fingerprint is added.
+Test on a Play internal-testing install, because a sideloaded copy of the same
+bundle is signed with the upload key and does not exercise the Play certificate.
+
 ## Configuration mapping
 
 | Location | Setting | Source |

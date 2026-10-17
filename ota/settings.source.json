@@ -1,0 +1,9 @@
+{
+  "features": {
+    "images": true,
+    "photos": true,
+    "groups": true
+  },
+  "notice": null,
+  "update": null
+}

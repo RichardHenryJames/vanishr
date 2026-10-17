@@ -39,6 +39,14 @@
       ]
     },
     {
+      "source": "/ota/settings.json",
+      "headers": [
+        {"key": "Content-Type", "value": "application/json; charset=utf-8"},
+        {"key": "Cache-Control", "value": "no-store"},
+        {"key": "X-Robots-Tag", "value": "noindex"}
+      ]
+    },
+    {
       "source": "/(.*).(apk|zip|gz)",
       "headers": [{"key": "X-Robots-Tag", "value": "noindex"}]
     },

@@ -31,16 +31,36 @@ if ($projectId -cnotmatch '\A[a-z][a-z0-9-]{4,28}[a-z0-9]\z' -or $projectNumber 
 $clients = @($configuration.client | Where-Object { $_.client_info.android_client_info.package_name -ceq 'app.vanishr.android' })
 if ($clients.Count -ne 1) { throw 'Exactly one release Android app must match the client configuration.' }
 $client = $clients[0]
+# Public certificate fingerprints, never keys. The upload certificate signs the direct-download APK and the bundle that is uploaded to
+# Google Play; once Play App Signing re-signs the bundle, phones that install from Play hold Google's certificate instead, and
+# Google sign-in only works for a certificate that has its own Android OAuth client. See docs/GOOGLE-SETUP.md.
+try { $certificates = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'google-certificates.json') -Raw | ConvertFrom-Json -ErrorAction Stop }
+catch { throw 'Could not read the release certificate fingerprints.' }
+$uploadSha1 = [string]$certificates.uploadSha1
+$playSha1 = if ($null -eq $certificates.playAppSigningSha1) { '' } else { [string]$certificates.playAppSigningSha1 }
+if ($uploadSha1 -cnotmatch '\A[0-9a-f]{40}\z' -or ($playSha1 -and ($playSha1 -cnotmatch '\A[0-9a-f]{40}\z' -or $playSha1 -ceq $uploadSha1))) {
+    throw 'The release certificate fingerprints are invalid.'
+}
 $webClients = @($client.oauth_client | Where-Object client_type -eq 3)
-$androidClients = @($client.oauth_client | Where-Object {
-    $_.client_type -eq 1 -and $_.android_info.package_name -ceq 'app.vanishr.android' -and
-    $_.android_info.certificate_hash -ieq '1bfcf77f9ae8c14a53fcd79ceee0e9d2a8f1c0ca'
-})
+function Get-AndroidClients([string]$Sha1) {
+    return @($client.oauth_client | Where-Object {
+        $_.client_type -eq 1 -and $_.android_info.package_name -ceq 'app.vanishr.android' -and
+        $_.android_info.certificate_hash -ieq $Sha1
+    })
+}
+$androidClients = Get-AndroidClients $uploadSha1
 if ($webClients.Count -ne 1 -or $androidClients.Count -ne 1) {
     throw 'One Web OAuth client and one Android OAuth client matching the release certificate are required.'
 }
+if ($playSha1) {
+    $playClients = Get-AndroidClients $playSha1
+    if ($playClients.Count -ne 1) {
+        throw 'One Android OAuth client matching the Google Play app-signing certificate is required.'
+    }
+    $androidClients = @($androidClients[0], $playClients[0])
+}
 $oauthPattern = '\A' + [regex]::Escape($projectNumber) + '-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com\z'
-if ($webClients[0].client_id -cnotmatch $oauthPattern -or $androidClients[0].client_id -cnotmatch $oauthPattern) {
+if ($webClients[0].client_id -cnotmatch $oauthPattern -or @($androidClients | Where-Object { $_.client_id -cnotmatch $oauthPattern }).Count -gt 0) {
     throw 'OAuth client IDs do not match the Firebase project number.'
 }
 $appIdPattern = '\A1:' + [regex]::Escape($projectNumber) + ':android:[0-9a-f]+\z'
@@ -50,7 +70,7 @@ if ($client.client_info.mobilesdk_app_id -cnotmatch $appIdPattern -or @($client.
 }
 return @{
     GOOGLE_WEB_CLIENT_ID = [string]$webClients[0].client_id
-    GOOGLE_ANDROID_CLIENT_IDS = [string]$androidClients[0].client_id
+    GOOGLE_ANDROID_CLIENT_IDS = (@($androidClients | ForEach-Object { [string]$_.client_id }) -join ',')
     FIREBASE_APP_ID = [string]$client.client_info.mobilesdk_app_id
     FIREBASE_API_KEY = [string]$client.api_key[0].current_key
     FIREBASE_PROJECT_ID = $projectId

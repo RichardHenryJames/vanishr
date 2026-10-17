@@ -1,7 +1,334 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-10-13 UTC. This is a development foundation,
+Evidence refreshed on Windows, 2026-10-17 UTC. This is a development foundation,
 not a production security assessment or independent audit.
+
+## Release 0.6.2 / Signed settings and Google Play sign-in
+
+Release 0.6.2 / code 43 answers two things from one report: "Continue with Google" showed "Google sign-in
+cancelled" on the copy installed from Google Play, and a request for a way to change things without a
+new app version, as another project of the owner (an Expo app that uses EAS Update) can. It is a
+**client-only change** plus tooling and a signed file on the download site: no relay or schema change (the
+relay stays at schema 13; `git diff ab93146 HEAD -- relay/src/main` is empty) and no Azure operation. One
+infrastructure script did change and is **not deployed**: `infra/azure/install-artifact.sh`, the installer that
+runs on the VM, accepted exactly one Android client ID for Google sign-in and now accepts one to three (below);
+it takes effect only the next time the owner publishes the relay.
+
+**Google sign-in on a Google Play install: a setup gap, not a defect in the bundle.** Found by reading the
+code and the configuration; **not reproduced** (Play Console, Firebase and the owner's phone were not
+available):
+
+- [GoogleSignIn](../android/app/src/main/java/app/vanishr/android/GoogleSignIn.java) uses Credential
+  Manager (`GetSignInWithGoogleOption`), and a `GetCredentialCancellationException` is shown as "Google
+  sign-in cancelled", which is the message that was reported.
+- The Firebase configuration holds exactly one Android OAuth client, tied to the SHA-1 of the local release
+  key (the upload key). Google Play App Signing **re-signs the delivered app with Google's own key**, so a
+  Play install presents a different certificate, Google finds no Android client for that package and
+  certificate, and Credential Manager reports a cancellation. The relay would also have refused the token:
+  it accepts a Google ID token only if its `azp` is in `GOOGLE_ANDROID_CLIENT_IDS`, and the release scripts
+  passed only the one local client.
+- Nothing in the 0.6.1 bundle was found to be at fault (its validation is recorded under 0.6.1). The same
+  APK from the website, signed with the local key, was not affected, which is consistent with this reading.
+- What changed: [google-certificates.json](../scripts/google-certificates.json) (the upload SHA-1 and a
+  `playAppSigningSha1` that is empty until the owner has it), [read-google-config.ps1](../scripts/read-google-config.ps1)
+  (when that SHA-1 is set it requires an Android OAuth client for it in `google-services.json` and passes both
+  client IDs to the relay; it refuses a missing, duplicated or malformed one) and
+  [test-google-config.ps1](../scripts/test-google-config.ps1) (21 checks, 8 of them new for this release, all
+  passing; the real configuration still validates). The owner's steps are in [GOOGLE-SETUP.md](GOOGLE-SETUP.md#phone-installs-from-google-play-play-app-signing).
+  **They are not done and not verified:** they need the Play app-signing certificate from Play Console, a new
+  `google-services.json` from Firebase and a relay publish (a short restart). Until then Google sign-in on a
+  Play install keeps failing; no rebuild of the app is needed for it.
+- **A second defect, found by review and fixed: the VM-side installer could not have accepted both client
+  IDs.** `read-google-config.ps1` hands the relay a comma-separated list, but the `jq` pattern in
+  [install-artifact.sh](../infra/azure/install-artifact.sh) allowed exactly one ID, so a publish with the Play
+  certificate registered would have been refused on the VM. The pattern now allows one to three. This was
+  shown with the real `jq` (the official 1.7.1 image, the exact filter extracted from the script, synthetic IDs):
+  the old pattern rejects two and three IDs, the new one accepts one to three and rejects four, a leading or
+  trailing comma, a space, an empty value, another project number and line breaks; the pattern is also pinned
+  by `test-google-config.ps1`. It was **not** run against the VM.
+
+**Signed settings** ("OTA" without code). A native Java app cannot be updated the way an interpreted one can,
+Google Play forbids an app downloading code that changes how it works, and
+[THREAT-MODEL.md](THREAT-MODEL.md#signed-settings-changes-without-an-update-062) already rules out downloaded
+code. What was built instead is **data only**: a small JSON file on the download site, signed with an
+ECDSA P-256 key that is kept off the website, that the app fetches at most once a day while it is open
+(Google Play build included). It can show one plain-text notice on the chat list (with an optional "Learn
+more" path on the download site), switch **off** image sending, opening photos and creating groups, and tell
+Google Play installs that a newer version exists. It cannot touch keys, messages, expiry times, identity
+checks or the relay address, and a bug fix or a new screen still needs a new version.
+
+- [RemoteSettings](../android/app/src/main/java/app/vanishr/android/RemoteSettings.java): the verification
+  and parsing (pure functions) and one bounded request. The signature covers a fixed domain prefix plus the
+  exact payload bytes; the file is refused whole if it is unsigned, altered, signed by another key, over its
+  size limits (12 KiB envelope, 8 KiB payload), not strict JSON, has a duplicate key, a field outside its
+  limits, a validity over 60 days, an `issuedAt` more than 36 hours ahead or an expiry in the past. The
+  request has no identifiers, cookies, cache, redirects or cleartext, and 3/3/6 second timeouts.
+- [RemoteSettingsStore](../android/app/src/main/java/app/vanishr/android/RemoteSettingsStore.java): keeps the
+  last accepted file as received and checks it again, signature and expiry included, whenever it is loaded.
+  A file is taken only if its sequence number is above every one taken before **from the same key** and it was
+  issued no earlier than any file taken before **from any key** (so an old file of one listed key cannot be put
+  back over a newer file of another), and never if it was issued before `BUILD_ISSUED_FLOOR`, the issue time of
+  the newest file that existed when the version was cut. The issue time that is remembered is never later than
+  the phone's own clock, so a file dated into the 36 hours ahead that are allowed cannot make the phone refuse
+  the files that really follow it. A hint about an update is dismissed by its exact version code, so a mistyped
+  one can be corrected. A failed check is retried after two hours.
+- [MainActivity](../android/app/src/main/java/app/vanishr/android/MainActivity.java): the key list is read
+  and the stored file checked **on the update lane after the screen is up**. This was measured and not
+  assumed: done in `onCreate` it cost **34 to 42 ms of main-thread time** in a cold process on the
+  emulator (key list 13 to 17 ms, first signature check 18 to 23 ms; a probe run three times in fresh
+  processes), which is the kind of start-up cost 0.5.9 removed, so it was moved off the main thread before
+  anything else was built on it. Until it has run the app behaves as built. The daily check, the three
+  gates (image sending in the attachment menu and in `enqueueSend`, opening a photo, creating a group),
+  the notice and update card on the chat list and a "Settings: as built" / "Settings N, valid until ..."
+  line in the profile are the rest of it. A file stops counting the moment it expires, with no network.
+- Owner tooling, all in PowerShell 7 and all tested without the real key (see below):
+  [new-ota-key.ps1](../scripts/new-ota-key.ps1) creates the key (the private half is encrypted and stays in
+  `.secrets/ota-signing`, which is git-ignored and must be backed up), restricts that folder, and each file in it,
+  to the current user **every time it runs** (not only when it creates it), reads the result back and stops if
+  anybody else could still reach it, and refuses a fourth public key; `-RestrictOnly` repairs an existing folder
+  without creating a key.
+  [sign-ota-settings.ps1](../scripts/sign-ota-settings.ps1) reads `ota/settings.source.json` with a strict JSON
+  reader (comments, trailing commas, a name written twice or in two cases and other leniencies of
+  `ConvertFrom-Json` are refused; text that looks like a date stays text), applies the app's own rules from
+  [ota-settings-rules.ps1](../scripts/ota-settings-rules.ps1), signs, writes `download/ota/settings.json` with
+  the next sequence number and a 45-day expiry and re-verifies it. It counts a live file's sequence number
+  **only if a key the app trusts signed it**, and **never dates a file earlier than the newest one it knows of**
+  (the committed file's, a trusted live file's, or the app's `BUILD_ISSUED_FLOOR`): when the computer's clock is
+  behind that time by up to 36 hours it dates the file at that time and says so; behind by more it stops, unless
+  `-IgnoreFutureIssueTime` says the clock is right.
+  `-Check` verifies the committed file, fails if it was issued before the floor, warns if it is dated ahead of
+  the clock and prints what the next version's floor should be; `-Check -AppRelease` (used by
+  `prepare-download.ps1`) also requires the floor to equal the committed file's issue time;
+  `-Check -Live` is the check *before* a release (only a verified, newer file on the
+  website stops it; a missing, expired, unverifiable or oddly served one is a warning because the release
+  replaces it) and `-Check -Live -RequireIdentical` the check *after* it (the website must serve exactly the
+  committed file, properly served and in force). `prepare-download.ps1`, `prepare-website.ps1` and
+  `render-website.ps1` run `-Check` before they create anything. The file is published by a website-only release
+  (see [DEPLOYMENT-GUIDE.md](DEPLOYMENT-GUIDE.md)). The committed file is sequence 1, with every feature on and no
+  notice.
+
+**Checks run on the source before release:**
+
+- JVM, [RemoteSettingsTest](../android/app/src/test/java/app/vanishr/android/RemoteSettingsTest.java): **30
+  tests, all passing** (21 when first written, 26 after the first review, 30 after the second). They cover a good file read back exactly, an empty file changing nothing, features
+  that can only be switched off and only by name, a changed payload or signature, another key or an unknown
+  key id, the domain prefix, expired / not-yet-valid / too long-lived files, the sequence rule, the
+  once-a-day rule, malformed and non-strict envelopes and payloads (single quotes, bare names, comments,
+  duplicate keys, numbers), the size limits, the notice text and path rules (control and bidirectional
+  characters, `..`, `//`, other hosts), build and version targeting, the update hint, the key list (at most
+  three, P-256 only), the request (one anonymous GET, no redirect, JSON only, a body of unknown length cut
+  at the limit), the hardening of the HTTP client, and that the **committed `download/ota/settings.json`,
+  signed by the PowerShell tool, is accepted by the Java verifier under the key the app embeds**. The shared
+  table [ota/rules-cases.json](../ota/rules-cases.json) (131 cases of what a notice, a switch or an update hint
+  may contain) is run by this test **and** by the signing tool's own tests, so the two cannot drift apart: what
+  the tool accepts the app must accept, and what the app refuses the tool must refuse. The later tests cover the
+  per-key sequence floor (a retired key cannot hold back its successor), an older file of another listed key not
+  being put back over a newer one, a file dated into the future not holding back the next, the newest issue time
+  never going backward even if the phone's clock does, a stored file below the build floor not being used, and a
+  dismissed update hint being shown again when the version changes (an earlier one included).
+- Emulator (Android 16 / API 36, dedicated test emulator), 14 tests in `ScreenFlowTest` (13 after the first
+  review), all passing: the
+  embedded keys are the ones in use after the load and a stored file signed by anybody else is not in force;
+  a notice shows, "Learn more" opens exactly that page on the download site (checked through an activity
+  monitor), "Dismiss" persists across redraws and a different notice shows again; a notice for the other
+  build, for another version or from an expired file is not shown; the update hint shows only on a Play
+  build, an unsupported-version card cannot be dismissed, and a dismissed hint comes back for any other
+  version (an earlier one included); the three switches refuse the action with
+  their message, only by name and leave text messages alone, and are checked again at the point of action (the
+  retry of an unsent image, a view-once photo whose confirmation was already open, the Create button of a group
+  dialog that was already open); the profile says which settings are in force; a notice that the verifier
+  would refuse, with nearly 400 line breaks, still cannot push the chat list out of reach (the notice area is
+  bounded to 40% and scrolls); a key that signed the highest number does not block its successor; an older
+  file of another listed key is not put back over a newer one, and a file dated 36 hours ahead is taken
+  without holding back the next one; and the whole daily check (fetch, verify, apply, a lower sequence refused,
+  a tampered file, another key, an unknown key id and an HTML page all refused whole with the settings
+  unchanged and a retry in about two hours, offline changing nothing, reload from storage under the right
+  key, another key, after expiry and after the stored file was altered).
+- Tooling: [test-ota-settings.ps1](../scripts/test-ota-settings.ps1) **25 tests, all passing** (23 after the second
+  review), run without
+  the real key, in a throwaway copy of the repository layout with a key made for the run and, for the
+  online path, a web server on the loopback address only: the shared rule cases (a refusal has to come from a
+  rule, not from an engine error); the strict JSON reader (a name written twice, **or in two different cases**,
+  comments, trailing commas, leading zeros, depth, dates kept as text, number types);
+  signature, domain prefix and key-id handling; the file-level rules (expiry, validity, sequence cap,
+  `features: null`); the comparison with what the website serves before and after a release (including a
+  forged or retired-key live file that must never be counted, the content type of `application/json-seq`
+  or `jsonp` refused, and `-IgnoreFutureIssueTime` setting aside a live file dated 40 hours ahead but not one dated
+  3 hours ahead, and still holding it to the sequence rule of its key); signing, counting the sequence up, a retired
+  key, a hand-picked sequence, two keys
+  that could sign; the refusal reasons for 16 kinds of bad source; the **issue-time rules** (a floor ahead of the
+  clock dates the file at the floor, a floor more than 36 hours ahead stops it, a committed file dated 2 hours ahead
+  is followed by a file with the same issue time and one dated 40 hours ahead stops the tool until
+  `-IgnoreFutureIssueTime` is given, the switch leaves a file dated 3 hours ahead alone, the edge itself (a file 8
+  seconds under 36 hours ahead is followed, one a minute over stops the tool) and the two sources together, in both
+  combinations), what `-Check` prints, and `-AppRelease` (the floor must equal the committed file's issue time, and
+  on its own it never signs); the key folder and each file in it
+  (loosened as an older script left it, a file with entries of its own, then repaired; `-RestrictOnly`; the grant
+  made to the SID; a fourth key refused with nothing written); the website render and the website stage refusing
+  an expired file before they create anything (both executed); and, for the release staging, the **order** of its
+  checks (read from the script, not executed) with the leftover half-written file check itself executed. The
+  permissions test is skipped, and reported as skipped, on a system other than Windows.
+  `test-google-config.ps1` 21 of 21. A standalone .NET `ECDsa` check of the committed file under the embedded
+  public key passes and fails with a different domain prefix; `sign-ota-settings.ps1 -Check` passes on the
+  committed file (sequence 1, issued 2026-10-17 06:28:06Z, expires 2026-12-01; `BUILD_ISSUED_FLOOR` equals
+  its issue time).
+- **The mutation harnesses are not part of the repository.** They were written and run from the working folder
+  of the release session and are kept with its evidence, so the mutation figures below are as reported and cannot
+  be reproduced from a checkout; the tests they were run against are in the repository.
+- **JVM mutation checks** (`RemoteSettings.java` and `RemoteSettingsStore.java` altered a line at a time in
+  temporary copies that are compiled with `javac` and run against `RemoteSettingsTest`, so the repository's own
+  files are never touched; a mutation counts as caught when a test written for it fails): **71 mutations, all
+  caught by the test written for them.** The set grew with the reviews. The first pass of 34 was caught by the
+  intended test for 29; **five were not**: lenient JSON accepted in the envelope, lenient JSON accepted in
+  the signed payload, redirects followed, a response body of unknown length not cut at the limit, and "naming
+  a feature with true switches it off" (which a different test did catch). Tests were added for each, and the
+  set was rebuilt and extended after each review: **57** mutations after the first, **68** after the second and
+  **71** after the third, with a mutation that no longer applied replaced. The mutations: domain prefix
+  dropped; signature result ignored; expiry check, not-yet-valid check and validity cap removed; the sequence
+  cap removed; any sequence and the same sequence accepted again; one floor for all keys, the floor never
+  recorded, the time of a check not recorded; the signing key not recorded on the settings; the **issue-time
+  high-water mark ignored, the build floor ignored,
+  a file issued at the very same time refused, the issue-time check dropped, the newest issue time never
+  recorded, accepted when negative, not held to the phone's clock, or allowed to go down, a stored file
+  below the build floor used, and the next check not brought forward when such a file is dropped (or brought
+  forward for every refused file)**; envelope version and schema unchecked; duplicate keys accepted (envelope,
+  payload); lenient JSON (envelope, payload); size limits removed (envelope, payload, chunked body); more than
+  three keys; non-P-256 keys; notice path characters (dots allowed), segment count and segment length;
+  control, line-separator, format, private-use, surrogate, noncharacter and replacement
+  characters allowed in text, the joiners that emoji need refused, characters an older phone does not know
+  refused, the line-break cap ignored, line breaks in
+  a title, blank text allowed; notice version bounds and build targeting ignored; update hint on direct builds;
+  update minimum above latest; a hint at or below the dismissed version staying hidden, a dismissed hint never
+  shown again, the dismissal keeping the larger version, the notice and the hint sharing one dismissal;
+  features off by default; a mentioned feature switched off whatever its value; the check due on every
+  resume; a failed check retried only tomorrow; a non-200 and a non-JSON response accepted; redirects followed;
+  cleartext, cookies, cache, retries and long timeouts allowed.
+- **Tooling mutation checks** (the PowerShell tools altered in a mirrored copy and `test-ota-settings.ps1`
+  run against it; the repository is never touched): **40 mutations, all caught, each at the test written for
+  it** (the failing test was read, not only counted; 21 after the second review, 34 after the third): a live file's
+  sequence counted
+  without verification, and its issue time left out of the clock rules; **a file dated a little ahead followed by
+  an earlier one, one dated far ahead always followed, never stopping the tool, or the override switch ignored or
+  applied to files a phone still takes (in the signer and in the pre-release comparison); the edge at 36 hours an
+  hour early or an hour late; a set-aside live file skipping the sequence rule of its key; the warning of the switch
+  without its time limit; a floor far ahead not
+  stopping the signing, or not dating the file; the `-AppRelease` gate removed, not used by the release staging, or
+  not implying `-Check` (which would have *signed a new file*);
+  the leftover half-written file check removed from the staging or never finding anything; the warning about a file
+  dated ahead removed**; the floor not
+  enforced by `-Check`; `-RequireIdentical` not
+  implying `-Live` (which would have *signed a new file* instead of checking); a missing file stopping a
+  release; the after-release comparison skipping the bytes; a live file that is issued later, or has a
+  sequence that is not lower for the same key, not stopping a release; a loose content type; a name written
+  twice, or in two cases, accepted; `features: null` accepted; the key folder restricted only when created; key
+  files not protected; the grant made to the account name; foreign entries
+  not removed from it; a fourth key allowed; the early settings check removed from the website stage, the
+  render and the release staging; a generic error for a source that is not JSON.
+- **Emulator mutation checks** (`MainActivity.java` and `RemoteSettingsStore.java` altered, the QA app and its
+  tests rebuilt and the 14 signed-settings tests run on the emulator, the files restored byte for byte after each
+  group and the hashes compared at the end): **25 mutations in 7 groups, all caught, each by a test written
+  for it** (a group applies mutations that are not caught by the same tests together; every build and test run
+  is kept). They were run on the sources as they stood after the second review; the third review then added one
+  statement to `RemoteSettingsStore.load()` (the next check is due at once when a stored file is dropped for the
+  floor), which the JVM mutations above cover and which the emulator tests below were re-run on. They are:
+  expired settings still in force; a dismissed notice coming back; an older file replacing
+  the stored one; the attachment menu, the retry of an unsent image, a queued image, opening a photo (menu and
+  view-once) and creating a group (the menu and a dialog that was already open) not gated; every feature
+  allowed; the shipped keys not used; the profile line inverted; the notice area not bounded; the direct build
+  treated as Google Play; a failed check retried only tomorrow; a check not recorded; the unsupported card
+  dismissable; "Learn more" opening the site root; the floor read from the wrong key; the newest issue time not
+  consulted, never recorded, or not held to the phone's clock; a dismissed update hint shown again, and the old
+  at-or-below rule for it.
+- **Full emulator QA** (`ScreenFlowTest`, `AccountSafetyTest`, `AccountBackupFlowTest` on the dedicated Android
+  16 / API 36 emulator): **234 tests, 232 pass, 2 fail.** The QA app of this run was built from the final
+  application sources (the last change to the app's Java files was made before it; later changes are to scripts and
+  documents only) but before the release version constants were raised from 0.6.1 / 42 to 0.6.2 / 43, which affects
+  nothing the tests use except that they read the running version. The two failures are the
+  same two that are recorded for 0.5.8 to 0.6.1 and are not touched by this release:
+  `compactClassicProfilesOpenAsSecureBottomSheetsAndKeepTheChatDraft` ("Secondary sheet buttons must render
+  white", a colour assertion; run alone on the final build it **passes**, so it fails only inside a full run)
+  and `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount` (run alone on the final build it **fails**, at
+  a UiAutomator wait of 5 seconds for a "Photos" entry in the conversation menu). Both are **unresolved**:
+  neither is fixed here, and the cause of neither is established. The first full run of this release had 233
+  tests and the same two failures.
+- **The gate.** `verify.ps1 -Android` passed on the final tree, with Docker Desktop started for the relay
+  integration tests and stopped afterwards: relay 101 tests, 0 failures, the 2 opt-in live-relay tests skipped; the
+  Android build and lint with 0 errors and **19 warnings, one more than the 18 of 0.6.1**. The extra one is
+  `ViewConstructor` on the new `BoundedScrollView`, which is created only in code and never from a layout file, so
+  the layout editor warning is of no consequence; it was left as it is rather than change code that had just been
+  verified. The other 18 have the same kinds and counts as the lint report of the 0.6.1 release build (SetTextI18n 8,
+  UnusedResources 7, InlinedApi 1, MonochromeLauncherIcon 1, ObsoleteSdkInt 1). It also ran `test-google-config.ps1` (21 of 21),
+  `test-ota-settings.ps1` (25 of 25) and `sign-ota-settings.ps1 -Check`. `:app:testDebugUnitTest`,
+  `:app:exportDependencyInventory` and notice generation (116 components) passed afterwards, and the regenerated
+  notices left the tracked legal assets unchanged.
+- **Independent code reviews.** A read-only reviewer with no stake in the code was given the diff and the threat
+  model four times, and every finding was checked by reading or running the code before it was accepted.
+  *First round, 8 findings, all fixed:* the VM-side installer accepted one Android client ID only (above); one
+  global sequence floor could be used up by a stolen key (now per key, with a cap of 1,000,000); a long notice
+  could push the chat list out of reach (now a scrolling area of at most 40% of the height that is left); the
+  notice and the update card shared one dismissal slot; the signing tool did not apply the app's rules (now a
+  shared rules library and the 131-case table above); the stage and deploy checks of the settings file were
+  missing; the three gates sat too early (now at the point of action: the retry of an unsent image, opening a
+  view-once photo, the Create button of a group dialog that was already open); and some wording overclaimed.
+  *Second round, 2 medium and 7 low findings, all fixed:* the signer trusted the sequence number of an
+  unverified live file (anyone who can change the website could have used up the numbers); `-Check -Live`
+  failed on things that a release replaces and did not demand the exact committed file after one (now the
+  two modes above); per-key floors allowed an older file of one listed key to be put back over a newer file
+  of another, and the build floor was not per key (now the issue-time mark and `BUILD_ISSUED_FLOOR`); the key
+  folder's restriction was applied only when it was created (on the real folder it was inherited rather
+  than blocked, and was repaired; the script now applies and checks it every time); the tooling's JSON reader
+  was more lenient than the app's; the stage check ran after the stage had been built; there were gaps in the
+  tooling tests (the online path, two keys, refusal reasons, the folder restriction, a fourth key); and the
+  claims about invisible characters and about what the `photos` switch covers were too broad (they now list
+  what is **not** refused and say that opening a photo you sent yourself is covered too).
+  *Third round, no critical or high finding, 1 medium and several low ones, all fixed except where stated:* the
+  medium was that after the signing computer's clock had once been fast, the tool refused to sign whatever the
+  size of the error and gave no way out. The fix the review proposed (ignore any file dated far ahead) would have
+  been unsafe, because a clock that is *behind* looks the same from the files alone, so the tool now dates the
+  next file at the newer time when the difference is within what a phone allows, stops beyond that, and has an
+  explicit `-IgnoreFutureIssueTime` for an owner who knows the clock is right. Low findings: two names that differ
+  only in case were merged by PowerShell, so a switch typed in the wrong case could be dropped without a word
+  (one order of the pair was signed with the wrong value; the other was refused only further down, by luck; now
+  both are refused where the file is read); a local variable that
+  shadowed a parameter; the key-folder grant by account name and files not covered (now by SID, files
+  included); a forgotten raise of the floor when cutting a version went unnoticed (now stopped by
+  `-AppRelease`, which `prepare-download.ps1` runs); engine errors that would have counted as refusals in a
+  test and a skipped permissions test counted as passed; a leftover half-written settings file that could ship in
+  the source archive (now stopped); and an app update that left a stored file below its new floor waiting up to a
+  day for the next check (now due at once). Accepted and written down in the threat model: a phone whose clock is
+  behind real time keeps a correspondingly lower issue-time mark. Still weak: the order of the checks in
+  `prepare-download.ps1` is tested by reading the script, not by running it.
+  *Fourth round (only what the third round changed), no critical, high or medium finding and six low ones:* the
+  reviewer agreed with not taking the third round's suggested fix. Fixed: the override's reasoning held only until
+  36 hours before the old file's date, after which a phone with a right clock takes that file (so the tool and the
+  guide now say until when to publish, and a set-aside file is still held to the sequence rule of its key);
+  contradictory advice about the floor when the committed file is dated ahead, and the floor gate running only
+  after the release build (it now runs first, in `prepare-download.ps1`, so a forgotten floor costs a message and
+  not a rebuild); `-AppRelease` signing a new file when given without `-Check` (it now implies `-Check`); a
+  failure message of the key script that said "No key was created" after one had been; and test and wording gaps
+  (the exact 36-hour edge, the two sources together, the leftover-file check now executed, and a claim that three
+  stage scripts were run when two were). Accepted: a live file that a listed key signed moves the date of the next
+  file whether or not phones would take it, which needs the key and costs only phones whose clocks are far behind.
+  A review is not a
+  proof: it found real problems in all four rounds, fewer and less serious each time, which is not evidence that
+  none remain.
+
+**Not verified, and not claimed:** that any of this works on a physical phone (everything above ran on one
+dedicated emulator, with synthetic accounts, synthetic settings files and signing keys made for the test); a real
+Google sign-in on a Google Play install (the owner's steps in GOOGLE-SETUP.md are not done, so it is expected to
+keep failing until they are); a relay publish with the new allow-list or the changed installer script on the VM;
+the Google Play listing's Data safety form, which has to be revisited because the Play build now contacts the
+download site once a day; the behavior of the Google Play bundle on a Play-installed phone; and a settings file
+published to the real site and read by a real installed app (the settings file is not on the public site until the
+release is published, and what is checked then is the file and its headers, not a phone).
+
+**Changed by the owner, not by this work:** after 0.6.1 the owner's commit `c457e6c` removed a paragraph from the
+in-app policy summary (`PlayPolicy.SUMMARY`) that said that new accounts are introduced to the admin, that the admin
+sees a user's name, username, public device identity and Online, Typing and Last seen status, and that the
+admin's app can save a photo it is sent, even a view-once one. Asked before this release was built, the owner chose to
+keep it removed, so 0.6.2 and its bundle ship without it. The privacy and security pages and `llms.txt` still say it.
+No test covers the text of the summary. [THREAT-MODEL.md](THREAT-MODEL.md) was corrected where it said the in-app
+summary carries the sentence.
 
 ## Release 0.6.1 / Long chats and the keyboard
 

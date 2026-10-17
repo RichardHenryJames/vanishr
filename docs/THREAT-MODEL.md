@@ -233,8 +233,12 @@ What this changes for other people: anyone who sends the admin a photo, includin
 view-once photo, should assume the admin can keep it. It does not give the admin anything a
 recipient with a modified client or a second camera did not already have (the existing
 statement that view-once and expiry cannot stop a recipient keeping a copy still stands),
-but it makes it one tap for the one account that new users are introduced to. The in-app
-summary, the privacy and security pages and `llms.txt` say so. The gate is a client-side
+but it makes it one tap for the one account that new users are introduced to. The privacy and security pages and
+`llms.txt` say so. The in-app policy summary said so in 0.6.0 and 0.6.1; after 0.6.1 the owner removed that
+paragraph from the summary (it also said that new accounts are introduced to the admin and that the admin sees a
+user's status; commit `c457e6c`), and 0.6.2 ships without it. That was the owner's decision and is kept; it means
+the screen a user accepts no longer tells them that
+the admin's app can keep a photo it is sent. The gate is a client-side
 product rule, not a security boundary: a modified build can save anything it can view,
 and a compromised relay cannot make an ordinary account save, because the check is the
 local pinned identity, not a relay value.
@@ -565,6 +569,119 @@ published metadata, not a signature or an in-app verification of the downloaded
 APK. A compromised host can suppress updates or serve misleading metadata;
 the signing key and Android package manager remain the update trust boundary.
 No downloaded scripts, DEX or other executable code replace the running client.
+
+### Signed settings: changes without an update (0.6.2)
+
+Owners often want to change something small without a new app version. Dynamic code is not an option for this
+app: Google Play forbids a Play-installed app from downloading executable code, and a messenger whose client code
+can be replaced from a website would make that website part of the trust base for every key and message. So the
+channel that exists is **data only**, and deliberately narrow.
+
+- **What it is.** One JSON file on the static download host, `/ota/settings.json`, in a signed envelope. The app reads
+  fixed fields with fixed limits: a notice (title up to 60 characters, body up to 400 and at most six line breaks, plain
+  text, an optional page on the download site, optional build and version-code targeting), off-switches for `images`,
+  `photos` and `groups`, and an update hint (latest and minimum version code) that only Google Play builds act on, by
+  showing a card with a link to the app's own Play listing. Unknown fields are ignored; any known field that is
+  malformed refuses the whole file. The switches are narrow on purpose: `images` covers sending an image in a chat (the
+  attachment menu, a queued send and the retry of an unsent one), `photos` covers opening a photo in a chat, whether it
+  was received or sent by the user (including a view-once photo, which is not used up when it is refused), and `groups`
+  covers creating a group. They do not cover profile photos or the administrator's remote-photo feature, and a send
+  already under way when the settings change is not recalled.
+- **What it cannot do.** No field is code, an address, a key, a message, a deadline, an identity decision or a
+  server setting, and no field can switch anything *on* that the build does not already allow: a switch is on unless
+  the file says `false`. The relay address, expiry times, verification and block rules are not reachable from it.
+  Links open only `https://vanishr-download.vercel.app` + a page path: up to four segments of letters, digits, dashes
+  and underscores, with no dot at all, so never a file such as the APK, and no query, fragment, `//` or dot segment.
+  Text is shown as plain text (no markup, no auto-links). The text rules go by Unicode category: control characters,
+  line and paragraph separators, "format" characters (zero-width and bidirectional marks, soft hyphens, tag
+  characters; only the two joiners that emoji and some scripts need are kept), private-use and lone surrogate code
+  points, noncharacters and the replacement character are refused, and so is a text that is blank. That makes the usual
+  ways of hiding text impossible, but it does not make a notice incapable of looking odd: characters that Unicode
+  files under letters, marks or spaces yet draw as nothing or as a blank (the braille blank U+2800, the Hangul
+  fillers, variation selectors, the combining grapheme joiner U+034F, a body of nothing but no-break spaces) are not
+  refused, because a list of lookalikes would never be complete. A notice is the owner's voice and is trusted exactly
+  as far as the owner's website is: it can say something misleading in plain visible words, or look empty. It is shown
+  in an area that takes at most 40% of the height that is left and scrolls inside it,
+  so no notice, however long, can push the chat list out of reach (an emulator test builds a notice the verifier would
+  refuse, with nearly 400 line breaks, to show that the layout holds on its own). The update hint can only open the Play
+  listing and never blocks use.
+- **Who can publish it.** The signature is ECDSA P-256 with SHA-256 over a fixed prefix (`vanishr-ota-settings-v1`
+  plus a zero byte) and the exact payload bytes, checked against up to three public keys embedded in the app
+  (`res/raw/ota_keys.txt`). The private key is created by `scripts/new-ota-key.ps1` under `.secrets/ota-signing`
+  (git-ignored, never committed, packaged or uploaded, restricted to the current Windows user each time the script
+  runs, with the result read back and checked; `-RestrictOnly` applies it to a folder that exists already). It is encrypted with a
+  generated password that is stored next to it, as for the Android signing key: that keeps a stray copy of the key file
+  alone useless, but anyone who can read the whole folder can sign, so the folder has to be protected and backed up as a
+  whole. Someone who controls the website but not that key can serve an old valid file, serve nothing or break the
+  format, so at worst they can delay or block a settings change; they cannot forge one. Someone who holds the key can
+  show a notice, switch those three features off and make Play builds show an update card, which is the extent of the
+  power. There is no hard block or forced update, and a notice cannot cover the chat list, so even a stolen key cannot
+  lock people out of their chats.
+- **Freshness.** Each file has a sequence number (1 to 1,000,000), an issue time and an expiry of at most 60 days. Two
+  rules keep an older signed file from being put back. The app keeps the highest sequence it has accepted **for each
+  signing key** and ignores anything not higher from that key. It also keeps the newest **issue time** it has accepted
+  **across keys** and ignores a file issued earlier than that, so an old file of one listed key cannot be put back over
+  a newer file of another (a per-key counter alone would allow that). `BUILD_ISSUED_FLOOR` is the issue time of the
+  newest file that existed when the version was cut (`scripts/sign-ota-settings.ps1 -Check` prints the value to use):
+  a fresh install takes nothing issued before it. Because the sequence floor belongs to the key, a key that has been
+  retired, or that signed the highest number there is, can only block itself: a replacement key shipped in a later app
+  version starts from its own sequence floor. The issue time that is kept is never later than the phone's own clock
+  at that moment (a file may be dated up to 36 hours ahead of the clock and is then still taken), so a file dated in
+  the future cannot make the phone refuse the files that really follow it, and a leaked key cannot hold back the
+  owner's next files on the phones by future-dating one. The signing tool never dates a file earlier than the newest
+  file it knows
+  of (the committed one, or a live one that a listed key signed) or than the app's `BUILD_ISSUED_FLOOR`. When the
+  computer's clock is behind that time by up to 36 hours, which is what a phone allows ahead of its own clock, the new
+  file is dated at that time instead and the tool says so (so whoever holds the key can make the owner's next file be
+  dated up to 36 hours ahead by publishing a file of their own so dated; a phone whose clock is right takes it
+  at once, and one whose clock is behind real time by more than the difference takes it later); when it is behind by
+  more, the tool stops, because from the
+  files alone it cannot tell a clock that is wrong now from a file that was signed while a clock was fast (a file that a
+  phone with a right clock refuses until real time is within 36 hours of its date), and `-IgnoreFutureIssueTime` is the
+  owner's statement that the clock is right: it sets such a file aside, and the tool says until when to publish,
+  because a phone takes the old file from that time on, holds a later time than the new file and then ignores it. This
+  covers only the files the tool can see: a file signed on another computer is outside it. A phone whose clock is behind real time keeps a
+  correspondingly lower issue time, so the protection against putting an older file of another key back is only as
+  precise as phone clocks are (it matters only while two keys are listed and used close together). An expired file stops
+  counting at once, with no network, and the app behaves as
+  built, which is the safe state (a switch that was turned off comes back on when the file that turned it off
+  expires, so a forgotten renewal re-enables the feature; `scripts/sign-ota-settings.ps1 -Check` reports days left and
+  the release gate runs it). A file whose issue time is more than 36 hours ahead of the phone's clock is refused. The
+  phone's clock decides expiry: a clock set forward makes valid settings look expired and be ignored, a clock set back
+  keeps an expired file in force for as long as the clock is wrong; neither can make the app accept a file that was
+  not signed. A phone whose clock is far ahead of real time when someone with a leaked key hands it a file keeps that
+  clock time as its newest issue time and ignores the owner's files until real time reaches it or the app's data is
+  cleared; that needs the leaked key and the phone's wrong clock together.
+- **Rotation and loss.** Up to three public keys may be listed, so a new key can be shipped in an app version before
+  the old one is removed. The signing tool counts on from the committed file even when the key that signed it is no
+  longer listed, and from a live file only when a listed key signed it (anyone who can change the website could write
+  any numbers there, so an unverified file's numbers are never counted); `-Sequence` chooses a number by hand if that is
+  ever needed. There is no way to revoke a key
+  remotely, because a remote revocation would itself be a remote control channel: if the key is lost or may have been
+  copied, the remedy is a new key in a new app version (and, for Google Play, a new bundle), and phones that have not
+  updated keep trusting the old key until they do.
+- **The request.** One bounded HTTPS GET to the fixed host at most once a day while the app is in the foreground
+  (a failure is retried after two hours), with no cookies, account tokens or identifiers, no redirects, a 12 KiB
+  response limit and the same short timeouts as the update check. The host sees the source IP and request time,
+  exactly as for the update check. Unlike the update check this request is also made by the Google Play build, which
+  contacted the website only when the user opened one of its pages before; the privacy policy and the Play Data
+  safety notes say so. The key list is read and the stored file checked on the update thread after the screen is up
+  (measured at 34 to 42 ms of work in a cold process, which is why it is not on the main thread).
+- **Storage.** The last accepted file is kept as it came in the app's private preferences together with the highest
+  sequence per signing key, the newest issue time, the time of the last check, the id of the dismissed notice and the
+  version code of the update hint that was dismissed (the two dismissals are independent; a hint about any other
+  version is shown again, an earlier one included, so that a hint published with a mistyped version can be corrected).
+  It is public data, holds nothing about the user and is verified
+  again, signature and expiry included, on every load, so a file altered on the phone is not used. A stored file that an
+  app update finds issued before its new floor is not used either, and the next check is then due at once instead of
+  up to a day later. It is not backed up
+  (Android backups are disabled).
+- **Where it is not trusted.** The settings never decide anything the app must fail closed on. They are consulted
+  only to show a card or to refuse to start sending an image, opening a photo or creating a group.
+
+Not claimed: the key could be lost or stolen like any key; the owner's computer is the signing environment; nothing
+here is an independent audit; and the behavior was exercised on an emulator with synthetic files only (see
+[VERIFICATION.md](VERIFICATION.md#release-062--signed-settings-and-google-play-sign-in)).
 
 ### Responsiveness and the open vault
 

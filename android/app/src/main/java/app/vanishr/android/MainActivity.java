@@ -76,6 +76,16 @@ public final class MainActivity extends AppCompatActivity {
     private final java.util.concurrent.atomic.AtomicBoolean syncRequested = new java.util.concurrent.atomic.AtomicBoolean();
     private boolean checkingUpdates;
     private AppUpdates.Release availableUpdate;
+    // Signed settings from the download site (a notice, switches that can only turn a feature off, a hint at a newer version).
+    private RemoteSettingsStore settingsStore;
+    private Map<String, java.security.PublicKey> settingsKeys = Map.of();
+    private volatile RemoteSettings.Settings remote = RemoteSettings.Settings.NONE;
+    private boolean settingsLoaded;
+    private boolean checkingSettings;
+    private boolean playBuild = BuildConfig.PLAY_STORE;
+    private java.util.function.Supplier<RemoteSettings> settingsSource = RemoteSettings::new;
+    private LinearLayout noticeHost;
+    private BoundedScrollView noticeArea;
     private volatile ChatEngine engine;
     private volatile boolean resumed;
     private int loadingGeneration = -1;
@@ -304,6 +314,7 @@ public final class MainActivity extends AppCompatActivity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         if (Build.VERSION.SDK_INT >= 31) getWindow().setHideOverlayWindows(true);
         if (Build.VERSION.SDK_INT >= 33) setRecentsScreenshotEnabled(false);
+        loadRemoteSettings();
         root = vertical();
         root.setBackgroundColor(Ui.CANVAS);
         root.setPadding(dp(20), dp(8), dp(20), dp(8));
@@ -679,6 +690,138 @@ public final class MainActivity extends AppCompatActivity {
         availableUpdate = null;
     }
 
+    // ---- signed settings from the download site ----
+
+    /**
+     * Reading the key list and checking the stored file cost about 40 ms the first time a process does it, so it runs on the update lane
+     * (which has nothing else to do yet) and the screen is already up by then. Until it is done the app behaves as built.
+     */
+    private void loadRemoteSettings() {
+        RemoteSettingsStore store = new RemoteSettingsStore(getSharedPreferences("remote-settings", MODE_PRIVATE));
+        settingsStore = store;
+        updateWork.execute(() -> {
+            Map<String, java.security.PublicKey> keys;
+            try (java.io.InputStream list = getResources().openRawResource(R.raw.ota_keys)) {
+                java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+                byte[] chunk = new byte[1024];
+                for (int read; (read = list.read(chunk)) > 0; ) bytes.write(chunk, 0, read);
+                keys = RemoteSettings.keys(new String(bytes.toByteArray(), java.nio.charset.StandardCharsets.UTF_8));
+            } catch (Exception failure) { keys = Map.of(); }
+            // Without a key nothing can be accepted, and the app simply behaves as built.
+            Map<String, java.security.PublicKey> trusted = keys;
+            RemoteSettings.Settings stored = store.load(trusted, System.currentTimeMillis());
+            ui.post(() -> {
+                if (isDestroyed()) return;
+                settingsKeys = trusted;
+                remote = stored;
+                settingsLoaded = true;
+                renderNotice();
+                checkRemoteSettings();
+            });
+        });
+    }
+
+    /** At most once a day, in the foreground, from the fixed download host; a failure is retried after two hours and never shown. */
+    private void checkRemoteSettings() {
+        if (!settingsLoaded || !resumed || isDestroyed() || checkingSettings || settingsStore == null || settingsKeys.isEmpty()) return;
+        long now = System.currentTimeMillis();
+        if (!RemoteSettings.due(now, settingsStore.lastCheck())) return;
+        checkingSettings = true;
+        RemoteSettingsStore store = settingsStore;
+        Map<String, java.security.PublicKey> keys = settingsKeys;
+        java.util.function.Supplier<RemoteSettings> source = settingsSource;
+        updateWork.execute(() -> {
+            long started = System.currentTimeMillis();
+            try (RemoteSettings fetcher = source.get()) {
+                byte[] envelope = fetcher.fetch();
+                RemoteSettings.Settings next = RemoteSettings.verify(envelope, keys, started);
+                boolean accepted = store.accept(envelope, next, started);
+                ui.post(() -> {
+                    checkingSettings = false;
+                    if (isDestroyed() || !accepted) return;
+                    remote = next;
+                    renderNotice();
+                });
+            } catch (Exception failure) {
+                store.failed(started);
+                ui.post(() -> checkingSettings = false);
+            }
+        });
+    }
+
+    /** What is in force now: a file stops counting the moment it expires, with no network needed. */
+    private RemoteSettings.Settings activeSettings() {
+        RemoteSettings.Settings current = remote;
+        return current.expiresAt() > System.currentTimeMillis() ? current : RemoteSettings.Settings.NONE;
+    }
+
+    private boolean allowed(RemoteSettings.Flag flag) {
+        if (activeSettings().enabled(flag)) return true;
+        problem(flag.refusal);
+        return false;
+    }
+
+    private void renderNotice() {
+        LinearLayout host = noticeHost;
+        if (host == null || settingsStore == null) return;
+        host.removeAllViews();
+        RemoteSettings.Settings active = activeSettings();
+        RemoteSettings.Notice notice = RemoteSettings.noticeFor(active, BuildConfig.VERSION_CODE, playBuild);
+        if (notice != null && !notice.id().equals(settingsStore.dismissedNotice())) {
+            Runnable open = notice.path() == null ? null : () -> openPublicPage(AppUpdates.ORIGIN + notice.path());
+            host.addView(noticeCard(notice.title(), notice.body(), notice.important(), open == null ? null : "Learn more", open,
+                    () -> { settingsStore.dismissNotice(notice.id()); renderNotice(); }));
+        }
+        RemoteSettings.Nudge nudge = RemoteSettings.nudge(active, BuildConfig.VERSION_CODE, playBuild);
+        if (nudge == RemoteSettings.Nudge.UNSUPPORTED) {
+            host.addView(noticeCard("Please update Vanishr", "This version is no longer supported. Update it from Google Play.", true,
+                    "Open Google Play", () -> openPublicPage(PlayPolicy.PLAY_URL), null));
+        } else if (nudge == RemoteSettings.Nudge.AVAILABLE) {
+            int latest = active.update().latestVersionCode();
+            if (!settingsStore.updateDismissed(latest))
+                host.addView(noticeCard("Update available", "Vanishr " + active.update().latestVersionName() + " is on Google Play.", false,
+                        "Open Google Play", () -> openPublicPage(PlayPolicy.PLAY_URL), () -> { settingsStore.dismissUpdate(latest); renderNotice(); }));
+        }
+    }
+
+    private View noticeCard(String title, String body, boolean strong, String actionLabel, Runnable action, Runnable dismiss) {
+        LinearLayout card = vertical();
+        card.setPadding(dp(14), dp(12), dp(14), dp(4));
+        card.setBackground(design.background(strong ? Ui.ERROR_TINT : Ui.TINT, 8, strong ? Ui.ERROR : Ui.PRIMARY));
+        card.setContentDescription("Notice");
+        card.addView(design.text(title, 13, 700, INK));
+        TextView text = design.text(body, 12, 500, INK);
+        text.setPadding(0, dp(5), 0, 0);
+        card.addView(text);
+        LinearLayout actions = horizontal();
+        actions.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        if (action != null) actions.addView(noticeAction(actionLabel, action));
+        if (dismiss != null) actions.addView(noticeAction("Dismiss", dismiss));
+        card.addView(actions, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout.LayoutParams margin = new LinearLayout.LayoutParams(-1, -2);
+        margin.setMargins(dp(17), 0, dp(17), dp(10));
+        card.setLayoutParams(margin);
+        return card;
+    }
+
+    private TextView noticeAction(String label, Runnable action) {
+        TextView button = design.text(label, 12, 700, GREEN);
+        button.setPadding(dp(12), 0, dp(12), 0);
+        button.setMinHeight(dp(44));
+        button.setGravity(Gravity.CENTER_VERTICAL);
+        button.setBackground(design.feedback(Color.TRANSPARENT, 8));
+        button.setContentDescription(label);
+        button.setFilterTouchesWhenObscured(true);
+        button.setOnClickListener(view -> action.run());
+        return button;
+    }
+
+    private String settingsStatus() {
+        RemoteSettings.Settings active = activeSettings();
+        return active.present() ? "Settings " + active.sequence() + ", valid until "
+                + java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM).format(new Date(active.expiresAt())) : "Settings: as built";
+    }
+
     private void loginScreen() {
         chatScreen = false;
         title("vanishr", false);
@@ -817,6 +960,12 @@ public final class MainActivity extends AppCompatActivity {
         unreadFilter = icon(R.drawable.ic_list_filter, "Unread chats", () -> { unreadOnly = !unreadOnly; renderContacts(); });
         LinearLayout.LayoutParams filterSize = new LinearLayout.LayoutParams(dp(44), dp(44)); filterSize.setMarginStart(dp(7)); searchRow.addView(unreadFilter, filterSize);
         root.addView(searchRow, new LinearLayout.LayoutParams(-1, dp(56)));
+        noticeHost = vertical();
+        // A notice can never take more than part of the space that is left, whatever it says: the chat list below it stays reachable.
+        noticeArea = new BoundedScrollView(this, .4f);
+        noticeArea.addView(noticeHost);
+        root.addView(noticeArea, new LinearLayout.LayoutParams(-1, -2));
+        renderNotice();
         ScrollView scroll = new ScrollView(this);
         contactRows = vertical(); scroll.setFillViewport(true); scroll.addView(contactRows);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -1227,6 +1376,7 @@ public final class MainActivity extends AppCompatActivity {
 
     private boolean enqueueSend(ChatEngine.Peer peer, String text, byte[] image, ChatEnvelope.Expiry selectedExpiry) {
         if (!resumed || engine == null || busy) return false;
+        if (image != null && !allowed(RemoteSettings.Flag.IMAGES)) return false;
         GroupChat.Conversation group = shownConversationGroup;
         if (group != null && (sendControl == null || !sendControl.isEnabled())) { problem("Group membership is being verified."); return false; }
         if (pendingSends.size() >= 8) { problem("Wait for a pending message before sending more."); return false; }
@@ -1257,6 +1407,8 @@ public final class MainActivity extends AppCompatActivity {
 
     private void dispatchSend(PendingSend pending) {
         if (pending.cancelled || pending.expiresAt() <= System.currentTimeMillis()) return;
+        // Checked here as well as when a message is queued, so that a retry made after the settings changed is refused too.
+        if (pending.image != null && !allowed(RemoteSettings.Flag.IMAGES)) return;
         ChatEngine current = engine;
         int generation = screenGeneration;
         pending.failed = false;
@@ -1353,6 +1505,7 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void attachmentDialog() {
+        if (!allowed(RemoteSettings.Flag.IMAGES)) return;
         LinearLayout choices = vertical(); choices.setPadding(dp(20), dp(8), dp(20), dp(20));
         MaterialButton gallery = profileAction("Choose image", R.drawable.ic_image, () -> { dismissContent(); gallery(); });
         MaterialButton camera = profileAction("Take photo", R.drawable.ic_camera, () -> { dismissContent(); camera(); });
@@ -1846,6 +1999,7 @@ public final class MainActivity extends AppCompatActivity {
 
     private void newGroupDialog() {
         if (engine==null || !engine.authenticated()) return;
+        if (!allowed(RemoteSettings.Flag.GROUPS)) return;
         ChatEngine current=engine;
         LinearLayout panel=vertical(); panel.setPadding(dp(24),dp(8),dp(24),dp(8));
         Ui.Field name=design.field("Group name",InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
@@ -1862,6 +2016,7 @@ public final class MainActivity extends AppCompatActivity {
                 if (!consent.isChecked()) return;
                 String value=name.input().getText().toString().strip();
                 if (value.isEmpty() || value.codePoints().anyMatch(Character::isISOControl)) { name.layout().setError("Enter a name of 1-64 characters"); return; }
+                if (!allowed(RemoteSettings.Flag.GROUPS)) return;
                 var created=new java.util.concurrent.atomic.AtomicReference<UUID>();
                 submit(() -> created.set(current.groups().create(value)),() -> {
                     dismissContent(); selectedPeer=created.get(); render(); groupInviteDialog(created.get()); queueSync();
@@ -2100,6 +2255,9 @@ public final class MainActivity extends AppCompatActivity {
         panel.addView(profileAction("Terms & safety", R.drawable.ic_shield_check, () -> openPublicPage(PlayPolicy.TERMS_URL)));
         panel.addView(profileAction("Support", R.drawable.ic_message_circle, this::contactSupport));
         panel.addView(profileAction("Licenses & source", R.drawable.ic_file_text, () -> { dismissContent(); legalNotices(); }));
+        TextView settingsInfo = design.text(settingsStatus(), 11, 500, MUTED);
+        settingsInfo.setPadding(dp(16), dp(10), 0, 0); settingsInfo.setContentDescription("Remote settings status");
+        panel.addView(settingsInfo);
         panel.addView(design.spacer(8)); panel.addView(design.divider()); panel.addView(design.spacer(8));
         MaterialButton signOut = profileAction("Sign out", R.drawable.ic_log_out, this::signOutDialog);
         signOut.setTextColor(Ui.ERROR); signOut.setIconTint(android.content.res.ColorStateList.valueOf(Ui.ERROR)); panel.addView(signOut);
@@ -2799,6 +2957,7 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void viewContent(ChatEngine.Entry entry) {
+        if (entry.image() && !allowed(RemoteSettings.Flag.PHOTOS)) return;
         if (entry.expiry() != ChatEnvelope.Expiry.VIEW_ONCE) { openContent(entry); return; }
         if (!resumed || engine == null || entry.expiresAt() <= System.currentTimeMillis()) { problem("Message expired."); return; }
         int generation = screenGeneration;
@@ -2820,6 +2979,8 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void openContent(ChatEngine.Entry entry) {
+        // At the point of action, before a view-once message is consumed: the confirmation may have been up while the settings changed.
+        if (entry.image() && !allowed(RemoteSettings.Flag.PHOTOS)) return;
         int generation = screenGeneration;
         submit(() -> {
             ChatEngine loaded = engine;
@@ -3169,7 +3330,7 @@ public final class MainActivity extends AppCompatActivity {
         composer = null; messages = null;
         composerPeer=null;
         sendControl=null; attachmentControl=null; shownGroups=java.util.List.of();
-        homeConnection=null; unreadFilter=null; homeQuery=""; unreadOnly=false;
+        homeConnection=null; unreadFilter=null; homeQuery=""; unreadOnly=false; noticeHost=null; noticeArea=null;
         conversationName = null; conversationUsername = null;
         contactStatus = null;
         messageScroll = null; shownEntries = java.util.List.of(); contactRows = null; contactSearch = null; actionError = null; unreadLabels.clear();
@@ -3185,6 +3346,7 @@ public final class MainActivity extends AppCompatActivity {
         if (engine == null) load();
         else { render(); showGoogleDeletionFailure(); if (googleAttempt != null && googleAttempt.idToken != null) completeGoogle(); }
         checkForUpdates(false);
+        checkRemoteSettings();
         continuePhotoChoice();
     }
     @Override protected void onNewIntent(Intent intent) {

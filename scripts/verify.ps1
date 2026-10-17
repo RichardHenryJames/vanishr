@@ -12,9 +12,14 @@ try {
         if ($forbidden.Count -ne 0) { throw 'Relay artifact contains a client-only crypto dependency.' }
     } finally { $archive.Dispose() }
     if ($Android) {
-        $tasks = @(':crypto:test', ':app:assembleDebug', ':app:lintDebug', ':app:assembleDebugAndroidTest')
+        # The app's unit tests include the one that checks the committed signed settings file with the app's own verifier.
+        $tasks = @(':crypto:test', ':app:testDebugUnitTest', ':app:assembleDebug', ':app:lintDebug', ':app:assembleDebugAndroidTest')
         if ($Release) { $tasks += @(':app:assembleRelease', ':app:lintRelease') }
         & (Join-Path $PSScriptRoot 'build-android.ps1') -Tasks $tasks
     }
+    # No phone, network or real signing key: the Google release configuration, the over-the-air settings rules and tool, and the committed signed file.
+    & (Join-Path $PSScriptRoot 'test-google-config.ps1')
+    & (Join-Path $PSScriptRoot 'test-ota-settings.ps1')
+    & (Join-Path $PSScriptRoot 'sign-ota-settings.ps1') -Check
     Write-Output 'Verification passed. Review docs/VERIFICATION.md for device and production release gates.'
 } finally { Pop-Location }

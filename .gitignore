@@ -22,5 +22,7 @@ vanishr-b7616-*.json
 .vercel/
 .tools/
 .secrets/
+# A signed settings file that was being written when the signing tool was interrupted
+download/ota/*.new
 *.hprof
 *.dump

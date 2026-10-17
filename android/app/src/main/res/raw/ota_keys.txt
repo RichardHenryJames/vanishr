@@ -1,0 +1,3 @@
+# Public keys that may sign over-the-air settings: key ID, then the base64 X.509 SubjectPublicKeyInfo of a P-256 key.
+# At most three. Created by scripts/new-ota-key.ps1; the private halves are never committed.
+ke4057b2b4ec1 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIV+IlcKE8nDMNEbH1maa63DvhcJUFFZrZIiWihf10q+ybXgYEe5AgTj1co/OJY4fH4+D3VqKChvoeEsHteh2xg==

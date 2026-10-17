@@ -4,6 +4,8 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $source = Join-Path $root 'download'
 $Stage = (Resolve-Path $Stage).Path
+# The signed settings file goes out with every website or app release, so a file the app would refuse, or one that has expired, must not.
+& (Join-Path $PSScriptRoot 'sign-ota-settings.ps1') -Check | Out-Null
 $settings = Get-Content (Join-Path $source 'site-settings.json') -Raw | ConvertFrom-Json
 if ($settings.origin -cne 'https://vanishr-download.vercel.app' -or @($settings.PSObject.Properties.Name | Where-Object { $_ -notin @('origin', 'ga4MeasurementId', 'googleSiteVerification') }).Count -gt 0) { throw 'Unexpected public website settings.' }
 if ($settings.ga4MeasurementId -and $settings.ga4MeasurementId -cnotmatch '^G-[A-Z0-9]{6,20}$') { throw 'Invalid public GA4 Measurement ID.' }
@@ -14,7 +16,7 @@ if ($version -cnotmatch '^\d+\.\d+\.\d+$' -or $feed.versionCode -le 0 -or $feed.
 $apk = Get-Item (Join-Path $Stage "vanishr-$version.apk")
 if ($apk.Length -ne $feed.size -or (Get-FileHash $apk.FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne $feed.sha256) { throw 'Website release metadata does not match the APK.' }
 $assets = @('app-overview.jpg', 'app-overview-mobile.jpg', 'social.jpg', 'conversations.png', 'chat.png', 'profile.png', 'manrope.ttf', 'MANROPE-OFL.txt', 'lucide.min.js', 'LUCIDE-LICENSE.txt')
-$static = @('site.css', 'site.js', 'robots.txt', 'sitemap.xml', 'llms.txt', 'icon.png', 'favicon.ico', 'apple-touch-icon.png') + @($assets | ForEach-Object { 'assets/' + $_ })
+$static = @('site.css', 'site.js', 'robots.txt', 'sitemap.xml', 'llms.txt', 'icon.png', 'favicon.ico', 'apple-touch-icon.png', 'ota/settings.json') + @($assets | ForEach-Object { 'assets/' + $_ })
 foreach ($relative in $static) {
     $target = Join-Path $Stage $relative
     $null = New-Item -ItemType Directory -Path (Split-Path $target -Parent) -Force

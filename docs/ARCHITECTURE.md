@@ -59,6 +59,24 @@ the browser; package installation and signer validation belong to Android, not
 a downloaded runtime-code loader. The same staging operation publishes the APK,
 checksum, version manifest, corresponding source and notices.
 
+From 0.6.2 the same lane (`updateWork`) also fetches the signed settings file
+`/ota/settings.json` (`RemoteSettings`, `RemoteSettingsStore`), in every build
+including Google Play, at most daily and retried after two hours on failure. It is
+data only: the envelope's ECDSA signature is checked against the public keys in
+`res/raw/ota_keys.txt`, then a strict parser reads a notice, three off-switches and
+an update hint, with a sequence number (counted per signing key) and an issue time (counted
+across keys, and never later than the phone's own clock) against rollback, and an
+expiry. The key list is read and the stored file re-verified on that lane after the screen
+is up, so none of it is on the main thread. The screen asks
+`MainActivity.activeSettings()` (the last accepted file, or nothing once it has
+expired) before drawing the notice cards, which sit in a bounded scrolling area
+(`BoundedScrollView`, at most 40% of the height that is left) so that no notice can
+push the chat list out of reach, and at the point of action before it starts or retries
+an image send, opens a photo or creates a group. It has no path to the engine, the vault, the relay client
+or the crypto code. The release process publishes it as a website-only release; see
+[the deployment guide](DEPLOYMENT-GUIDE.md#push-settings-over-the-air-no-app-build-no-play-upload)
+and [the threat model](THREAT-MODEL.md#signed-settings-changes-without-an-update-062).
+
 ## Account storage and roles
 
 The hosted dev/test deployment runs PostgreSQL on the existing `vanishr-dev` VM

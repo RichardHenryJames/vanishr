@@ -46,8 +46,8 @@ function Run-Package([hashtable]$Arguments) {
     return $capture
 }
 
-function Assert-Configured($Capture) {
-    $expected = & (Join-Path $root 'scripts\read-google-config.ps1') -Path (Join-Path $fixture 'expected.json')
+function Assert-Configured($Capture, [string]$ExpectedFile = 'expected.json') {
+    $expected = & (Join-Path $fixture 'scripts\read-google-config.ps1') -Path (Join-Path $fixture $ExpectedFile)
     foreach ($name in $names) {
         if ($Capture.$name -cne $expected[$name]) { throw 'The build did not receive the validated client setting.' }
     }
@@ -58,16 +58,25 @@ function Test-Case([string]$Name, [scriptblock]$Action) {
         $path = Join-Path $fixture $relative
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path }
     }
+    # The fixture always starts from the upload certificate alone, whatever the repository has registered for Google Play by now.
+    [IO.File]::WriteAllText((Join-Path $fixture 'scripts\google-certificates.json'),
+        '{"uploadSha1":"1bfcf77f9ae8c14a53fcd79ceee0e9d2a8f1c0ca","playAppSigningSha1":null}', [Text.UTF8Encoding]::new($false))
     & $Action
     $script:passed++
     Write-Output "PASS: $Name"
+}
+
+function Set-PlayCertificate($Sha1) {
+    $certificates = Get-Content -LiteralPath (Join-Path $fixture 'scripts\google-certificates.json') -Raw | ConvertFrom-Json
+    $certificates.playAppSigningSha1 = $Sha1
+    [IO.File]::WriteAllText((Join-Path $fixture 'scripts\google-certificates.json'), ($certificates | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
 }
 
 try {
     foreach ($directory in @('scripts', '.secrets\firebase', '.secrets\android-signing')) {
         New-Item -ItemType Directory -Path (Join-Path $fixture $directory) -Force | Out-Null
     }
-    foreach ($script in @('package-apk.ps1', 'read-google-config.ps1')) {
+    foreach ($script in @('package-apk.ps1', 'read-google-config.ps1', 'google-certificates.json')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination (Join-Path $fixture "scripts\$script")
     }
     [IO.File]::WriteAllText((Join-Path $fixture 'scripts\prepare-brand-assets.ps1'), 'param([switch]$Verify)')
@@ -125,6 +134,73 @@ throw 'Synthetic build boundary'
         $configuration.client[0].oauth_client = @($configuration.client[0].oauth_client[1])
         Write-Client 'google-services.json' $configuration
         Expect-Failure { & (Join-Path $fixture 'scripts\package-apk.ps1') } 'One Web OAuth client'
+    }
+    Test-Case 'Without a Google Play app-signing certificate only the upload client is allowed by the relay' {
+        Write-Client 'google-services.json'
+        $ids = (& (Join-Path $fixture 'scripts\read-google-config.ps1') -Path (Join-Path $fixture 'expected.json')).GOOGLE_ANDROID_CLIENT_IDS
+        if ($ids -cne '123456789012-android-fixture.apps.googleusercontent.com') { throw 'Unexpected relay allow-list.' }
+    }
+    Test-Case 'The repository certificate fingerprints are well formed' {
+        $certificates = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'google-certificates.json') -Raw | ConvertFrom-Json
+        if ($certificates.uploadSha1 -cnotmatch '\A[0-9a-f]{40}\z') { throw 'The upload certificate fingerprint is malformed.' }
+        if ($null -ne $certificates.playAppSigningSha1 -and ($certificates.playAppSigningSha1 -cnotmatch '\A[0-9a-f]{40}\z' -or
+                $certificates.playAppSigningSha1 -ceq $certificates.uploadSha1)) { throw 'The Google Play certificate fingerprint is malformed.' }
+    }
+    Test-Case 'A configured Google Play app-signing certificate must have its own Android OAuth client' {
+        Set-PlayCertificate ('ab' * 20)
+        Write-Client 'google-services.json'
+        Expect-Failure { & (Join-Path $fixture 'scripts\package-apk.ps1') } 'matching the Google Play app-signing certificate is required'
+    }
+    Test-Case 'Both Android OAuth clients reach the relay allow-list once Google Play signing is registered' {
+        Set-PlayCertificate ('ab' * 20)
+        $configuration = New-ClientConfiguration
+        $configuration.client[0].oauth_client += @{ client_type = 1; client_id = '123456789012-play-fixture.apps.googleusercontent.com'
+            android_info = @{ package_name = 'app.vanishr.android'; certificate_hash = ('AB' * 20) } }
+        Write-Client 'google-services.json' $configuration
+        Write-Client 'registered.json' $configuration
+        $settings = & (Join-Path $fixture 'scripts\read-google-config.ps1') -Path (Join-Path $fixture 'registered.json')
+        if ($settings.GOOGLE_ANDROID_CLIENT_IDS -cne '123456789012-android-fixture.apps.googleusercontent.com,123456789012-play-fixture.apps.googleusercontent.com') {
+            throw 'The relay allow-list does not contain both Android OAuth clients.'
+        }
+        Assert-Configured (Run-Package @{}) 'registered.json'
+    }
+    Test-Case 'The Google Play certificate cannot equal the upload certificate or be malformed' {
+        foreach ($bad in @('1bfcf77f9ae8c14a53fcd79ceee0e9d2a8f1c0ca', 'AB:CD', 'g' * 40)) {
+            Set-PlayCertificate $bad
+            Write-Client 'google-services.json'
+            Expect-Failure { & (Join-Path $fixture 'scripts\package-apk.ps1') } 'release certificate fingerprints are invalid'
+        }
+    }
+    Test-Case 'Two Android OAuth clients for the upload certificate are refused rather than guessed between' {
+        $configuration = New-ClientConfiguration
+        $configuration.client[0].oauth_client += @{ client_type = 1; client_id = '123456789012-other-fixture.apps.googleusercontent.com'
+            android_info = @{ package_name = 'app.vanishr.android'; certificate_hash = '1bfcf77f9ae8c14a53fcd79ceee0e9d2a8f1c0ca' } }
+        Write-Client 'google-services.json' $configuration
+        Expect-Failure { & (Join-Path $fixture 'scripts\package-apk.ps1') } 'matching the release certificate are required'
+    }
+    Test-Case 'Two Android OAuth clients for the Google Play certificate are refused too' {
+        Set-PlayCertificate ('ab' * 20)
+        $configuration = New-ClientConfiguration
+        foreach ($id in 'play-one', 'play-two') {
+            $configuration.client[0].oauth_client += @{ client_type = 1; client_id = "123456789012-$id-fixture.apps.googleusercontent.com"
+                android_info = @{ package_name = 'app.vanishr.android'; certificate_hash = ('ab' * 20) } }
+        }
+        Write-Client 'google-services.json' $configuration
+        Expect-Failure { & (Join-Path $fixture 'scripts\package-apk.ps1') } 'matching the Google Play app-signing certificate is required'
+    }
+    Test-Case 'The relay publish script on the VM accepts exactly the allow-lists this reader produces' {
+        # The reader joins the Android client IDs with commas and publish-azure.ps1 hands the result to infra\azure\install-artifact.sh, which
+        # checks it with jq before writing it to the relay's environment. A check that allows one ID only made the publish for Play fail.
+        $installer = Get-Content -LiteralPath (Join-Path $root 'infra\azure\install-artifact.sh') -Raw
+        $found = [regex]::Match($installer, '\(\.androidClientIds \| test\("(?<pattern>[^"]+)"\)\)')
+        if (-not $found.Success) { throw 'The relay publish script no longer checks the Android client allow-list.' }
+        $pattern = $found.Groups['pattern'].Value.Replace('\\', '\')
+        $one = '167823115834-abc_DEF-1.apps.googleusercontent.com'
+        $two = '167823115834-xyz-2.apps.googleusercontent.com'
+        foreach ($good in @($one, "$one,$two")) { if ($good -cnotmatch $pattern) { throw "The relay publish script would refuse a valid allow-list: $good" } }
+        foreach ($bad in @('', "$one,", ",$one", "$one, $two", "$one,$two,$one,$two", "$one`n", '999-abc.apps.googleusercontent.com', "$one;$two", "$one,evil.example.com")) {
+            if ($bad -cmatch $pattern) { throw "The relay publish script would accept an invalid allow-list: $bad" }
+        }
     }
     Test-Case 'Malformed configuration is rejected with a content-free error' {
         [IO.File]::WriteAllText((Join-Path $fixture 'google-services.json'), 'invalid-json-fixture')

@@ -114,6 +114,13 @@ first, including the absent Google/Firebase client configuration.
 4. Keep the default versions in [prepare-download.ps1](../scripts/prepare-download.ps1)
    and [prepare-website.ps1](../scripts/prepare-website.ps1) aligned, or always
    pass the explicit `-Version` as shown here.
+5. The signed settings file (`download/ota/settings.json`) goes out with every release. Bring `BUILD_ISSUED_FLOOR` in
+   [RemoteSettings.java](../android/app/src/main/java/app/vanishr/android/RemoteSettings.java) up to that file's
+   issue time: `.\scripts\sign-ota-settings.ps1 -Check` prints the value. [prepare-download.ps1](../scripts/prepare-download.ps1)
+   runs `-Check -AppRelease` first of all (it is also the first command of 4.3, so a forgotten floor costs a message
+   and not a rebuild) and stops if the floor is not exactly that value; a half-written
+   `download\ota\settings.json.new` left by an interrupted signing also stops it. See
+   [Push settings over the air](#push-settings-over-the-air-no-app-build-no-play-upload).
 
 ### 4.2 Verify and, only if needed, update the relay first
 
@@ -448,11 +455,18 @@ Also verify:
    are available and match the audited local hashes.
 3. Private/missing paths such as `/.secrets/`, `/.git/config`,
    `/.vercel/project.json` and a nonexistent page return 404, not private files.
-4. On an older direct-download app, use **My profile > Check for updates**.
+4. The signed settings file: `.\scripts\sign-ota-settings.ps1 -Check -Live -RequireIdentical` fetches `/ota/settings.json`
+   from the production origin and **fails** unless it is served as `application/json` with `no-store` and `noindex`, is
+   byte for byte the committed file, verifies under the public keys the app embeds, passes the app's rules and has not
+   expired. (Without `-RequireIdentical`, `-Live` is the check to run *before* a release, section 8: what is served
+   now is about to be replaced, so a missing, expired, unverifiable or oddly served file is only a warning, and it
+   fails only when the website serves a file that a trusted key signed and that is newer than the committed one,
+   which means this checkout is behind.)
+5. On an older direct-download app, use **My profile > Check for updates**.
    Confirm the new version, then test installation over the old app on an
    isolated device without losing its local state. An app already at the new
    code should correctly report that it is up to date.
-5. Save the real audit/public-verification JSON described in section 5 and
+6. Save the real audit/public-verification JSON described in section 5 and
    update [VERIFICATION.md](VERIFICATION.md) with measured results and limitations.
    Preserve the immutable stage. Remove only temporary downloaded verification
    copies when they are no longer needed, not release artifacts or evidence.
@@ -523,6 +537,119 @@ an APK/AAB, redeploy Azure or advertise a new app update just for a web edit.
    release audit. Existing users can open the revised full Terms page, but
    their native popup text/acceptance version is unchanged until an app update.
 
+### Push settings over the air (no app build, no Play upload)
+
+From 0.6.2 the app (both the direct-download and the Google Play build) reads a small signed settings file from the
+download site, at most once a day while it is open. It is **data**: a notice, off-switches for sending images, opening
+photos and creating groups, and a hint that a newer version is on Google Play. It never contains code (the Play policy
+forbids downloading executable code, and the threat model does not allow it), so it cannot fix a bug, change a screen or
+add a feature; that still needs a new app version. See [the threat model](THREAT-MODEL.md#signed-settings-changes-without-an-update-062).
+
+1. Edit [ota/settings.source.json](../ota/settings.source.json). It holds only what you decide:
+
+   ```json
+   {
+     "features": { "images": false, "photos": true, "groups": true },
+     "notice": {
+       "id": "2026-11-outage",
+       "title": "Photos are paused",
+       "body": "We are fixing a problem. Text messages are not affected.",
+       "level": "important",
+       "path": "/security/",
+       "build": "all"
+     },
+     "update": { "latestVersionCode": 44, "latestVersionName": "0.6.3", "minSupportedVersionCode": 42 }
+   }
+   ```
+
+   `features`: a switch is on unless it is `false`; the app knows `images` (sending an image in a chat), `photos`
+   (opening a photo in a chat, one you sent included, view-once included) and `groups` (creating a group). They do not
+   cover profile photos or the administrator's remote-photo feature. The signing script refuses any other name; a new
+   switch needs a new app version that consults it. `notice`: `id` (1 to 40 letters, digits, dot, dash, underscore; a new id shows again
+   to people who dismissed the old one), `title` (60 characters, one line), `body` (400 characters, at most six line
+   breaks), `level` (`info` or `important`), optional `path` (a *page* on the download site, such as `/security/`:
+   letters, digits, dashes and underscores in up to four segments, no dots, so never a file such as the APK; nothing
+   else can be linked), optional `build` (`all`, `play` or `direct`) and `minVersionCode` / `maxVersionCode`. Plain
+   visible text only: control characters, line and paragraph separators, "format" characters (zero-width,
+   bidirectional, soft hyphen), private-use and noncharacter code points and blank text are refused. The rule goes by
+   Unicode category, so characters that merely draw as nothing, such as the braille blank U+2800, the Hangul fillers
+   or a run of no-break spaces, are *not* refused: read the notice the way it will look. The source file is read as
+   strict JSON: comments, trailing commas, a name written twice and anything else that is not plain JSON stop the
+   signing instead of being guessed at.
+   The notice is shown in an area of at most 40% of the screen that scrolls, so keep it short. `update` is only used by
+   Play builds (the direct build has its own prompt): for an installed version *below* `latestVersionCode` it shows
+   "Update available" (dismissable; a hint about any *other* version shows again, so a mistyped one can be corrected),
+   and below `minSupportedVersionCode` a card
+   that cannot be dismissed. It never blocks the app. Use `"notice": null` / `"update": null` for none. A notice and the
+   update card are dismissed separately.
+2. Sign it: `.\scripts\sign-ota-settings.ps1`. It checks every rule the app applies ([ota-settings-rules.ps1](../scripts/ota-settings-rules.ps1),
+   tested against the same cases as the app's unit tests), adds the schema, the next sequence number (above the
+   committed file *and* the live one, if a key the app trusts signed it: an unverifiable live file is reported and
+   never counted), the issue time and an expiry (45 days, `-ValidDays` up to 60), signs with the key
+   under `.secrets\ota-signing`, checks its own signature with the public key the app embeds, and writes
+   [download/ota/settings.json](../download/ota/settings.json). A source that breaks a rule changes nothing. It never dates
+   the file earlier than the newest file it knows of (committed, or live and verified) or than the app's
+   `BUILD_ISSUED_FLOOR`, because a phone ignores a file issued before one it has already taken. If this computer's clock
+   is behind that time by up to 36 hours it dates the file at that time instead and says so; behind by more, it stops
+   (see **If the signing computer's clock was wrong**, below). `-Offline`
+   skips reading the live file. `.\scripts\sign-ota-settings.ps1 -Check` verifies the current file against the app's
+   keys and rules, fails if it was issued before the app's `BUILD_ISSUED_FLOOR`, prints the value that floor should
+   have in the next app version, and warns when the file expires within a week or is dated ahead of this computer's
+   clock. `-Check -Live` also compares it with
+   what the website serves now, **before** publishing: it catches a checkout that is behind (a verified newer file is
+   live) and only warns about anything else wrong with what is live, because the release replaces it. After the
+   release, `-Check -Live -RequireIdentical` demands that the website serves exactly the committed file, properly
+   served and in force (section 7). `-Sequence <n>` chooses the number by hand and exists only for recovery (below).
+3. Commit `ota/settings.source.json` and `download/ota/settings.json`.
+4. Publish it as a **website-only release** (section 8): `prepare-website.ps1` stages the file with the pages (and
+   refuses, before it creates the stage, to stage one that fails `-Check`, expired included; so does
+   `prepare-download.ps1`, which also requires the app's floor to be up to date, see 4.1), section 5 audits the stage, section 6 deploys it, and
+   section 7 verifies it (item 4 there: served as `application/json` with `no-store`, identical to the committed file,
+   verifying under the app's public key). The APK and the Play bundle are untouched.
+5. Phones pick it up within a day (a failed check is retried after two hours). My profile shows `Settings <sequence>,
+   valid until <date>` on a phone that has it, and `Settings: as built` on one that does not.
+
+Things to remember: every file **expires** (the app then behaves as built, which is the safe state, and a switch that
+was turned off comes back on), so sign and publish a fresh one before the date even when nothing changed; the release
+gate (`verify.ps1`) runs `-Check`, and staging refuses an expired file. Never publish an older file again (a phone
+keeps the highest sequence it has seen for the key *and* the newest issue time it has seen, and ignores anything not
+higher or issued earlier), so to undo a change publish the
+earlier content with a new, higher sequence. The signing key is not recoverable: `.secrets\ota-signing` holds the
+encrypted key *and* the password that opens it, so protect and back up the folder as a whole. `new-ota-key.ps1`
+restricts the folder, and each file in it, to your Windows user every time it runs, reads the result back and stops
+if anybody else could still reach it. A folder that an earlier version of the script created needs this once:
+`.\scripts\new-ota-key.ps1 -RestrictOnly` (it blocks inheritance, leaves only your user, creates no key and prints
+nothing secret). Keep the backup of the password apart from the backup of the key if you can.
+
+**If the signing computer's clock was wrong.** The issue time is what keeps an older file from being put back, so the
+tool takes it from the computer's clock but never lets it go backwards. A clock that was a little fast when a file was
+signed (so the file is dated ahead) needs nothing: for up to 36 hours the next file is simply dated at the same
+time, and the tool prints a warning, as `-Check` does for a file that is dated ahead. If the tool stops with a message
+that a file is dated *more* than 36 hours after this computer's clock, one of two things happened, and it cannot tell
+which: this computer's clock is behind (correct it and run again; do not get around it), or that file was signed
+while a clock was fast, in which case no phone with a right clock has taken it *yet*: a phone takes a file once real
+time is within 36 hours of its date. Check the clock. Only if it is right, run
+the same command with `-IgnoreFutureIssueTime`: the file dated far ahead is set aside, the new file is dated now, and
+its sequence number still counts on from the one that was set aside. **Publish the new file before the time the tool
+prints** (36 hours before the old file's date): a phone that takes the old file first holds a later time than the new
+one and ignores it until a file dated after that time is published. Use the switch with `-Check -Live` as well if a
+file like that is still being served (the same-key sequence rule still applies to it). It never sets aside a file
+dated within 36 hours, and it does nothing about
+the app's floor (a floor more than 36 hours ahead of the clock is corrected in `RemoteSettings.java`, or waited out).
+
+**If the key is lost or may have been copied:** there is no remote revocation (that would be a remote control channel).
+Create a new key with `.\scripts\new-ota-key.ps1`, which adds its public half to
+[ota_keys.txt](../android/app/src/main/res/raw/ota_keys.txt) (up to three keys are accepted, so a new key can ship in
+one app version before the old one is removed), release a new app version (a new bundle for Google Play) and sign with
+the new key. The sequence floor on a phone belongs to the key, so the new key is not held back by a number the old one
+used up, and the signing tool counts on from the committed file even though its key is no longer listed; if the
+committed file's number cannot go up (it is at the maximum, 1,000,000), pass `-Sequence 1` or any number you choose.
+Phones that have not updated keep trusting the old key until they do. `BUILD_ISSUED_FLOOR` in `RemoteSettings.java` is
+the issue time of the newest published file as of the release: when cutting an app version, set it to the value
+`-Check` prints (the committed file's issue time) so that an old signed file cannot be offered to a fresh install.
+`prepare-download.ps1` runs `-Check -AppRelease`, which stops the release if the floor is not exactly that value;
+`-Check` alone fails if the committed file was issued before the floor.
+
 ## 9. Quick troubleshooting
 
 | Symptom | Check |
@@ -535,3 +662,5 @@ an APK/AAB, redeploy Azure or advertise a new app update just for a web edit.
 | Website preparation says verified release evidence is missing | Complete the genuine stage audit and anonymous publication checks, or restore their existing records. Do not invent successful evidence. |
 | Website text changed but native popup did not | Edit the native policy source and release a new signed app; web HTML is not the popup's text source. |
 | Vercel succeeded but Google Play is unchanged | Upload/review/roll out the Play AAB separately, subject to [Play readiness gates](PLAY-STORE.md). |
+| Phones do not show a new notice | Run `.\scripts\sign-ota-settings.ps1 -Check -Live -RequireIdentical`: the file the website serves must be 200, JSON, `no-store`, `noindex`, exactly the committed file, verify under the app's keys, pass the app's rules and not be expired (a signature, expiry, key or rule problem makes every phone ignore it silently). The app looks at most once a day while open; My profile shows the sequence it holds. A file with a sequence no higher than the phone's for that key, or issued earlier than a file the phone already took, is ignored. |
+| Google sign-in says "cancelled" on a Google Play install only | The Play app-signing certificate is not registered for Google sign-in, see [GOOGLE-SETUP.md](GOOGLE-SETUP.md#phone-installs-from-google-play-play-app-signing). It is configuration, not a defect in the bundle. |

@@ -584,6 +584,8 @@ public class ReleaseWorkflowTest {
         assertEquals("app.vanishr.android", context.getPackageName());
         assertEquals("Do not substitute a QA/debug APK", 0, context.getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE);
         assertEquals(0, context.getApplicationInfo().flags & ApplicationInfo.FLAG_ALLOW_BACKUP);
+        // The release gate must not depend on what the live settings file says today, so no daily check is due during this run.
+        assertTrue(context.getSharedPreferences("remote-settings", Context.MODE_PRIVATE).edit().clear().putLong("last-check", System.currentTimeMillis()).commit());
         String pin = arguments.getString("devicePin");
         assertTrue("A temporary dedicated-emulator credential is required", pin != null && pin.matches("[0-9]{6}"));
         assertTrue(context.getSystemService(KeyguardManager.class).isDeviceSecure());

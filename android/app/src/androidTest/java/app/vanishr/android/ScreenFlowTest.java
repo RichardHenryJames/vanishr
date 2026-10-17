@@ -49,6 +49,9 @@ public class ScreenFlowTest {
         resetQaFixture();
         assertTrue(context.getSharedPreferences("updates", Context.MODE_PRIVATE).edit().clear()
             .putLong("last-check", System.currentTimeMillis()).commit());
+        // The signed settings are not fetched from the real download site by a test that is about something else.
+        assertTrue(context.getSharedPreferences("remote-settings", Context.MODE_PRIVATE).edit().clear()
+            .putLong("last-check", System.currentTimeMillis()).commit());
         createFixtureKey(AndroidVault.MASTER);
         vault = new AndroidVault(context); vault.unlock(); engine = new ChatEngine(vault);
         Bitmap image = Bitmap.createBitmap(720, 480, Bitmap.Config.ARGB_8888);
@@ -68,6 +71,7 @@ public class ScreenFlowTest {
         if (photo != null) Arrays.fill(photo, (byte) 0);
         resetQaFixture();
         assertTrue(context.getSharedPreferences("updates", Context.MODE_PRIVATE).edit().clear().commit());
+        assertTrue(context.getSharedPreferences("remote-settings", Context.MODE_PRIVATE).edit().clear().commit());
     }
 
     private void resetQaFixture() throws Exception {
@@ -6045,6 +6049,590 @@ public class ScreenFlowTest {
     }
 
     // ==== end 0.6.1 ====
+
+    // ==== 0.6.2: signed settings that change without a new version ====
+
+    private static final long HOUR_MS = 3_600_000L, DAY_MS = 24 * HOUR_MS;
+
+    private RemoteSettings.Settings remoteSettings(Set<RemoteSettings.Flag> off, RemoteSettings.Notice notice, RemoteSettings.Update update) {
+        long now = System.currentTimeMillis();
+        return new RemoteSettings.Settings("test", 9, now - HOUR_MS, now + DAY_MS, off, notice, update);
+    }
+
+    private RemoteSettings.Notice remoteNotice(String id, boolean important, String path) {
+        return new RemoteSettings.Notice(id, "Heads up " + id, "A notice " + id + " from the owner.", important, path,
+                RemoteSettings.Build.ALL, 0, Integer.MAX_VALUE);
+    }
+
+    private boolean hasText(MainActivity activity, String value) {
+        return descendants(root(activity)).stream().anyMatch(view -> view instanceof TextView label && value.contentEquals(label.getText()));
+    }
+
+    // Stands in for the browser: it matches only a browsable view of exactly this https page, and keeps it from really opening.
+    private android.app.Instrumentation.ActivityMonitor pageMonitor(String host, String path) {
+        android.content.IntentFilter filter = new android.content.IntentFilter(android.content.Intent.ACTION_VIEW);
+        filter.addCategory(android.content.Intent.CATEGORY_BROWSABLE);
+        filter.addDataScheme("https");
+        filter.addDataAuthority(host, null);
+        filter.addDataPath(path, android.os.PatternMatcher.PATTERN_LITERAL);
+        return InstrumentationRegistry.getInstrumentation().addMonitor(filter, null, true);
+    }
+
+    // The signed settings are read on a background lane once the screen is up; a test waits for that before it puts its own in place.
+    private ActivityScenario<MainActivity> launchSettled() throws Exception {
+        ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class);
+        awaitMainCondition(scenario, activity -> (boolean) readField(activity, "settingsLoaded"));
+        return scenario;
+    }
+
+    @Test public void theEmbeddedKeysAreLoadedAfterTheScreenIsUpAndAStoredFileIsCheckedAgainstThemOnStart() throws Exception {
+        signedInFixture(); conversationsFixture();
+        java.security.KeyPairGenerator generator = java.security.KeyPairGenerator.getInstance("EC");
+        generator.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"));
+        byte[] foreign = signedSettings(generator.generateKeyPair(), "t1", 7,
+                "\"notice\":{\"id\":\"x\",\"title\":\"Not from the owner\",\"body\":\"Signed by somebody else.\",\"level\":\"important\"}");
+        assertTrue(context.getSharedPreferences("remote-settings", Context.MODE_PRIVATE).edit()
+                .putString("envelope", new String(foreign, StandardCharsets.UTF_8)).putLong("floor.t1", 7).commit());
+        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        try (java.io.InputStream list = context.getResources().openRawResource(R.raw.ota_keys)) {
+            byte[] chunk = new byte[1024];
+            for (int read; (read = list.read(chunk)) > 0; ) bytes.write(chunk, 0, read);
+        }
+        Map<String, java.security.PublicKey> shipped = RemoteSettings.keys(new String(bytes.toByteArray(), StandardCharsets.UTF_8));
+        assertFalse("The app ships at least one key", shipped.isEmpty());
+        assertTrue("and at most three", shipped.size() <= 3);
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                assertEquals("The keys in use are the ones the app ships", shipped, readField(activity, "settingsKeys"));
+                assertEquals("A stored file signed by anybody else is not in force", 0, ((RemoteSettings.Settings) readField(activity, "remote")).sequence());
+                assertFalse(hasText(activity, "Not from the owner"));
+            });
+        }
+    }
+
+    @Test public void aSignedNoticeShowsOnTheChatListOpensAPageOnTheDownloadSiteAndStaysDismissed() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var monitor = pageMonitor("vanishr-download.vercel.app", "/security/");
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                assertFalse("Nothing is shown until settings have been accepted", hasText(activity, "Heads up n1"));
+                setField(activity, "remote", remoteSettings(Set.of(), remoteNotice("n1", false, "/security/"), null));
+                inject(activity);
+                assertTrue(hasText(activity, "Heads up n1"));
+                assertTrue(hasText(activity, "A notice n1 from the owner."));
+                assertTrue(hasText(activity, "Dismiss"));
+                text(root(activity), "Learn more").performClick();
+            });
+            assertEquals("Learn more opens exactly that page on the download site", 1, monitor.getHits());
+            snapshot(scenario, "70-signed-notice");
+            scenario.onActivity(activity -> {
+                text(root(activity), "Dismiss").performClick();
+                assertEquals("n1", context.getSharedPreferences("remote-settings", Context.MODE_PRIVATE).getString("dismissed-notice", ""));
+                assertFalse(hasText(activity, "Heads up n1"));
+                invoke(activity, "render");
+                assertFalse("A dismissed notice stays dismissed when the screen is drawn again", hasText(activity, "Heads up n1"));
+                setField(activity, "remote", remoteSettings(Set.of(), remoteNotice("n2", true, null), null));
+                invoke(activity, "render");
+                assertTrue("A different notice is shown", hasText(activity, "Heads up n2"));
+                assertFalse("No path, no link", hasText(activity, "Learn more"));
+                setField(activity, "remote", RemoteSettings.Settings.NONE);
+                invoke(activity, "render");
+                assertFalse(hasText(activity, "Heads up n2"));
+            });
+        } finally { InstrumentationRegistry.getInstrumentation().removeMonitor(monitor); }
+    }
+
+    @Test public void aNoticeForTheOtherBuildOrAnExpiredFileIsNotShown() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                long now = System.currentTimeMillis();
+                RemoteSettings.Notice forPlay = new RemoteSettings.Notice("p", "Only for Play", "Body", false, null, RemoteSettings.Build.PLAY, 0, Integer.MAX_VALUE);
+                setField(activity, "remote", remoteSettings(Set.of(), forPlay, null));
+                inject(activity);
+                assertFalse("This build is not a Google Play build", hasText(activity, "Only for Play"));
+                setField(activity, "playBuild", true);
+                invoke(activity, "render");
+                assertTrue(hasText(activity, "Only for Play"));
+                RemoteSettings.Notice newer = new RemoteSettings.Notice("v", "Only for newer", "Body", false, null, RemoteSettings.Build.ALL, BuildConfig.VERSION_CODE + 1, Integer.MAX_VALUE);
+                setField(activity, "remote", remoteSettings(Set.of(), newer, null));
+                invoke(activity, "render");
+                assertFalse("Not for this version", hasText(activity, "Only for newer"));
+                setField(activity, "remote", new RemoteSettings.Settings("test", 9, now - 2 * DAY_MS, now - 1, Set.of(RemoteSettings.Flag.GROUPS), remoteNotice("old", false, null), null));
+                invoke(activity, "render");
+                assertFalse("A file stops counting the moment it expires", hasText(activity, "Heads up old"));
+                assertTrue((boolean) invoke(activity, "allowed", new Class<?>[]{RemoteSettings.Flag.class}, RemoteSettings.Flag.GROUPS));
+            });
+        }
+    }
+
+    @Test public void aNewerVersionIsHintedAtOnlyOnGooglePlayBuildsAndAnUnsupportedOneCannotBeDismissed() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var monitor = pageMonitor("play.google.com", "/store/apps/details");
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                RemoteSettings.Update available = new RemoteSettings.Update(BuildConfig.VERSION_CODE + 1, "9.9.9", 0);
+                setField(activity, "remote", remoteSettings(Set.of(), null, available));
+                inject(activity);
+                assertFalse("The direct-download build has its own update prompt", hasText(activity, "Update available"));
+                setField(activity, "playBuild", true);
+                invoke(activity, "render");
+                assertTrue(hasText(activity, "Update available"));
+                assertTrue(hasText(activity, "Vanishr 9.9.9 is on Google Play."));
+                text(root(activity), "Open Google Play").performClick();
+                text(root(activity), "Dismiss").performClick();
+                assertFalse(hasText(activity, "Update available"));
+                invoke(activity, "render");
+                assertFalse("A dismissed hint stays dismissed", hasText(activity, "Update available"));
+                RemoteSettings.Update unsupported = new RemoteSettings.Update(BuildConfig.VERSION_CODE + 1, "9.9.9", BuildConfig.VERSION_CODE + 1);
+                setField(activity, "remote", remoteSettings(Set.of(), null, unsupported));
+                invoke(activity, "render");
+                assertTrue(hasText(activity, "Please update Vanishr"));
+                assertFalse("Not dismissible", hasText(activity, "Dismiss"));
+                assertTrue(hasText(activity, "Open Google Play"));
+                assertTrue("Chats are still listed: it is a notice, not a lock", hasText(activity, "Aarav Mehta"));
+            });
+            assertEquals("Open Google Play goes to the app's own listing", 1, monitor.getHits());
+        } finally { InstrumentationRegistry.getInstrumentation().removeMonitor(monitor); }
+    }
+
+    @Test public void theSignedSettingsCanTurnOffCreatingGroupsSendingImagesAndOpeningPhotosOnlyByName() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry photoOnce = entry(false, null, photo, ChatEnvelope.Expiry.VIEW_ONCE, "DELIVERED", -5_000);
+        assertEquals("Sending images is turned off for now. Text messages still work.", RemoteSettings.Flag.IMAGES.refusal);
+        assertEquals("Opening photos is turned off for now.", RemoteSettings.Flag.PHOTOS.refusal);
+        assertEquals("Creating groups is turned off for now.", RemoteSettings.Flag.GROUPS.refusal);
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                setField(activity, "remote", remoteSettings(Set.of(), null, null));
+                inject(activity);
+                invoke(activity, "newGroupDialog");
+                assertNotNull("Everything is on unless the signed settings say otherwise", dialog(activity));
+                assertNotNull(text(dialog(activity).getWindow().getDecorView(), "New group"));
+                invoke(activity, "dismissContent");
+                invoke(activity, "viewContent", new Class<?>[]{ChatEngine.Entry.class}, photoOnce);
+                assertNotNull("A view-once photo asks first", dialog(activity));
+                assertNotNull(text(dialog(activity).getWindow().getDecorView(), "View once"));
+                invoke(activity, "dismissContent");
+                setField(activity, "selectedPeer", peerId); invoke(activity, "render");
+                invoke(activity, "attachmentDialog");
+                assertNotNull(text(dialog(activity).getWindow().getDecorView(), "Send an image"));
+                invoke(activity, "dismissContent");
+                setField(activity, "remote", remoteSettings(EnumSet.of(RemoteSettings.Flag.IMAGES), null, null));
+                invoke(activity, "attachmentDialog");
+                assertNull("Images are off: no picker", dialog(activity));
+                assertFalse("A queued photo is refused too, whatever started it", (boolean) invoke(activity, "enqueueSend",
+                        new Class<?>[]{ChatEngine.Peer.class, String.class, byte[].class, ChatEnvelope.Expiry.class}, peer, null, new byte[]{1, 2, 3}, ChatEnvelope.Expiry.HOUR_1));
+                assertTrue(((List<?>) readField(activity, "pendingSends")).isEmpty());
+                setField(activity, "remote", remoteSettings(EnumSet.of(RemoteSettings.Flag.PHOTOS), null, null));
+                invoke(activity, "viewContent", new Class<?>[]{ChatEngine.Entry.class}, photoOnce);
+                assertNull("Photos are off: the view-once photo is not even offered", dialog(activity));
+                setField(activity, "selectedPeer", null); invoke(activity, "render");
+                setField(activity, "remote", remoteSettings(EnumSet.of(RemoteSettings.Flag.GROUPS), null, null));
+                invoke(activity, "newGroupDialog");
+                assertNull("Groups are off: no new group", dialog(activity));
+                setField(activity, "remote", remoteSettings(EnumSet.of(RemoteSettings.Flag.GROUPS), null, null));
+                invoke(activity, "attachmentDialog");
+                assertNotNull("Turning one feature off leaves the others alone", dialog(activity));
+                invoke(activity, "dismissContent");
+                assertTrue("Turning photos off did not use up the view-once photo", engine.hasEntry(photoOnce.id()));
+                assertEquals("DELIVERED", engine.entry(photoOnce.id()).state());
+            });
+        }
+    }
+
+    @Test public void theProfileShowsWhichSettingsAreInForce() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                inject(activity); invoke(activity, "accountDialog");
+                assertNotNull(text(dialog(activity).getWindow().getDecorView(), "Settings: as built"));
+                invoke(activity, "dismissContent");
+                setField(activity, "remote", remoteSettings(Set.of(), null, null));
+                invoke(activity, "accountDialog");
+                assertTrue(descendants(dialog(activity).getWindow().getDecorView()).stream().anyMatch(view -> view instanceof TextView label
+                        && label.getText().toString().startsWith("Settings 9, valid until ")));
+            });
+        }
+    }
+
+    private byte[] signedSettings(java.security.KeyPair pair, String keyId, long sequence, String extra) throws Exception {
+        // An hour ago, as the signing tool would have it, but never before the floor this build holds every file to.
+        return signedSettings(pair, keyId, sequence, Math.max(System.currentTimeMillis() - HOUR_MS, RemoteSettings.BUILD_ISSUED_FLOOR), extra);
+    }
+
+    private byte[] signedSettings(java.security.KeyPair pair, String keyId, long sequence, long issuedAt, String extra) throws Exception {
+        long now = System.currentTimeMillis();
+        byte[] payload = ("{\"schema\":1,\"sequence\":" + sequence + ",\"issuedAt\":" + issuedAt + ",\"expiresAt\":" + (Math.max(now, issuedAt) + DAY_MS)
+                + (extra.isEmpty() ? "" : "," + extra) + "}").getBytes(StandardCharsets.UTF_8);
+        java.security.Signature signature = java.security.Signature.getInstance("SHA256withECDSA");
+        signature.initSign(pair.getPrivate());
+        signature.update("vanishr-ota-settings-v1\0".getBytes(StandardCharsets.US_ASCII));
+        signature.update(payload);
+        java.util.Base64.Encoder encoder = java.util.Base64.getUrlEncoder().withoutPadding();
+        return ("{\"v\":1,\"key\":\"" + keyId + "\",\"payload\":\"" + encoder.encodeToString(payload) + "\",\"sig\":\"" + encoder.encodeToString(signature.sign()) + "\"}")
+                .getBytes(StandardCharsets.UTF_8);
+    }
+
+    @Test public void theDailyCheckFetchesVerifiesAndAppliesSettingsAndIgnoresAnythingElse() throws Exception {
+        signedInFixture(); conversationsFixture();
+        java.security.KeyPairGenerator generator = java.security.KeyPairGenerator.getInstance("EC");
+        generator.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"));
+        java.security.KeyPair owner = generator.generateKeyPair(), stranger = generator.generateKeyPair();
+        java.util.concurrent.atomic.AtomicReference<byte[]> served = new java.util.concurrent.atomic.AtomicReference<>(
+                signedSettings(owner, "t1", 3, "\"notice\":{\"id\":\"first\",\"title\":\"From the signed file\",\"body\":\"Accepted.\",\"level\":\"info\"}"));
+        java.util.concurrent.atomic.AtomicInteger requests = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicBoolean offline = new java.util.concurrent.atomic.AtomicBoolean();
+        okhttp3.OkHttpClient transport = new okhttp3.OkHttpClient.Builder().addInterceptor(chain -> {
+            requests.incrementAndGet();
+            assertEquals(RemoteSettings.URL, chain.request().url().toString());
+            assertNull(chain.request().header("Authorization"));
+            assertNull(chain.request().header("Cookie"));
+            if (offline.get()) throw new IOException("Offline");
+            return new okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("OK")
+                    .body(okhttp3.ResponseBody.create(served.get(), okhttp3.MediaType.get("application/json"))).build();
+        }).build();
+        android.content.SharedPreferences stored = context.getSharedPreferences("remote-settings", Context.MODE_PRIVATE);
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                setField(activity, "settingsKeys", Map.of("t1", owner.getPublic()));
+                setField(activity, "settingsSource", (java.util.function.Supplier<RemoteSettings>) () -> new RemoteSettings(transport));
+                inject(activity);
+                invoke(activity, "checkRemoteSettings");
+                assertEquals("Checked a moment ago, so nothing is asked of the network", 0, requests.get());
+            });
+            Runnable due = () -> assertTrue(stored.edit().putLong("last-check", 0).commit());
+            java.util.function.Consumer<byte[]> check = body -> {
+                served.set(body); due.run();
+                try {
+                    scenario.onActivity(activity -> invoke(activity, "checkRemoteSettings"));
+                    awaitMainCondition(scenario, activity -> !(boolean) readField(activity, "checkingSettings"));
+                } catch (Exception failure) { throw new AssertionError(failure); }
+            };
+            java.util.function.IntSupplier sequence = () -> {
+                int[] value = new int[1];
+                scenario.onActivity(activity -> value[0] = (int) ((RemoteSettings.Settings) readField(activity, "remote")).sequence());
+                return value[0];
+            };
+
+            check.accept(served.get());
+            assertEquals(1, requests.get());
+            assertEquals("A signed file from the owner's key is applied", 3, sequence.getAsInt());
+            scenario.onActivity(activity -> assertTrue(hasText(activity, "From the signed file")));
+            assertEquals(3, stored.getLong("floor.t1", 0));
+            assertNotNull(stored.getString("envelope", null));
+            assertTrue("Checked now", !RemoteSettings.due(System.currentTimeMillis(), stored.getLong("last-check", 0)));
+            scenario.onActivity(activity -> invoke(activity, "checkRemoteSettings"));
+            assertEquals("Not asked again within the day", 1, requests.get());
+
+            check.accept(signedSettings(owner, "t1", 2, "\"features\":{\"images\":false}"));
+            assertEquals(2, requests.get());
+            assertEquals("An older signed file is not put back", 3, sequence.getAsInt());
+            assertEquals(3, stored.getLong("floor.t1", 0));
+            assertTrue("...and the check counts as done", !RemoteSettings.due(System.currentTimeMillis(), stored.getLong("last-check", 0)));
+
+            byte[] tampered = signedSettings(owner, "t1", 5, "\"features\":{\"images\":false}");
+            tampered[tampered.length - 20] ^= 1;
+            for (byte[] refused : List.of(tampered, signedSettings(stranger, "t1", 5, "\"features\":{\"images\":false}"),
+                    signedSettings(owner, "unknown", 5, "\"features\":{\"images\":false}"), "<html>not settings</html>".getBytes(StandardCharsets.UTF_8))) {
+                check.accept(refused);
+                assertEquals("Refused whole: the settings in force are unchanged", 3, sequence.getAsInt());
+                long lastCheck = stored.getLong("last-check", 0), asOf = System.currentTimeMillis();
+                assertFalse("A failure is not retried at once...", RemoteSettings.due(asOf, lastCheck));
+                assertTrue("...but in about two hours", RemoteSettings.due(asOf + RemoteSettings.RETRY_INTERVAL + 60_000, lastCheck));
+            }
+            int before = requests.get();
+            offline.set(true);
+            check.accept(served.get());
+            assertEquals(before + 1, requests.get());
+            assertEquals("Offline changes nothing and shows nothing", 3, sequence.getAsInt());
+            scenario.onActivity(activity -> assertTrue(hasText(activity, "From the signed file")));
+            offline.set(false);
+
+            check.accept(signedSettings(owner, "t1", 4, "\"features\":{\"images\":false}"));
+            assertEquals(4, sequence.getAsInt());
+            scenario.onActivity(activity -> {
+                assertFalse(((RemoteSettings.Settings) readField(activity, "remote")).enabled(RemoteSettings.Flag.IMAGES));
+                assertFalse("The notice of the file that replaced it is gone", hasText(activity, "From the signed file"));
+            });
+            assertEquals(4, stored.getLong("floor.t1", 0));
+
+            // What is stored is checked again whenever it is loaded.
+            long now = System.currentTimeMillis();
+            RemoteSettingsStore store = new RemoteSettingsStore(stored);
+            assertEquals(4, store.load(Map.of("t1", owner.getPublic()), now).sequence());
+            assertEquals("Under another key it no longer counts", 0, store.load(Map.of("t1", stranger.getPublic()), now).sequence());
+            assertEquals("Once expired it no longer counts", 0, store.load(Map.of("t1", owner.getPublic()), now + 3 * DAY_MS).sequence());
+            String envelope = stored.getString("envelope", "");
+            assertTrue(stored.edit().putString("envelope", envelope.replace("\"v\":1", "\"v\":2")).commit());
+            assertEquals("A changed file on the phone is not used", 0, store.load(Map.of("t1", owner.getPublic()), now).sequence());
+            assertTrue(stored.edit().putString("envelope", envelope).commit());
+            assertEquals(4, store.load(Map.of("t1", owner.getPublic()), now).sequence());
+            assertFalse("The same sequence again is not newer", store.accept(envelope.getBytes(StandardCharsets.UTF_8), store.load(Map.of("t1", owner.getPublic()), now), now));
+        }
+    }
+
+    @Test public void aNoticeCanNeverPushTheChatListOutOfReachWhateverItSays() throws Exception {
+        signedInFixture(); conversationsFixture();
+        // A notice the verifier would refuse, on purpose: the layout has to hold by itself and not only because of the text rules.
+        RemoteSettings.Notice huge = new RemoteSettings.Notice("big", "T".repeat(60), "x" + "\n".repeat(398) + "y", true, "/security/",
+                RemoteSettings.Build.ALL, 0, Integer.MAX_VALUE);
+        RemoteSettings.Update unsupported = new RemoteSettings.Update(BuildConfig.VERSION_CODE + 1, "9.9.9", BuildConfig.VERSION_CODE + 1);
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                setField(activity, "playBuild", true);
+                setField(activity, "remote", remoteSettings(Set.of(), huge, unsupported));
+                inject(activity);
+            });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            snapshot(scenario, "71-long-notice");
+            scenario.onActivity(activity -> {
+                android.widget.ScrollView area = (android.widget.ScrollView) readField(activity, "noticeArea");
+                View screen = root(activity);
+                View list = (View) ((View) readField(activity, "contactRows")).getParent();
+                assertTrue("The notice is shown", area.getHeight() > 0);
+                assertTrue("It never takes more than 40% of the screen: " + area.getHeight() + " of " + screen.getHeight(), area.getHeight() <= screen.getHeight() * .4f + 1);
+                assertTrue("It does not fit, so it scrolls", area.getChildAt(0).getHeight() > area.getHeight());
+                assertTrue("The chat list keeps a good part of the screen: " + list.getHeight() + " of " + screen.getHeight(), list.getHeight() >= screen.getHeight() * .3f);
+                assertTrue("and is on screen", list.getGlobalVisibleRect(new android.graphics.Rect()));
+                assertTrue(hasText(activity, "Aarav Mehta"));
+                area.scrollTo(0, area.getChildAt(0).getHeight());
+            });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                android.widget.ScrollView area = (android.widget.ScrollView) readField(activity, "noticeArea");
+                assertTrue("Scrolled to its end, the card under the notice can be reached", area.getScrollY() > 0);
+                View update = text(root(activity), "Open Google Play");
+                android.graphics.Rect visible = new android.graphics.Rect();
+                assertTrue(update.getGlobalVisibleRect(visible) && visible.height() >= update.getHeight() / 2);
+            });
+        }
+    }
+
+    @Test public void aNoticeAndAnUpdateHintAreDismissedSeparatelyAndStayDismissed() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                setField(activity, "playBuild", true);
+                RemoteSettings.Update available = new RemoteSettings.Update(BuildConfig.VERSION_CODE + 1, "9.9.9", 0);
+                setField(activity, "remote", remoteSettings(Set.of(), remoteNotice("n1", false, null), available));
+                inject(activity);
+                assertTrue(hasText(activity, "Heads up n1"));
+                assertTrue(hasText(activity, "Update available"));
+                text(root(activity), "Dismiss").performClick();
+                assertFalse("The notice is gone", hasText(activity, "Heads up n1"));
+                assertTrue("The update hint is not", hasText(activity, "Update available"));
+                invoke(activity, "render");
+                assertFalse(hasText(activity, "Heads up n1"));
+                assertTrue("Drawn again, only the notice is still gone", hasText(activity, "Update available"));
+                text(root(activity), "Dismiss").performClick();
+                assertFalse(hasText(activity, "Update available"));
+                assertFalse("Dismissing the hint did not bring the notice back", hasText(activity, "Heads up n1"));
+                invoke(activity, "render");
+                assertFalse(hasText(activity, "Heads up n1"));
+                assertFalse(hasText(activity, "Update available"));
+                RemoteSettings.Update later = new RemoteSettings.Update(BuildConfig.VERSION_CODE + 2, "9.9.10", 0);
+                setField(activity, "remote", remoteSettings(Set.of(), remoteNotice("n2", false, null), later));
+                invoke(activity, "render");
+                assertTrue("A different notice is shown", hasText(activity, "Heads up n2"));
+                assertTrue("and so is a hint about a later version", hasText(activity, "Vanishr 9.9.10 is on Google Play."));
+                // The hint about exactly this version is what stays dismissed. Anything else the owner publishes next is shown, an earlier
+                // version included, so that a hint with a mistyped version, once dismissed, does not silence the corrected one.
+                setField(activity, "remote", remoteSettings(Set.of(), null, later));
+                invoke(activity, "render");
+                text(root(activity), "Dismiss").performClick();
+                assertFalse(hasText(activity, "Update available"));
+                setField(activity, "remote", remoteSettings(Set.of(), null, available));
+                invoke(activity, "render");
+                assertTrue("An earlier version than the dismissed one is a different hint", hasText(activity, "Vanishr 9.9.9 is on Google Play."));
+                setField(activity, "remote", remoteSettings(Set.of(), null, later));
+                invoke(activity, "render");
+                assertFalse("The one that was dismissed stays dismissed", hasText(activity, "Update available"));
+            });
+        }
+    }
+
+    @Test public void aKeyThatSignedTheHighestNumberDoesNotBlockTheKeyThatReplacesIt() throws Exception {
+        signedInFixture(); conversationsFixture();
+        java.security.KeyPairGenerator generator = java.security.KeyPairGenerator.getInstance("EC");
+        generator.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"));
+        java.security.KeyPair owner = generator.generateKeyPair(), successor = generator.generateKeyPair();
+        java.util.concurrent.atomic.AtomicReference<byte[]> served = new java.util.concurrent.atomic.AtomicReference<>();
+        okhttp3.OkHttpClient transport = new okhttp3.OkHttpClient.Builder().addInterceptor(chain -> new okhttp3.Response.Builder().request(chain.request())
+                .protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("OK")
+                .body(okhttp3.ResponseBody.create(served.get(), okhttp3.MediaType.get("application/json"))).build()).build();
+        android.content.SharedPreferences stored = context.getSharedPreferences("remote-settings", Context.MODE_PRIVATE);
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                setField(activity, "settingsKeys", Map.of("t1", owner.getPublic()));
+                setField(activity, "settingsSource", (java.util.function.Supplier<RemoteSettings>) () -> new RemoteSettings(transport));
+                inject(activity);
+            });
+            java.util.function.Consumer<byte[]> check = body -> {
+                served.set(body);
+                assertTrue(stored.edit().putLong("last-check", 0).commit());
+                try {
+                    scenario.onActivity(activity -> invoke(activity, "checkRemoteSettings"));
+                    awaitMainCondition(scenario, activity -> !(boolean) readField(activity, "checkingSettings"));
+                } catch (Exception failure) { throw new AssertionError(failure); }
+            };
+            java.util.function.Supplier<RemoteSettings.Settings> inForce = () -> {
+                RemoteSettings.Settings[] value = new RemoteSettings.Settings[1];
+                scenario.onActivity(activity -> value[0] = (RemoteSettings.Settings) readField(activity, "remote"));
+                return value[0];
+            };
+            check.accept(signedSettings(owner, "t1", RemoteSettings.MAX_SEQUENCE, ""));
+            assertEquals("The highest number there is is taken", RemoteSettings.MAX_SEQUENCE, inForce.get().sequence());
+            assertEquals(RemoteSettings.MAX_SEQUENCE, stored.getLong("floor.t1", 0));
+            check.accept(signedSettings(owner, "t1", 7, "\"features\":{\"images\":false}"));
+            assertEquals("That key has used its numbers up", RemoteSettings.MAX_SEQUENCE, inForce.get().sequence());
+            assertTrue(inForce.get().enabled(RemoteSettings.Flag.IMAGES));
+            // A later app version carries the successor in place of the retired key.
+            scenario.onActivity(activity -> setField(activity, "settingsKeys", Map.of("t2", successor.getPublic())));
+            check.accept(signedSettings(successor, "t2", 1, "\"features\":{\"groups\":false}"));
+            RemoteSettings.Settings now = inForce.get();
+            assertEquals("t2", now.keyId());
+            assertEquals(1, now.sequence());
+            assertFalse(now.enabled(RemoteSettings.Flag.GROUPS));
+            assertEquals(1, stored.getLong("floor.t2", 0));
+            assertEquals(RemoteSettings.MAX_SEQUENCE, stored.getLong("floor.t1", 0));
+        }
+    }
+
+    @Test public void anOlderFileOfAnotherListedKeyIsNotPutBackOverANewerOneAndAFutureDatedFileDoesNotHoldBackTheNext() throws Exception {
+        signedInFixture(); conversationsFixture();
+        java.security.KeyPairGenerator generator = java.security.KeyPairGenerator.getInstance("EC");
+        generator.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"));
+        java.security.KeyPair first = generator.generateKeyPair(), second = generator.generateKeyPair();
+        java.util.concurrent.atomic.AtomicReference<byte[]> served = new java.util.concurrent.atomic.AtomicReference<>();
+        okhttp3.OkHttpClient transport = new okhttp3.OkHttpClient.Builder().addInterceptor(chain -> new okhttp3.Response.Builder().request(chain.request())
+                .protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("OK")
+                .body(okhttp3.ResponseBody.create(served.get(), okhttp3.MediaType.get("application/json"))).build()).build();
+        android.content.SharedPreferences stored = context.getSharedPreferences("remote-settings", Context.MODE_PRIVATE);
+        // Six steps back from now and no earlier than this build's floor, so that every time below is in the past and none is before it.
+        long now = System.currentTimeMillis();
+        long step = Math.min(HOUR_MS, (now - RemoteSettings.BUILD_ISSUED_FLOOR) / 6);
+        assertTrue("The device clock is behind the floor this build holds files to", step > 0);
+        long base = now - 6 * step;
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                setField(activity, "settingsKeys", Map.of("t1", first.getPublic(), "t2", second.getPublic()));
+                setField(activity, "settingsSource", (java.util.function.Supplier<RemoteSettings>) () -> new RemoteSettings(transport));
+                inject(activity);
+            });
+            java.util.function.Consumer<byte[]> check = body -> {
+                served.set(body);
+                assertTrue(stored.edit().putLong("last-check", 0).commit());
+                try {
+                    scenario.onActivity(activity -> invoke(activity, "checkRemoteSettings"));
+                    awaitMainCondition(scenario, activity -> !(boolean) readField(activity, "checkingSettings"));
+                } catch (Exception failure) { throw new AssertionError(failure); }
+            };
+            java.util.function.Supplier<RemoteSettings.Settings> inForce = () -> {
+                RemoteSettings.Settings[] value = new RemoteSettings.Settings[1];
+                scenario.onActivity(activity -> value[0] = (RemoteSettings.Settings) readField(activity, "remote"));
+                return value[0];
+            };
+            check.accept(signedSettings(first, "t1", 49, base + step, ""));
+            assertEquals(49, inForce.get().sequence());
+            check.accept(signedSettings(second, "t2", 51, base + 3 * step, "\"features\":{\"images\":false}"));
+            assertEquals("A newer file of the other key is taken", 51, inForce.get().sequence());
+            assertFalse(inForce.get().enabled(RemoteSettings.Flag.IMAGES));
+            assertEquals(base + 3 * step, stored.getLong("issued-high", 0));
+            // Number 50 has never been seen from the first key, but the file was issued before the one taken since: putting it back
+            // would switch images on again.
+            check.accept(signedSettings(first, "t1", 50, base + 2 * step, ""));
+            assertEquals("An old file of the first key is not put back", 51, inForce.get().sequence());
+            assertFalse("so images stay off", inForce.get().enabled(RemoteSettings.Flag.IMAGES));
+            assertEquals(49, stored.getLong("floor.t1", 0));
+            assertEquals(base + 3 * step, stored.getLong("issued-high", 0));
+            check.accept(signedSettings(first, "t1", 52, base + 4 * step, "\"features\":{\"groups\":false}"));
+            assertEquals(52, inForce.get().sequence());
+            assertEquals(base + 4 * step, stored.getLong("issued-high", 0));
+            // A file dated as far ahead as the phone allows is taken, but the time kept stops at the phone's own clock, so the owner's next
+            // file, issued at the real time, is not held back by it.
+            long before = System.currentTimeMillis();
+            check.accept(signedSettings(second, "t2", 60, before + RemoteSettings.CLOCK_SKEW - 60_000, "\"features\":{\"photos\":false}"));
+            long after = System.currentTimeMillis();
+            assertEquals(60, inForce.get().sequence());
+            long kept = stored.getLong("issued-high", 0);
+            assertTrue("The issue time kept is no later than the phone's own clock: " + kept, kept >= before && kept <= after);
+            check.accept(signedSettings(second, "t2", 61, after, "\"features\":{\"groups\":false}"));
+            assertEquals("The file that really follows is taken", 61, inForce.get().sequence());
+        }
+    }
+
+    private Object pendingSend(ChatEngine.Peer to, String text, byte[] image) throws Exception {
+        Class<?> type = Class.forName("app.vanishr.android.MainActivity$PendingSend");
+        var constructor = type.getDeclaredConstructor(ChatEngine.Peer.class, String.class, byte[].class, ChatEnvelope.Expiry.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(to, text, image, ChatEnvelope.Expiry.HOUR_1);
+    }
+
+    @Test public void aRetryOfAnUnsentImageIsRefusedOnceImagesAreSwitchedOff() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                setField(activity, "remote", remoteSettings(EnumSet.of(RemoteSettings.Flag.IMAGES), null, null));
+                inject(activity);
+                try {
+                    Object unsent = pendingSend(peer, null, new byte[]{1, 2, 3});
+                    setField(unsent, "failed", true);
+                    invoke(activity, "dispatchSend", new Class<?>[]{unsent.getClass()}, unsent);
+                    assertTrue("Refused: it is still an unsent message", (boolean) readField(unsent, "failed"));
+                } catch (Exception failure) { throw new AssertionError(failure); }
+            });
+        }
+    }
+
+    @Test public void aViewOncePhotoIsNotUsedUpWhenPhotosAreSwitchedOffWhileItsConfirmationIsOpen() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry photoOnce = entry(false, null, photo, ChatEnvelope.Expiry.VIEW_ONCE, "DELIVERED", -5_000);
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                setField(activity, "remote", remoteSettings(Set.of(), null, null));
+                inject(activity);
+                invoke(activity, "viewContent", new Class<?>[]{ChatEngine.Entry.class}, photoOnce);
+                assertNotNull("The confirmation is up", text(dialog(activity).getWindow().getDecorView(), "View once"));
+                setField(activity, "remote", remoteSettings(EnumSet.of(RemoteSettings.Flag.PHOTOS), null, null));
+                dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+            });
+            Thread.sleep(1_500);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertNull("No photo is shown", readField(activity, "photoViewer"));
+                assertTrue("and the view-once photo is still there", engine.hasEntry(photoOnce.id()));
+                assertEquals("DELIVERED", engine.entry(photoOnce.id()).state());
+            });
+        }
+    }
+
+    @Test public void aGroupDialogThatIsAlreadyOpenCannotCreateAGroupOnceGroupsAreSwitchedOff() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                setField(activity, "remote", remoteSettings(Set.of(), null, null));
+                inject(activity);
+                invoke(activity, "newGroupDialog");
+            });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                View decor = dialog(activity).getWindow().getDecorView();
+                descendants(decor).stream().filter(view -> view instanceof EditText).map(view -> (EditText) view).findFirst().orElseThrow().setText("Lunch club");
+                descendants(decor).stream().filter(view -> view instanceof MaterialCheckBox).map(view -> (MaterialCheckBox) view).findFirst().orElseThrow().setChecked(true);
+                setField(activity, "remote", remoteSettings(EnumSet.of(RemoteSettings.Flag.GROUPS), null, null));
+                dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+            });
+            Thread.sleep(1_500);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertTrue("The dialog is still up", dialog(activity).isShowing());
+                assertTrue("No group was started: not even its title was written", vault.names("group-title/").isEmpty());
+            });
+        }
+    }
+
+    // ==== end 0.6.2 ====
 
     private int dpPx(int value) { return Math.round(value * context.getResources().getDisplayMetrics().density); }
 

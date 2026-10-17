@@ -3,6 +3,13 @@ param([switch]$PrepareNoticesOnly, [ValidatePattern('^\d+\.\d+\.\d+$')][string]$
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $tools = Join-Path $root '.tools'
+# The signed settings file goes out with the release, so a file the app would refuse, or one that has expired, stops it here, before the
+# notices are prepared, the signed APK is built or any staging directory exists (the same check runs again when the website is rendered).
+# Cutting an app version is also the moment BUILD_ISSUED_FLOOR has to be brought up to the issue time of that file, which -AppRelease
+# requires; checking it first means a floor that was forgotten costs a message and not a rebuild.
+& (Join-Path $PSScriptRoot 'sign-ota-settings.ps1') -Check -AppRelease | Out-Null
+. (Join-Path $PSScriptRoot 'ota-settings-rules.ps1')
+Assert-OtaNoLeftoverFile (Join-Path $root 'download/ota')
 $dependencies = Get-Content (Join-Path $root 'android/app/build/reports/distribution/dependencies.json') -Raw | ConvertFrom-Json
 $noticesDirectory = Join-Path $root 'android/app/src/main/assets/legal'
 New-Item -ItemType Directory -Path $noticesDirectory -Force | Out-Null
@@ -70,8 +77,10 @@ $sourcePaths = @('LICENSE', 'NOTICE.md', 'README.md', 'pom.xml', '.gitignore', '
     'scripts/build-android.ps1', 'scripts/new-local-config.ps1', 'scripts/package-apk.ps1', 'scripts/start-local.ps1', 'scripts/test-android.ps1',
     'scripts/test-release.ps1', 'scripts/test-google-config.ps1', 'scripts/prepare-ui-assets.ps1', 'scripts/verify.ps1', 'scripts/read-google-config.ps1', 'scripts/prepare-download.ps1',
     'scripts/render-website.ps1', 'scripts/prepare-website.ps1', 'scripts/prepare-site-assets.ps1',
+    'scripts/google-certificates.json', 'scripts/new-ota-key.ps1', 'scripts/sign-ota-settings.ps1', 'scripts/ota-settings-rules.ps1', 'scripts/test-ota-settings.ps1',
+    'ota/settings.source.json', 'ota/rules-cases.json',
     'download/index.html', 'download/icon.png', 'download/favicon.ico', 'download/apple-touch-icon.png',
-    'download/site.css', 'download/site.js', 'download/site-settings.json', 'download/vercel.json',
+    'download/site.css', 'download/site.js', 'download/site-settings.json', 'download/vercel.json', 'download/ota',
     'download/android', 'download/security', 'download/privacy', 'download/terms', 'download/delete-account',
     'download/assets', 'download/robots.txt', 'download/sitemap.xml', 'download/llms.txt')
 foreach ($relative in $sourcePaths) {

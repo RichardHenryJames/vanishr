@@ -12,6 +12,28 @@ license notices at **https://vanishr-download.vercel.app**.
 The public [update feed](https://vanishr-download.vercel.app/updates.json), not
 the latest Git version, determines which release users can download and discover.
 
+Release **0.6.2/code 43** adds a way to change a few things without a new app version, and
+makes Google sign-in fixable for Google Play installs. A small *signed settings file* on the
+download site (checked at most once a day while the app is open, in the direct-download and
+the Google Play build alike) can show a short notice on the chat list, switch off sending
+images, opening photos or creating groups, and tell Play installs that a newer version
+exists. It is data only, never code, signed with a key kept off the website, rejected when
+unsigned, altered, older than the file the phone already has or expired; it cannot reach
+keys, messages, expiry times or identity checks, and bug fixes or new screens still need a
+new version (for Play users, a new bundle through Google Play). See
+[how to publish settings](docs/DEPLOYMENT-GUIDE.md#push-settings-over-the-air-no-app-build-no-play-upload),
+the [threat model](docs/THREAT-MODEL.md#signed-settings-changes-without-an-update-062) and
+[verification](docs/VERIFICATION.md#release-062--signed-settings-and-google-play-sign-in).
+"Google sign-in cancelled" on a Play install is a setup issue, not a bundle defect: Play
+re-signs the app with its own certificate, which must be registered with Google
+([steps](docs/GOOGLE-SETUP.md#phone-installs-from-google-play-play-app-signing)); the release
+scripts now accept that certificate and pass both Android OAuth clients to the relay, and the
+script that installs the relay's settings on the VM now accepts a list of them (it accepted
+exactly one before, which would have made that publish fail). One change made by the owner
+after 0.6.1 ships with it: the in-app policy summary no longer carries the paragraph about the
+admin (that the admin sees a user's status and can save a photo sent to it); the privacy and
+security pages still say so.
+
 Release **0.6.1/code 42** keeps long chats fast and fixes the keyboard. A chat opens with its
 newest messages first (on the test emulator a 100-message chat showed nothing for 3 to 4 seconds
 before; the first screen now appears in about half a second and older messages are prepared as
@@ -36,7 +58,8 @@ the gallery, including a photo that was sent as view-once; the saved copy is an 
 unencrypted file in Pictures/Vanishr that does not expire (Android 10 or later). Every other
 account's app is unchanged: it has no save option and still wipes a photo's decrypted bytes
 as soon as it is drawn. Anyone who messages the admin should assume the admin can keep a photo
-they send; the in-app summary and the privacy and security pages say so. It is a client-only
+they send; the privacy and security pages say so (the in-app summary did too in 0.6.0 and 0.6.1,
+and no longer does: see the 0.6.2 notes). It is a client-only
 change (no relay update); installs of 0.5.6 to 0.5.9 get it from the in-app update prompt, which
 opens the browser and still needs the user's install approval (the prompt and an in-place update
 were checked on an emulator against the published feed; the automatic check runs at most once a

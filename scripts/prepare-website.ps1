@@ -3,6 +3,9 @@ param([ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.4.8', [switch]$R
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $tools = Join-Path $root '.tools'
+# The signed settings file goes out with the website, so a file the app would refuse, or one that has expired, stops it before the stage
+# exists (the same check runs again when the website is rendered).
+& (Join-Path $PSScriptRoot 'sign-ota-settings.ps1') -Check | Out-Null
 $source = Join-Path $root 'download'
 $release = Join-Path $tools "vercel-download-$Version"
 $stage = Join-Path $tools "vercel-website-$Version"

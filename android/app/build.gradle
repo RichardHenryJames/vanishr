@@ -23,8 +23,8 @@ android {
         applicationId 'app.vanishr.android'
         minSdk 28
         targetSdk 36
-        versionCode 42
-        versionName '0.6.1'
+        versionCode 43
+        versionName '0.6.2'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
         buildConfigField 'String', 'DEFAULT_RELAY_ORIGIN', groovy.json.JsonOutput.toJson(relayOrigin)
         buildConfigField 'String', 'GOOGLE_WEB_CLIENT_ID', groovy.json.JsonOutput.toJson(googleClientId)
