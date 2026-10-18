@@ -159,11 +159,15 @@ To fix it, once and for good:
    signing** and copy the **SHA-1** of the *App signing key certificate* (not the
    upload key certificate; that one is the release certificate above).
 2. In the Firebase console, **Project settings > Your apps >
-   app.vanishr.android > Add fingerprint**, paste that SHA-1 and save. Firebase
-   creates the matching Android OAuth client.
+   app.vanishr.android > Add fingerprint**, paste that SHA-1 and save.
 3. Download the app's updated `google-services.json` again and replace the one
-   in `.secrets/firebase/` or the repository root. It now lists two Android
-   OAuth clients.
+   in `.secrets/firebase/` or the repository root. It should now list two Android
+   OAuth clients. **For this project it did not**: the fingerprint was recorded
+   but the downloaded file still held only the upload key's client, and
+   `read-google-config.ps1` refused it. The client then had to be created by hand in
+   **Google Cloud > APIs & Services > Credentials > Create credentials > OAuth
+   client ID > Android**, with package `app.vanishr.android` and the same SHA-1; the
+   next download listed both.
 4. Put the SHA-1 in lower case, without colons, as `playAppSigningSha1` in
    [scripts/google-certificates.json](../scripts/google-certificates.json) and run
    `.\scripts\test-google-config.ps1`. Packaging and publication now insist on
@@ -187,6 +191,20 @@ No new app build is needed for the sign-in part: the values the app is built wit
 (web client, project, app ID, API key) do not change when a fingerprint is added.
 Test on a Play internal-testing install, because a sideloaded copy of the same
 bundle is signed with the upload key and does not exercise the Play certificate.
+
+**State for the Vanishr project (2026-10-18).** Steps 1 to 5 are done: the SHA-1 of the
+app-signing key that Play Console marks "in use" (`b5:4d:68:21:...:50:76`) is in
+[google-certificates.json](../scripts/google-certificates.json), is registered under the Firebase
+app and has its own Android OAuth client, `google-services.json` lists both Android clients,
+and the relay was published with both client IDs (checked on the VM by count and public prefix
+only). The values the app is built with were identical in the old and the new
+`google-services.json`, and the 0.6.2 bundle was re-verified against the new file, so no
+rebuild was needed. **Not done and not checked:** step 6 (the API key's application restriction
+and the consent screen cannot be seen from the release tooling) and a real sign-in from a Play
+install. Google can take minutes to hours to apply a new Android client. Play Console also lists
+**Previous app signing keys**; an install can carry one of those certificates instead, so if
+sign-in is still cancelled after a while, register that SHA-1 the same way (the relay list takes
+up to three IDs). See [VERIFICATION.md](VERIFICATION.md#release-062--signed-settings-and-google-play-sign-in).
 
 ## Configuration mapping
 

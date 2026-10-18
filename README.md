@@ -29,7 +29,10 @@ re-signs the app with its own certificate, which must be registered with Google
 ([steps](docs/GOOGLE-SETUP.md#phone-installs-from-google-play-play-app-signing)); the release
 scripts now accept that certificate and pass both Android OAuth clients to the relay, and the
 script that installs the relay's settings on the VM now accepts a list of them (it accepted
-exactly one before, which would have made that publish fail). One change made by the owner
+exactly one before, which would have made that publish fail). The owner has since registered the
+Play certificate and the relay was published with both Android clients (see the
+[verification notes](docs/VERIFICATION.md#release-062--signed-settings-and-google-play-sign-in)); a real
+sign-in from a Play install has not been observed by this work. One change made by the owner
 after 0.6.1 ships with it: the in-app policy summary no longer carries the paragraph about the
 admin (that the admin sees a user's status and can save a photo sent to it); the privacy and
 security pages still say so. Website installs of 0.5.6 to 0.6.1 get 0.6.2 from the in-app update

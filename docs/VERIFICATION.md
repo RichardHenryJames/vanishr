@@ -9,10 +9,11 @@ Release 0.6.2 / code 43 answers two things from one report: "Continue with Googl
 cancelled" on the copy installed from Google Play, and a request for a way to change things without a
 new app version, as another project of the owner (an Expo app that uses EAS Update) can. It is a
 **client-only change** plus tooling and a signed file on the download site: no relay or schema change (the
-relay stays at schema 13; `git diff ab93146 HEAD -- relay/src/main` is empty) and no Azure operation. One
-infrastructure script did change and is **not deployed**: `infra/azure/install-artifact.sh`, the installer that
-runs on the VM, accepted exactly one Android client ID for Google sign-in and now accepts one to three (below);
-it takes effect only the next time the owner publishes the relay.
+relay stays at schema 13; `git diff ab93146 HEAD -- relay/src/main` is empty) and no Azure operation in the
+release itself. One infrastructure script did change: `infra/azure/install-artifact.sh`, the installer that
+runs on the VM, accepted exactly one Android client ID for Google sign-in and now accepts one to three (below).
+It was **not deployed with the release**; it took effect with the relay publish recorded in the follow-up at the
+end of this section.
 
 **Google sign-in on a Google Play install: a setup gap, not a defect in the bundle.** Found by reading the
 code and the configuration; **not reproduced** (Play Console, Firebase and the owner's phone were not
@@ -35,9 +36,9 @@ available):
   client IDs to the relay; it refuses a missing, duplicated or malformed one) and
   [test-google-config.ps1](../scripts/test-google-config.ps1) (21 checks, 8 of them new for this release, all
   passing; the real configuration still validates). The owner's steps are in [GOOGLE-SETUP.md](GOOGLE-SETUP.md#phone-installs-from-google-play-play-app-signing).
-  **They are not done and not verified:** they need the Play app-signing certificate from Play Console, a new
-  `google-services.json` from Firebase and a relay publish (a short restart). Until then Google sign-in on a
-  Play install keeps failing; no rebuild of the app is needed for it.
+  **They were not done when the release was committed**: they need the Play app-signing certificate from Play
+  Console, a new `google-services.json` and a relay publish (a short restart). The owner did them afterwards; see
+  the follow-up at the end of this section. No rebuild of the app is needed for sign-in.
 - **A second defect, found by review and fixed: the VM-side installer could not have accepted both client
   IDs.** `read-google-config.ps1` hands the relay a comma-separated list, but the `jq` pattern in
   [install-artifact.sh](../infra/azure/install-artifact.sh) allowed exactly one ID, so a publish with the Play
@@ -45,7 +46,8 @@ available):
   shown with the real `jq` (the official 1.7.1 image, the exact filter extracted from the script, synthetic IDs):
   the old pattern rejects two and three IDs, the new one accepts one to three and rejects four, a leading or
   trailing comma, a space, an empty value, another project number and line breaks; the pattern is also pinned
-  by `test-google-config.ps1`. It was **not** run against the VM.
+  by `test-google-config.ps1`. It was **not** run against the VM at the time of the release; the follow-up at the
+  end of this section records its first run there.
 
 **Signed settings** ("OTA" without code). A native Java app cannot be updated the way an interpreted one can,
 Google Play forbids an app downloading code that changes how it works, and
@@ -318,8 +320,8 @@ checks or the relay address, and a bug fix or a new screen still needs a new ver
 **Publication, 2026-10-17 (UTC):**
 
 - **Relay.** Unchanged: `git diff ab93146 HEAD -- relay/src/main` is empty, so the deployed schema-13 relay was not
-  redeployed and no Azure operation ran. (`infra/azure/install-artifact.sh` did change, as described above; it is not
-  deployed.)
+  redeployed and no Azure operation ran. (`infra/azure/install-artifact.sh` did change, as described above; the
+  release did not deploy it, the follow-up below did.)
 - **Build and stage.** The gate above passed. `package-apk.ps1` built the signed APK from
   commit `2cd09c4` (release lint included): **44,518,588 bytes**, SHA-256
   `061c3128f23ee48f15eeeeda801f63e9125674119464d52c04ab767bfa43f379`, version 0.6.2 / code 43, min API 28, target API
@@ -401,12 +403,53 @@ checks or the relay address, and a bug fix or a new screen still needs a new ver
 
 **Not verified, and not claimed:** that any of this works on a physical phone (everything above ran on one
 dedicated emulator, with synthetic accounts, synthetic settings files and signing keys made for the test); a real
-Google sign-in on a Google Play install (the owner's steps in GOOGLE-SETUP.md are not done, so it is expected to
-keep failing until they are); a relay publish with the new allow-list or the changed installer script on the VM;
-the Google Play listing's Data safety form, which has to be revisited because the Play build now contacts the
-download site once a day; the behavior of the Google Play bundle on a Play-installed phone; and a settings file
-read by a real installed app (the file is on the public site now, and what was checked is the file, its headers and
-its signature under the embedded key, not a phone).
+Google sign-in on a Google Play install (the owner's steps were done and the relay was published afterwards, see
+the follow-up below, but no sign-in from a Play install has been observed); the Google Play listing's Data safety
+form, which has to be revisited because the Play build now contacts the download site once a day; the behavior of
+the Google Play bundle on a Play-installed phone; and a settings file read by a real installed app (the file is on
+the public site now, and what was checked is the file, its headers and its signature under the embedded key, not a
+phone).
+
+**Follow-up, 2026-10-18: Google sign-in for Google Play installs.** The owner did the steps in
+[GOOGLE-SETUP.md](GOOGLE-SETUP.md#phone-installs-from-google-play-play-app-signing) and the relay was published with
+the result. What was done and what was checked:
+
+- **Owner's steps.** The public SHA-1 of the Play app-signing key that Play Console marks "in use" is now
+  `playAppSigningSha1` in [google-certificates.json](../scripts/google-certificates.json) (the upload key's was already
+  there). It was added under the Firebase app (the Firebase page lists it next to the upload SHA-1), but the
+  `google-services.json` downloaded after that **still held only the upload key's Android client**, and
+  `read-google-config.ps1` refused it, as designed. The Android OAuth client then had to be created by hand in Google
+  Cloud (Credentials, OAuth client ID, Android; it appears as "Android client 2"). The next download lists both Android
+  clients and `read-google-config.ps1` accepts it with two distinct client IDs. GOOGLE-SETUP.md had said that Firebase
+  creates the client; that was wrong for this project and is corrected there.
+- **Nothing in the app needed to change.** Compared by value (nothing printed), the project ID and number, app ID,
+  package, API key and web client ID are the same in the old and the new `google-services.json`. The 0.6.2 bundle,
+  re-verified against the new file, is unchanged (same SHA-256, and its Google/Firebase values still match), and
+  `test-google-config.ps1` passes 21 of 21 with the Play SHA-1 set. So neither the 0.6.1 bundle that is on Play nor the
+  0.6.2 bundle has to be rebuilt for sign-in: what was missing was the registration and the relay's allow-list.
+- **Relay publish.** `publish-azure.ps1 -Action Check` passed (Docker active, Compose present, 950 MB of memory on the
+  VM and no swap, which the start script requires). Before publishing, the relay jar that would be uploaded was compared
+  by SHA-256 with the one in the previous upload archive and is **byte-identical**, so no relay code changed.
+  `-Action Publish -GoogleServicesFile .\google-services.json -FcmCredentialFile .\.secrets\firebase\fcm-sender.json`
+  then exited 0 after 1,939 s (nearly all of it Azure CLI latency on the release machine) and ran the changed
+  `install-artifact.sh` on the VM **for the first time**; it accepted the two-client list. A health poller saw the relay
+  unreachable for about 10 seconds (the restart; the poller's resolution is a few seconds) and `/health` answered `up`
+  before and after, with a TLS 1.3 certificate chain that the client verified (valid until 2026-12-15). The resource group
+  lists the same seven resources before and after (VM, disk, NIC, public IP, NSG, VNet and the earlier run command), and
+  the temporary artifact storage account that the script creates was gone. Only the relay container was replaced: the
+  HTTPS front end, PostgreSQL and Redis had been running for four weeks and were not touched. No credential-bearing request
+  file was left on the release machine.
+- **What the VM holds now** (a read-only run command that printed only counts and public prefixes). The environment file
+  and the running relay container each list **two** Android client IDs, with the prefixes `167823115834-9li1b` and
+  `167823115834-egi1f`; the relay container is healthy with no restarts since it started; the Google credential files
+  keep their modes (`0:0:600` and `10001:10001:400`).
+- **Not verified.** A real sign-in from a Play install: no Play-installed build was available to this work, and Google
+  can take minutes to hours to apply a new Android client. The Android API key's application restriction (if it has one,
+  the Play SHA-1 has to be added there or notification registration fails on Play installs) and the state of the OAuth
+  consent screen (in Testing, only listed test users can sign in) are not visible from here and were not checked. Play
+  Console also lists a **previous app signing key**; whether any install carries that certificate is unknown, and its
+  SHA-1 was not registered. If Google sign-in is still cancelled on a Play install after a while, that key is the next
+  thing to register.
 
 **Changed by the owner, not by this work:** after 0.6.1 the owner's commit `c457e6c` removed a paragraph from the
 in-app policy summary (`PlayPolicy.SUMMARY`) that said that new accounts are introduced to the admin, that the admin

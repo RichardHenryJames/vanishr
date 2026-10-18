@@ -326,6 +326,9 @@ versions/configurations distributed through Play, not just one test run.
   builds. Recheck the Web OAuth audience, Android authorized clients and real
   Google/FCM behavior using synthetic accounts. No cloud change is authorized
   merely by this checklist.
+  *Status (2026-10-18): the app-signing key in use is registered (Android OAuth client and relay
+  allow-list); real Google sign-in and FCM behavior on a Play install have not been re-checked, so
+  this stays unchecked.*
 - [ ] Plan sideload compatibility before choosing the app signing key. A
   different signer without a supported, verified lineage may not update the
   existing sideload installation. Do not recommend uninstalling to "fix" this:
