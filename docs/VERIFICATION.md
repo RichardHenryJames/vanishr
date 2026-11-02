@@ -175,6 +175,67 @@ build's, even if a later one exists.
   before the answer is read; an exchange already on the wire can still complete, and its answer is not read). Limits that
   remain are written in [THREAT-MODEL.md](THREAT-MODEL.md#the-admin-changes-phone-063). It is not a security audit.
 
+**Publication, 2026-11-02 (UTC):**
+
+- **Relay.** Unchanged (`git diff 2cd09c4 HEAD -- relay/src/main` is empty), so no relay deployment and no Azure write
+  ran. One last read-only `SELECT` of the admin's device row (through `az vm run-command` in `vanishr-dev-rg`), run
+  before the release builds, still equalled the built-in pin (device `638b9ff1…`, safety number `7B0C4072 … 41520ECE`).
+- **Build and stage.** `package-apk.ps1` built the signed APK from commit `ece07de` (release lint included):
+  **44,519,036 bytes**, SHA-256 `ae78ec9aed7c03731d3e938cbdf2ad1baefced4e62e83a60f3cb1e0e891c155a`, version 0.6.3 /
+  code 44, min API 28, target API 36, exactly the same 15 permissions as 0.6.2 (compared one by one) and the same
+  certificate as 0.6.0 to 0.6.2 (SHA-256 `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`;
+  `apksigner` reports the v2 scheme only, as before). `.tools\vercel-download-0.6.3` holds 33 files / 60,038,923 bytes
+  (limit 99,000,000), no hidden file and no `.env` (the Vercel project link was added after the audit, as for earlier
+  releases). The source ZIP has 475 entries: 257 source files, each byte-identical to its blob in commit `ece07de`,
+  plus 218 dependency-source files. Name, content and known-private-value scans of the stage, the ZIP and the APK, with
+  nine private values searched for by value (the signing password, the Firebase API key and service-account values,
+  the deployment e-mail address, the settings signing key and its password and, new in this release, the admin
+  authority key and its password), found nothing. This is recorded in `.tools\distribution-audit-0.6.3.json`; it was an
+  inspection by the release agent with automated scans, not an independent audit.
+- **Vercel.** Deployment `dpl_ChTaeVjgFDSqWoJdXCFqs5reyMy9` (production, READY) was uploaded from that stage with the
+  existing Vanishr project link (project and team IDs checked; the live feed served 0.6.2 / code 43, so code 44 is no
+  downgrade). The canonical alias `vanishr-download.vercel.app`, which still served 0.6.2, was moved to it explicitly.
+- **Public verification** (`.tools\public-release-verification-0.6.3.json`). The canonical feed reports 0.6.3 / 44 with
+  `no-store`; the 32 served files (`vercel.json` is configuration and is not served) are byte-identical to the audit;
+  the downloaded APK verifies with the original certificate; the security headers and the APK download headers are
+  present; 22 private or missing paths (secret folders and keys, the admin authority key's included) return 404.
+  **The signed admin certificate is live:** `https://vanishr-download.vercel.app/ota/admin-identity.json` answers 200
+  with the right headers, is byte-identical to the committed file, and its signature verifies under the public key
+  embedded in the app (key `kf46fe93fa237`, sequence 1, device `638b9ff1…`, the fingerprint the relay holds); the
+  signing tool's live check agrees. The signed settings file is unchanged and still live (sequence 1); **it has to be
+  renewed before 2026-12-01** (28.5 days were left when checked).
+- **Over-the-air update, 0.5.6 / 0.5.7 / 0.5.8 / 0.5.9 / 0.6.0 / 0.6.1 / 0.6.2 to 0.6.3**
+  (`.tools\ota-check-0.6.3\ota-verification-0.6.3.json`). Same method as for 0.6.2, on the dedicated Android 16 /
+  API 36 emulator with a temporary screen lock that was cleared afterwards: each published APK was installed one at a
+  time, showed **Update available / Vanishr 0.6.3** with **Download** and **Later**, Download launched an
+  `ACTION_VIEW` browsable intent to the download host in Chrome, and the published 0.6.3 APK then installed over it in
+  place: version code 44, first-install time kept, running after 12 seconds, the update no longer offered and the crash
+  buffer empty, **7 of 7**. The **first** run of the check, made right after that emulator had been restarted, saw no
+  prompt for any of the seven versions (the installs themselves succeeded and the crash buffer was empty). A probe
+  afterwards found an Android "System UI isn't responding" dialog covering the app, which would explain it, but that
+  was **not shown to be** what happened in the first run. The harness (not part of the repository) now taps "Wait" on
+  such a dialog and counts it; none appeared in the second run, and the first run's record is kept beside the second
+  (`ota-verification-0.6.3-attempt1-systemui-anr.json`). Not done by hand: the browser download and Android's install
+  approval screen.
+- **Google Play bundle** (`.tools\play-store-0.6.3\`, not uploaded anywhere and not part of the Vercel stage).
+  `package-apk.ps1 -Bundle -PlayStore` produced `vanishr-0.6.3.aab`: **45,835,191 bytes**, SHA-256
+  `402d0a3a3e1bb6c06c7458368aa2282444a46a9ea01d2adeec2711695e307886`. The official bundletool 1.18.3 `validate` passed;
+  the manifest says package `app.vanishr.android`, version 0.6.3 / code 44, min API 28, target API 36 and differs from
+  the 0.6.2 bundle's manifest in that one line only (so the same 14 permissions), the bundle configuration is
+  identical, and the JAR signature verifies with the same certificate as the APK; the four 64-bit native libraries are
+  16 KiB aligned; the notices match the source; the manifest has no external-updater permission; the Google/Firebase
+  client values are present and equal to the validated configuration; and the embedded settings and admin public-key
+  files are, byte for byte (SHA-256), the committed ones. A scan of every decompressed entry (884 entries, about
+  127 MB) for eight known private values found none. `verification.json` there records these results, and
+  `playConsoleSubmitted`, `affectedMotorolaOutcomeVerified` and `realGoogleAccountLoginTested` remain `false`: a signed
+  bundle is not Play approval. It is signed with the same upload key as the 0.6.1 and 0.6.2 bundles.
+- **What this does not show.** A physical phone, an install from Google Play, or the owner's new phone with 0.6.3 on
+  it; the admin certificate path against the production relay (the emulator tests use a synthetic transport); whether
+  Google Play accepts the 0.6.3 bundle. The new phone follows the admin only once Play delivers 0.6.3 to it, and its
+  identity key is lost if the app there is uninstalled, cleared or reinstalled. The admin authority key
+  (`.secrets\admin-authority`) and the settings signing key exist only on this computer and have to be backed up
+  offline.
+
 ## Release 0.6.2 / Signed settings and Google Play sign-in
 
 Release 0.6.2 / code 43 answers two things from one report: "Continue with Google" showed "Google sign-in
