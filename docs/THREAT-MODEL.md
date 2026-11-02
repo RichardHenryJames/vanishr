@@ -154,9 +154,11 @@ to the trusted client without the corresponding private key.
 The client pins an introduced user's identity when opening or receiving that
 conversation, then uses the existing official libsignal sessions and authenticated
 message envelopes. Arbitrary senders outside this relationship remain untrusted.
-Previously pinned keys/devices are never silently replaced. An admin identity
-change requires a reviewed signed-app pin update and explicit re-onboarding,
-not a username rule, remote configuration update or verification bypass.
+Previously pinned keys/devices are never silently replaced, with one exception that
+is written down below ([the admin changes phone, 0.6.3](#the-admin-changes-phone-063)):
+the official admin's own device identity can move to a new one, and only when the app
+itself, or a certificate signed with the owner's offline authority key, names that
+identity. It is not a username rule, a relay answer, a remote setting or a verification bypass.
 
 From 0.5.8 this automatic chat also shares Online, Typing and Last seen status in
 both directions, like any other direct chat (it was the one conversation that never
@@ -246,6 +248,130 @@ local pinned identity, not a relay value.
 Not claimed: that the saved file is protected, that an ordinary account cannot be modified
 to save, or that physical-phone behavior and Android 9 (which has no scoped storage write
 path here; the option explains it needs Android 10) were tested.
+
+### The admin changes phone (0.6.3)
+
+The official admin is one account (a Google account) whose identity key lives on one phone. When the owner signed in
+on a new phone and chose to replace the registered device, the relay held a new device and a new identity for the
+admin, and every app that pinned the old one refused it: "Official admin identity changed. A reviewed app update is
+required." That included the owner's own new phone (it was not "verified admin"), and every new account lost the
+automatic admin chat. The refusal was the pin doing its job; what was missing was a safe way to move the pin.
+0.6.3 adds three things, and keeps the pin as the only thing that decides who the admin is.
+
+- **The built-in pin moved to the owner's current phone.** `AdminOnboarding.OFFICIAL` now holds the device ID and the
+  identity fingerprint of that phone (the SHA-256 of `userId:identityKey`, the number the phone shows under My profile
+  > Verify identity). The fingerprint was taken from the relay's row for the admin and checked against what the phone
+  showed: the owner read the first group (8 hex characters) off the phone and it matched; this is a 32-bit
+  confirmation, and the remaining 224 bits rest on the relay's row being the one that phone registered.
+- **Admin identity certificates.** A short signed statement `{schema, sequence, userId, deviceId, fingerprint}` on the
+  download site (`/ota/admin-identity.json`), in the same envelope as the settings file but with its own signing key
+  (`scripts/new-ota-key.ps1 -Purpose Admin`, kept under `.secrets/admin-authority`, public half in
+  `res/raw/admin_keys.txt`, at most three) and its own signature prefix (`vanishr-admin-identity-v1` plus a zero byte), so
+  a signature made for the settings file is never valid here and the other way round. The settings key can never touch
+  a trust decision; this key can touch exactly one. A certificate can only name a new **device and identity for the
+  same admin account**: the account must be the one the app pins (a certificate for any other account is refused whole),
+  the relay origin is not in it, and nothing but the admin's pin ever reads it. Fields are fixed and strict (a field
+  that is unknown or repeated, text that is not strict JSON, a value that is not in the exact form the tool writes,
+  an envelope over 2 KiB, a payload over 1 KiB: the whole file is refused). `sequence` runs from 1 to 1,000,000; a phone
+  takes only one above everything it has taken before (`AdminIdentity.newer`) and above its build's floor
+  (`BUILD_SEQUENCE_FLOOR`, which is the sequence of the certificate the built-in pin stands for), so an older one is
+  never put back and the one a build already stands for changes nothing. There is **no expiry**: an expiry would end the
+  admin's identity for everybody on the day it was forgotten. The cost is that a certificate stays valid until a higher
+  one replaces it (see the limits below).
+- **When the app asks for it.** Only after a check of the admin's identity has failed because the identity shown is not
+  the pinned one (`AdminOnboarding.Mismatch`: the relay's directory, a sender's lookup or this phone's own identity
+  against the pin), which is the moment something has changed, and never on a schedule. Every other refusal of the
+  directory (too many accounts, a malformed answer, a changed identity of an ordinary contact) asks for nothing, so a
+  relay cannot make a phone contact the download host by sending it something else that is wrong; a relay that shows the
+  admin with another identity can, which it could always do by being the relay. The request is the same bounded one as
+  the settings check (HTTPS to the fixed download host, no cookies, no account token, no identifiers, no redirects,
+  3/3/6 second timeouts, a size limit), at most once in ten minutes: the time of the last request is kept in the
+  certificate store, not in the screen, so restarting the app does not make it due again (a clock that went back counts
+  as due), and the request that is in flight is the only one. Its result is used only if it verifies, names the pinned
+  account and is newer than what the phone knows. The host therefore sees a request only from a phone that has just met
+  a changed admin identity, with its address and the time, as for any other request to the site. A verified certificate
+  is kept (exactly as received, and checked again, signature and all, every time it is loaded) and becomes the pin
+  the next time the phone looks at the relay. A phone that never meets a changed identity never asks and never keeps one.
+- **The retired identity stops counting at once, and a saved admin contact is then replaced by the pinned identity, and
+  by nothing else.** From the moment the pin moves, a saved contact for the admin that is not the pinned identity is
+  not a contact for anything (`ChatEngine.savedContact` is false while `rotationPending`): not verified, not
+  introduced, no presence, no profile photo, no backup, not offered for a group, and the chat list does not open it
+  with the shortcut that verified contacts get, so it always goes to the network first. In a group that has the admin
+  as a member, the app sends no group key to the retired identity and believes nothing that arrives from it (a control
+  or a group message; `AdminOnboarding.retired`, used in `GroupChat`); an owner whose roster has the retired identity can
+  no longer approve it. Whatever was already queued for the retired device before the pin moved is dropped before it is
+  uploaded (`AdminOnboarding.retiredDevice`): a message in the outbox is not sent and shows "Not sent: contact
+  unavailable", a group key control waiting to be sent is removed with its marker, and so is a profile-photo
+  revocation; a photo-sharing session that was already running with it ends at its next step (`RemotePhotoSession` asks
+  again before each step, right before an exchange goes out and before the answer is read, so an exchange that is already
+  on its way when the pin moves can still complete, but what comes back is not read), and a
+  message that the old device sent and that was still waiting at the relay is deleted there without being read
+  (`AdminOnboarding.fromRetiredContact`; it is not left to stop every sync, and a message from a device the app does not know
+  is not this, because it may be the new phone). (Anything that already left the phone before the app
+  learned of the change was encrypted for the identity that was the admin then, as for any message sent a moment before a
+  contact changes phone.) That does **not** remove the old identity from a group: its membership and the sender key it already
+  holds are the group's, and the owner has to remove it (and invite the new one, once verified by hand, if wanted).
+  Phones that already have the admin chat hold the old identity, with a session. When the pin has moved,
+  `AdminOnboarding` replaces that saved contact in
+  one encrypted transaction (its Signal sessions are deleted, the identity record is replaced, the contact is saved
+  again) only if the identity the relay presents is exactly the pinned one; whatever the relay shows that is not
+  pinned is refused as before, and the saved contact stays (it stays unusable, see above). It happens wherever the admin is looked at: the directory
+  refresh, an incoming message from the new device (before it is decrypted, so the first message is not lost) and
+  opening the chat, which always comes before a message is sent from it. (A send that starts with a copy of the contact
+  that was read before the replacement fails once with a generic error and works when repeated.) The conversation
+  continues with a fresh session; messages already on the phone stay until
+  their deadlines. The replaced contact is the **automatic** one: an admin that a person had verified by hand is replaced
+  too (the old verification was of an identity the app no longer trusts), and it is then marked automatic, not verified:
+  the person has not verified the new identity, the app's pin has. Nothing else is replaced: **no other account's saved
+  identity** is ever treated like this, on a user's phone or on the admin's own (tests cover a new account that comes
+  back with another identity, with and without a new pin). It is not announced: the chat simply keeps working, so a
+  person who wants to compare the number can, in the admin contact's safety number, like for any contact.
+- **The admin's own phone.** The admin capabilities (the directory of new accounts, saving a photo) need this phone's own
+  device and identity to equal the pin, on top of the account matching (`verifiedAdmin`). With the new pin built in, the
+  new phone qualifies on its first launch of 0.6.3 without any request; for a later phone the same certificate moves
+  the pin, and the old phone stops qualifying at once.
+
+**The procedure for a phone change** is in [DEPLOYMENT-GUIDE.md](DEPLOYMENT-GUIDE.md#changing-the-admins-phone):
+sign in as the admin on the new phone, run `scripts\sign-admin-identity.ps1` (it reads the admin's device from the relay
+with one read-only query in the approved Azure group, asks for the safety number the new phone shows **before** it
+shows the relay's, refuses if it does not match, and signs the next sequence), publish the website, and cut the next
+app version with the new built-in pin and floor (`-Check -AppRelease` stops a release where they disagree). Until
+the certificate is published, phones show the warning and the admin chat does not work; that window is the owner's to
+keep short, and phones older than 0.6.3 can never follow a change, because they know no certificate.
+
+**What this adds to the attack surface, honestly.** Whoever holds the authority key can name any device and identity
+for the admin account, so a stolen key plus control of what the relay presents as the admin's device (the owner's
+Google account, or the relay's database) is enough to impersonate the admin to every phone of 0.6.3 or later: they
+would see a new account's name and username and its public identity, could be introduced to every new account and
+could read what those accounts send to the admin. They would not read any earlier conversation (sessions are per identity)
+and could not read any other pair's messages. Neither half alone is enough: the key without the relay's cooperation
+changes nothing, and control of the relay or the Google account without the key is refused by every phone, as before. The
+key is kept offline, encrypted, with a password stored beside it (the arrangement of the Android signing key, and no
+more exposed than that key: whoever can read that folder can already ship an app), must be backed up as a whole, and
+cannot be revoked remotely: a lost or copied key is replaced by a new app version that lists another one. The certificate
+has no expiry and the phone cannot tell an old certificate from a new one except by its number, so a phone that is
+installed fresh (or whose storage was wiped, which deletes the stored certificate and its number together) can be shown
+an older certificate that the key once signed, back to its build's floor; the certificate then names an identity of an
+earlier admin phone, which is harmless unless the holder of that phone's private key is also the one the relay shows as
+the admin. A lost or sold old admin phone should be treated as holding a key that matters, and the floor of the next app
+version is how it is retired. The highest number a phone has taken is kept beside the certificate
+(`AdminIdentityStore.highWater`) and outlives it, so a stored copy that no longer verifies (a key that a later app no
+longer lists, say) does not lower the bar: an older certificate is still refused, the one the copy was can take its
+place, and a newer one is taken. The stored number can only go up: saving a certificate checks it against the stored
+number and writes both under one lock shared by every screen of the app (so two requests that overlap cannot put an
+older certificate over a newer one), and a stored copy that is older than the highest number taken is not followed. A
+phone whose storage was altered by an attacker who already controls that phone can
+lose or keep a certificate as the attacker likes; that is outside this model, as for the settings.
+
+**Verified, and not.** The certificate verifier (signature, domain, strict parsing, account, sequence, floor and the
+stored high-water mark) has JVM unit tests; the signing tool, its confirmation step, its refusals and the release checks
+have PowerShell tests with a key made for the run; the replacement of a saved admin contact, its refusals, the
+retired-identity rules (including for groups), the on-demand request and the stored certificate's checks have emulator
+tests (synthetic accounts and certificates, an emulator, a relay stand-in), and so do the retired-identity rules (a saved
+contact, a queued message, a queued group key, a group member). See [VERIFICATION.md](VERIFICATION.md).
+Not demonstrated: any physical phone, a Google Play install, a real relay presenting a
+changed admin, a phone change made with this tooling end to end, and the behavior of phones older than 0.6.3, which
+keep refusing the admin until they update.
 
 ## Account erasure, blocks and safety reports
 

@@ -212,7 +212,7 @@ final class ProfilePhotos {
             Queued queued = read(name, Queued.class);
             Send packet = queued.packet();
             ChatEngine.Peer peer = peer(packet.recipientId());
-            boolean allowed = packet.expiresAt() > System.currentTimeMillis();
+            boolean allowed = packet.expiresAt() > System.currentTimeMillis() && !engine.onboarding().retiredDevice(packet.recipientId(), packet.recipientDeviceId());
             if (queued.action() != ProfileEnvelope.Action.REVOKE) allowed &= matches(peer, packet.recipientDeviceId(), queued.identityKey());
             if (queued.action() == ProfileEnvelope.Action.UPDATE) {
                 Grant grant = read("profile-photo-grant/" + packet.recipientId(), Grant.class);

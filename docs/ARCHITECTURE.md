@@ -77,6 +77,22 @@ or the crypto code. The release process publishes it as a website-only release; 
 [the deployment guide](DEPLOYMENT-GUIDE.md#push-settings-over-the-air-no-app-build-no-play-upload)
 and [the threat model](THREAT-MODEL.md#signed-settings-changes-without-an-update-062).
 
+From 0.6.3 the official admin's identity can follow the admin to a new phone without a new app version
+(`AdminIdentity`, `AdminIdentityStore`, `AdminOnboarding`). `AdminOnboarding.OFFICIAL` still pins the
+admin's account, device and identity fingerprint, now the owner's new phone. When the relay presents another
+identity for that account (a failed introduction on a sync, or a failed open of the admin chat),
+`MainActivity.requestAdminIdentity` fetches `/ota/admin-identity.json` on the update lane, not more often
+than every ten minutes and only because of that mismatch. `AdminIdentity.verify` checks the ECDSA signature
+against `res/raw/admin_keys.txt` (a key and a signature domain separate from the settings key), the exact
+payload fields and the official account; a certificate counts only if its sequence is above the version's
+built-in `BUILD_SEQUENCE_FLOOR` and above any certificate already stored (the store re-verifies it at
+every load). `AdminOnboarding.adopt` then moves only the pin's device and identity, never the account or the
+relay origin, and `store` replaces a saved official-admin contact only when the relay shows exactly the
+pinned identity, with a fresh Signal session (`forgetPeer`); any other saved identity is never replaced.
+The first message from the new admin device is accepted the same way (`ChatEngine.receive`). See
+[the deployment guide](DEPLOYMENT-GUIDE.md#changing-the-admins-phone) and
+[the threat model](THREAT-MODEL.md#the-admin-changes-phone-063).
+
 ## Account storage and roles
 
 The hosted dev/test deployment runs PostgreSQL on the existing `vanishr-dev` VM

@@ -1,7 +1,179 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-10-17 UTC. This is a development foundation,
+Evidence refreshed on Windows, 2026-11-02 UTC. This is a development foundation,
 not a production security assessment or independent audit.
+
+## Release 0.6.3 / The official admin changes phone
+
+Release 0.6.3 / code 44 fixes the red warning "Official admin identity changed, a revised app update is required",
+which accounts saw after the owner signed in as the official admin on a new phone, and it lets the next phone change
+happen without a new app version. It is a **client-only change** plus tooling and a signed file on the download site:
+no relay or schema change (the relay stays at schema 13) and no Azure operation in the release itself.
+
+**What was wrong, read from the production relay (read-only).** One `SELECT` of the admin account's device row, run
+through `az vm run-command` in the approved resource group (`vanishr-dev-rg`; nothing was written; the script is not
+part of the repository), showed:
+
+- The official admin account has exactly one device row, `638b9ff1-8f90-428c-91b7-e1f8ce4d78a0`, registered on
+  2026-11-01 at 19:06 UTC. That is when the owner signed in on the new phone and chose "Replace": the relay replaces
+  the account's one device row when `replaceExisting` is set (`AccountDirectory.registerDevice`).
+- The identity key on that row hashes (SHA-256 of `userId:identityKeyBase64`, the value the app shows as the safety
+  number) to `7b0c4072…41520ece`.
+- Every shipped app up to 0.6.2 pins the previous phone (device `ae1db2e6…`, fingerprint `d0844c37…`), so each of them
+  refuses what the relay now shows for the admin. That includes the owner's own new phone, where nothing admin-only can
+  work (a phone is "the admin" only if its own device and identity are the pinned ones), and every new account and every
+  account the admin had introduced saw the warning. The pin did what it was built for; it had no way to follow a change
+  the owner meant.
+- The owner read the first 8 characters of the safety number on the new phone (`7B0C4072`) and, in a separate step, the
+  last 8 (`41520ECE`); both match the relay's fingerprint. That is a 64-bit match on the two ends of the number, not a
+  comparison of all 64 hexadecimal digits. It is what the signing tool accepts (it also accepts the full number), and it
+  was asked for before the relay's value was shown.
+
+**What changed** (see [THREAT-MODEL.md](THREAT-MODEL.md#the-admin-changes-phone-063) and
+[the deployment guide](DEPLOYMENT-GUIDE.md#changing-the-admins-phone)):
+
+- The built-in pin, `AdminOnboarding.OFFICIAL`, is now the new phone: device `638b9ff1…`, fingerprint `7b0c4072…41520ece`.
+  The account and the relay address are unchanged.
+- A **signed admin certificate** lets the pin move later without a release.
+  [AdminIdentity](../android/app/src/main/java/app/vanishr/android/AdminIdentity.java) verifies
+  `{"v":1,"key","payload","sig"}`: an ECDSA P-256 signature over a fixed domain prefix
+  (`vanishr-admin-identity-v1`, not the one of the settings file) plus the exact payload bytes, and a payload that is
+  exactly `{schema:1, sequence, userId, deviceId, fingerprint}` in canonical lower-case form, strict JSON, no unknown
+  or repeated field, at most 2 KiB / 1 KiB, the account the app pins and a sequence from 1 to 1,000,000. It is taken
+  only if its sequence is above both `BUILD_SEQUENCE_FLOOR` (the sequence of the certificate the built-in pin stands
+  for) and any certificate stored before, whichever key signed either. There is no expiry, so a forgotten renewal can
+  never end the admin for everyone. The public key list is `res/raw/admin_keys.txt` (one key, `kf46fe93fa237`); the
+  private key is a separate, offline key that is not the settings key.
+- [AdminIdentityStore](../android/app/src/main/java/app/vanishr/android/AdminIdentityStore.java) keeps the last
+  accepted file exactly as received and verifies it again, signature included, every time it is loaded; a stored
+  certificate at or below the build floor is deleted. It also keeps the highest sequence ever taken (`highWater`), in the
+  same write as the file, and that number outlives the file: a stored copy that no longer verifies does not lower the bar,
+  so an older certificate is still refused, the one the copy was can take its place and a newer one is taken. The number
+  can only go up: saving checks it against the stored number and writes both under one lock shared by every screen of
+  the app, so two overlapping requests cannot put an older certificate over a newer one, and a stored copy older than the
+  highest number taken is not followed. And it keeps
+  the time of the last request for a certificate, so the ten-minute interval holds across restarts of the app.
+- [MainActivity](../android/app/src/main/java/app/vanishr/android/MainActivity.java) asks for the file **only after an
+  identity mismatch for the official admin** (`AdminOnboarding.Mismatch`: the relay's directory, a sender's lookup or
+  this phone's own identity differs from the pin; no other refusal asks), not more often than every ten minutes
+  (remembered across restarts, one request in flight), on the update lane, anonymously, through the same bounded
+  request as the settings file
+  (`RemoteSettings.forAdminIdentity`: no cookies, no redirects, modern TLS, size limit, short timeouts). A phone that
+  never meets a mismatch makes no request for it. A verified, newer certificate is stored and adopted
+  (`AdminOnboarding.adopt`), which moves **only the pin's device and fingerprint** (never the account or the relay address)
+  and starts a sync; a stored certificate is read again when the engine loads.
+- **The retired identity stops counting at once.** From the moment the pin moves, a saved contact for the official admin
+  that is not the pinned identity is not a contact for anything (`ChatEngine.savedContact` is false while
+  `AdminOnboarding.rotationPending`): not verified, no presence, no profile photo, not in the backup, not offered for a
+  group, and `MainActivity.openContact` no longer takes the shortcut of verified contacts for it, so opening it always asks
+  the network. In a group with the admin as a member, `GroupChat` sends no key to the retired identity and does not believe
+  a control or a group message from it (`AdminOnboarding.retired`). Whatever was already queued for the retired device (a
+  message in the outbox, a group key control, a profile-photo revocation) is dropped before it is uploaded
+  (`AdminOnboarding.retiredDevice`; the message shows "Not sent: contact unavailable"), a photo-sharing session that is
+  already running with it ends at its next step (it is asked again before each step, right before an exchange goes out and
+  before the answer is read; an exchange already on its way when the pin moves can still complete, but its answer is not
+  read), and a message that the old device sent and that was still waiting at the
+  relay is deleted there without being read (`AdminOnboarding.fromRetiredContact`). It does not remove it from the group:
+  that is the owner's to do.
+- The **saved admin chat follows the pin.** `AdminOnboarding.store` replaces a saved contact only if it is the official
+  admin account, no longer matches the pin and the replacement is exactly the pinned identity; the old Signal sessions
+  and identity record go with it (`forgetPeer`), the message history stays, and the new contact is the automatic one, so a
+  copy the person had verified by hand is replaced by the automatic one and is not shown as verified. Any other saved
+  identity that changes still throws `Introduced identity changed; the saved identity was not replaced`.
+  `prepareSaved` and `prepare` take the new identity from the network when the saved copy is the retired one, and the
+  first message from the new admin device is accepted the same way (`ChatEngine.receive`).
+- Owner tooling (PowerShell 7, tested without the real key): `new-ota-key.ps1 -Purpose Admin` creates the authority key
+  (private half encrypted, in `.secrets/admin-authority`, git-ignored, **to be backed up offline**);
+  [sign-admin-identity.ps1](../scripts/sign-admin-identity.ps1) signs the next certificate for the identity the relay
+  holds after the person has read the new phone's safety number (it asks for that number **before** showing the relay's
+  value), refuses a wrong account, a sequence at or below the committed one, an identity that is already certified and a
+  mismatch, and writes atomically; `-Check`, `-Check -Live`, `-RequireIdentical` and `-Check -AppRelease` check the committed
+  file, the live site, byte equality and that the app and the certificate agree.
+  [prepare-download.ps1](../scripts/prepare-download.ps1) runs `-Check -AppRelease` right after the settings check, and
+  the website scripts and [verify.ps1](../scripts/verify.ps1) run the checks too.
+
+**Not verified, and not claimed:** that any of this works on a physical phone or on a phone that installed 0.6.3 from
+Google Play (the new phone gets 0.6.3 only when Play delivers it, and its identity key is lost if the app there is
+uninstalled, cleared or reinstalled); a real rotation against the production relay (the emulator tests use synthetic
+accounts and a stand-in transport); that Google Play accepts the second signed file as data (the policy reading is in
+[PLAY-STORE.md](PLAY-STORE.md)); and that anyone but the owner's key can be kept from naming an admin identity if that key
+leaks together with control of the relay or of the admin's sign-in. Phones older than 0.6.3 cannot follow a certificate
+and keep the warning until they are updated, and a fresh install can be shown any certificate newer than its own
+build's, even if a later one exists.
+
+**Checks run on the source before release:**
+
+- JVM, [AdminIdentityTest](../android/app/src/test/java/app/vanishr/android/AdminIdentityTest.java): **21 tests, all
+  passing** (the whole app unit suite is 64 tests, 0 failures, 30 of them `RemoteSettingsTest`). They cover a good
+  certificate read back exactly; the lowest and highest sequence numbers taken and nothing outside them; a certificate
+  that names any account but the pinned one; the device and the fingerprint exactly as the signer writes them; every
+  field present with its own type and `schema` 1; an unknown or repeated field refusing the whole file; text that is
+  not strict JSON, in the envelope and in the payload; the signature over the domain prefix and the payload, only by a
+  listed key (a second listed key signs too, a key that is not P-256 cannot be listed); the size limits; a certificate
+  taken only above the build floor and above the stored one; a stored copy that no longer verifies not lowering the bar,
+  one older than the highest number taken not being followed, the store checking what it holds on every load, two
+  overlapping requests not putting an older certificate over a newer one, the ten-minute interval across restarts, two
+  screens asking at the same moment being told yes once; and that **the committed `download/ota/admin-identity.json`,
+  signed by the PowerShell tool, is accepted by the Java verifier under the key the app embeds** and is the identity
+  this build stands for.
+- Emulator (Android 16 / API 36, dedicated test emulator), the "0.6.3" section of `ScreenFlowTest`: **27 tests, all
+  passing** on the final build. They run the real engine, vault, Signal sessions and the real directory and sync code
+  against a synthetic transport (no relay, no real account): the saved admin replaced only by the pinned identity (never
+  by another one, never any other contact, also when a caller did not validate first, a copy the person had verified by
+  hand becoming the automatic one); a message from the new device replacing the retired contact before it is read, and
+  one from an identity that is neither the retired one nor the pinned one not being read; opening the admin chat taking the new identity from the network,
+  and an unpinned one still failing closed; the pin moving only for a verified, newer certificate and only in device and
+  identity; the certificate asked for after an identity mismatch and after nothing else; a stored certificate checked
+  again when the engine loads (also one kept by an earlier run or by another screen), a damaged stored one not letting
+  an older one in; a real sync that meets the new identity following the certificate and clearing the warning; and the
+  retired identity no longer counting: in groups the app owns or is a member of (no key sent, nothing believed), a
+  queued message, a queued group key, a queued profile-photo revocation (not sent), a message the old device had sent
+  (deleted at the relay, not left to stop every sync), and a running photo session (ending at the next step, nothing
+  prepared after the pin moved is sent, the answer of an exchange that was on its way is not read).
+- Tooling: [test-admin-identity.ps1](../scripts/test-admin-identity.ps1) **15 tests, all passing**, run without the real
+  key, in a throwaway copy of the repository layout with a key made for the run and a web server on the loopback
+  address only: the fingerprint is the number a phone shows; the owner types the number of the phone in hand (all of it,
+  or the first and last group) before the relay's is shown, and a wrong one signs nothing; the payload is exactly what
+  the app reads; a signed certificate is read back exactly and a changed, foreign or settings-signed one is refused;
+  the next certificate takes the next sequence number, a lower or equal one is refused, and a `-DeviceId` given by hand
+  is warned about, because the number of the phone covers the identity key and not the device; the committed certificate
+  is the one this build stands for (`-Check -AppRelease`); the website is compared with the committed file; the admin key
+  is its own key in its own folder; the relay is asked read-only for the admin device in the approved resource group;
+  and the release scripts and the verification gate run these checks.
+- **Mutation checks** (do the tests fail when the code is broken?). JVM: **37 mutations** of `AdminIdentity` and
+  `AdminIdentityStore` (the version, the domain, the hash, the limits, the sequence and floor rules, the stored
+  high-water mark, the interval, the lock), **all caught**, with the 21 tests passing on the unmutated code (those two
+  sources have not changed since). Emulator: **32 mutations** of the app code in 13 runs (the pin, the replacement, the
+  hooks, the guards in the engine, groups, profile photos and photo sessions, the screen's request), **each caught by
+  the test written for it, all 32 on the final sources**: the whole plan was run once more, unchanged, after the last
+  code change (the three guards of the photo exchange each in a run of their own). Earlier rounds, while the code was
+  still changing, had missed three (the start-up hook for a stored certificate, the replacement's own pinned-identity
+  check, and a group key published to a retired identity); tests were added or strengthened and those runs repeated
+  until each was caught. A mutation was applied to the working tree and the files restored byte for byte afterwards
+  (checked by SHA-256 each time). A mutation shows that a test notices that one change; it does not show that no other
+  way of breaking the same rule exists.
+- **The gate.** `verify.ps1 -Android` passed on the final sources, with Docker Desktop started for the relay
+  integration tests: relay 101 tests, 0 failures, the 2 opt-in live-relay tests skipped; crypto 19; app unit tests 64;
+  the Android build and lint with 0 errors and **19 warnings, the same as 0.6.2**; the PowerShell suites (21 Google
+  configuration, 25 signed settings, 15 admin identity) and `sign-admin-identity.ps1 -Check -AppRelease`.
+- **Full emulator QA** (`ScreenFlowTest`, `AccountSafetyTest`, `AccountBackupFlowTest`, same emulator), on the final
+  application sources: **261 tests, 258 pass, 3 fail.** Two are the failures recorded for 0.5.8 to 0.6.2 and are not
+  touched by this release (`compactClassicProfilesOpenAsSecureBottomSheetsAndKeepTheChatDraft`, a colour assertion, and
+  `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`); both are still unresolved. The third,
+  `theExpiryTickOnlyWalksTheMessagesWhenOneIsDue`, passed in both earlier full runs of this release and **passes alone,
+  twice, on the same build**. It creates a message with 8 seconds left and asserts that it is still on screen after the
+  chat has loaded, so it is sensitive to how fast the emulator is. This run took 42 minutes instead of the 16 of the
+  run before it; the cause of the slowdown was **not established** (a second emulator, of another project, was running on
+  the same computer, but it was also running during the faster runs), and the failure is read as a timing race on a slow
+  run and **not shown to be one**. The earlier full runs of this release:
+  244 tests and 255 tests, each with only the first two failures.
+- **Independent review.** A separate read-only code-review agent (an AI reviewer, not a human audit) read the change in
+  four passes. Each found real problems, all confirmed in the code or by a failing test and fixed with a test, among
+  them: the retired identity still being used by groups, queued items, photo sessions and profile-photo revocations; a
+  message from the retired device that would have stopped every sync; the store's rules across two screens; and, in
+  the last pass, a photo exchange already on its way when the pin moves (it now asks again right before the exchange and
+  before the answer is read; an exchange already on the wire can still complete, and its answer is not read). Limits that
+  remain are written in [THREAT-MODEL.md](THREAT-MODEL.md#the-admin-changes-phone-063). It is not a security audit.
 
 ## Release 0.6.2 / Signed settings and Google Play sign-in
 

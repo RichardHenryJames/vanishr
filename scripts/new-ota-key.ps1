@@ -11,16 +11,24 @@ protected and backed up as a whole, and the backup of the password is best kept 
 settings can be published until a new app version carries a new public key. The public half is added
 to android\app\src\main\res\raw\ota_keys.txt, which the app embeds; the app accepts settings signed by the keys listed there and by
 nothing else. Up to three keys may be listed, so a new key can be shipped before the old one is retired.
+
+-Purpose Admin creates the other key, the one that certifies the device identity of the official admin account (scripts\sign-admin-identity.ps1,
+docs/DEPLOYMENT-GUIDE.md, "Changing the admin's phone"): the private half goes under .secrets\admin-authority and the public half to
+android\app\src\main\res\raw\admin_keys.txt. It is deliberately a different key from the settings key, because what it signs reaches a trust
+decision and settings never may, and it deserves the better backup: it is used once per phone change, not once a month.
 #>
 [CmdletBinding()]
 param(
     [ValidatePattern('\A[A-Za-z0-9_-]{1,16}\z')][string]$KeyId,
+    [ValidateSet('Settings', 'Admin')][string]$Purpose = 'Settings',
     [switch]$RestrictOnly
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
-$directory = Join-Path $root '.secrets\ota-signing'
-$keysFile = Join-Path $root 'android\app\src\main\res\raw\ota_keys.txt'
+$admin = $Purpose -eq 'Admin'
+$directory = Join-Path $root $(if ($admin) { '.secrets\admin-authority' } else { '.secrets\ota-signing' })
+$keysFile = Join-Path $root $(if ($admin) { 'android\app\src\main\res\raw\admin_keys.txt' } else { 'android\app\src\main\res\raw\ota_keys.txt' })
+$prefix = if ($admin) { 'admin' } else { 'ota' }
 
 # Set-Acl cannot change a folder that exists already (it needs a privilege an ordinary user lacks), icacls can: the inherited entries are
 # removed, the current user is given full control (by SID, so that the account's name does not matter) and every other entry set on the item
@@ -78,8 +86,8 @@ try {
         $KeyId = 'k' + (($digest[0..5] | ForEach-Object { $_.ToString('x2') }) -join '')
     }
     if ($existing | Where-Object { $_.Split(' ')[0] -ceq $KeyId }) { throw 'That key ID is already listed.' }
-    $privatePath = Join-Path $directory "ota-$KeyId.pem"
-    $passwordPath = Join-Path $directory "ota-$KeyId.password.txt"
+    $privatePath = Join-Path $directory "$prefix-$KeyId.pem"
+    $passwordPath = Join-Path $directory "$prefix-$KeyId.password.txt"
     if ((Test-Path -LiteralPath $privatePath) -or (Test-Path -LiteralPath $passwordPath)) { throw 'A key with that ID already exists; nothing was overwritten.' }
     $password = [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(33))
     $parameters = [System.Security.Cryptography.PbeParameters]::new([System.Security.Cryptography.PbeEncryptionAlgorithm]::Aes256Cbc,
@@ -88,13 +96,14 @@ try {
     [IO.File]::WriteAllText($passwordPath, $password, [Text.UTF8Encoding]::new($false))
     $line = "$KeyId $([Convert]::ToBase64String($publicKey))"
     if (-not (Test-Path -LiteralPath $keysFile)) {
-        [IO.File]::WriteAllText($keysFile, "# Public keys that may sign over-the-air settings: key ID, then the base64 X.509 SubjectPublicKeyInfo of a P-256 key.`n# At most three. Created by scripts/new-ota-key.ps1; the private halves are never committed.`n", [Text.UTF8Encoding]::new($false))
+        $purposeText = if ($admin) { 'certify the device identity of the official admin account' } else { 'sign over-the-air settings' }
+        [IO.File]::WriteAllText($keysFile, "# Public keys that may ${purposeText}: key ID, then the base64 X.509 SubjectPublicKeyInfo of a P-256 key.`n# At most three. Created by scripts/new-ota-key.ps1; the private halves are never committed.`n", [Text.UTF8Encoding]::new($false))
     }
     [IO.File]::AppendAllText($keysFile, $line + "`n", [Text.UTF8Encoding]::new($false))
 } finally { $ecdsa.Dispose() }
 # The key files exist now: restrict them as well and check once more, so that what was written is what was protected. If this fails the key
 # does exist (the only place its generated id was to be printed is the line after this), so the message has to say so.
-Protect-KeyFolder $directory "The signing key '$KeyId' WAS created: its files are in the folder and its public half is in ota_keys.txt. Fix the cause and run new-ota-key.ps1 -RestrictOnly before relying on the key."
+Protect-KeyFolder $directory "The signing key '$KeyId' WAS created: its files are in the folder and its public half is in $(Split-Path $keysFile -Leaf). Fix the cause and run new-ota-key.ps1 $(if ($admin) { '-Purpose Admin ' })-RestrictOnly before relying on the key."
 Write-Output "Created signing key '$KeyId'."
 Write-Output "Private key (encrypted) and its password: $directory  -- back this folder up offline as a whole; never commit or upload it."
 Write-Output "Public key added to: $keysFile  -- it takes effect in the next app build."

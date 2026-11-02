@@ -6,6 +6,7 @@ $tools = Join-Path $root '.tools'
 # The signed settings file goes out with the website, so a file the app would refuse, or one that has expired, stops it before the stage
 # exists (the same check runs again when the website is rendered).
 & (Join-Path $PSScriptRoot 'sign-ota-settings.ps1') -Check | Out-Null
+& (Join-Path $PSScriptRoot 'sign-admin-identity.ps1') -Check | Out-Null
 $source = Join-Path $root 'download'
 $release = Join-Path $tools "vercel-download-$Version"
 $stage = Join-Path $tools "vercel-website-$Version"

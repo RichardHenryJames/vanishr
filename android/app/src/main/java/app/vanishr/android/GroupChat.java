@@ -209,6 +209,17 @@ final class GroupChat {
         }
     }
 
+    /** A control queued for the official admin's device while another identity was pinned was encrypted for a device that is retired now, so it is never sent. */
+    private void discardRetiredControls() {
+        for (String name : vault.names("group-control-out/")) {
+            QueuedControl queued=read(name,QueuedControl.class);
+            if (queued!=null && engine.onboarding().retiredDevice(queued.packet().recipientId(),queued.packet().recipientDeviceId())) {
+                vault.remove(name);
+                vault.remove(queued.marker().replace("group-mark/","group-packet/"));
+            }
+        }
+    }
+
     private void approveOwner(Snapshot group) throws Exception {
         if (!group.ownerId().equals(user())) return;
         GroupRoster.Member[] allowed=read("group-allowed/"+group.id(),GroupRoster.Member[].class);
@@ -260,6 +271,8 @@ final class GroupChat {
         String base="group-mark/"+epochKey(snapshot.id(),snapshot.epoch())+"/";
         for (Member member : snapshot.members()) {
             if (member.userId().equals(user()) || engine.safety().isBlocked(member.userId())) continue;
+            // An approval from before the official admin's pin moved does not keep the retired identity in the group.
+            if (engine.onboarding().retired(member.userId(),new ChatEngine.Contact(member.userId(),member.deviceId(),member.identityKey()))) continue;
             String kind=member.state().equals("INVITED") ? "INVITE" : "ROSTER";
             if (owner && !marked(base+kind+"/"+member.userId())) planned.add(new Planned(member,kind,base+kind+"/"+member.userId()));
             if (member.state().equals("ACTIVE") && !marked(base+"KEY/"+member.userId())) planned.add(new Planned(member,"KEY",base+"KEY/"+member.userId()));
@@ -311,6 +324,7 @@ final class GroupChat {
     private void flushControls(Snapshot snapshot) throws Exception {
         vault.transaction(() -> {
             for (UUID peerId : engine.safety().blockedUsers()) discardBlockedControls(peerId);
+            discardRetiredControls();
             return null;
         });
         List<QueuedControl> pending=vault.names("group-control-out/").stream().map(name -> read(name,QueuedControl.class))
@@ -343,6 +357,7 @@ final class GroupChat {
             sender=accepted.roster().member(packet.senderId());
         }
         if (!sender.deviceId().equals(packet.senderDeviceId())) throw new SecurityException("Group sender device changed");
+        if (engine.onboarding().retired(sender.userId(),new ChatEngine.Contact(sender.userId(),sender.deviceId(),sender.identityKey()))) { acknowledgeControl(packet); return; }
         signal().verifyPeer(sender.userId(),Base64.getDecoder().decode(sender.identityKey()));
         vault.transaction(() -> {
             engine.safety().requireNotDeleting();
@@ -498,6 +513,11 @@ final class GroupChat {
         }
         GroupRoster.Member sender=approval.roster().member(message.senderId());
         if (!sender.deviceId().equals(message.senderDeviceId()) || !approval.roster().member(user()).deviceId().equals(engine.account().deviceId())) throw new SecurityException("Group device changed");
+        // A key accepted while the official admin's earlier identity was pinned does not make what that identity sends readable now.
+        if (engine.onboarding().retired(sender.userId(),new ChatEngine.Contact(sender.userId(),sender.deviceId(),sender.identityKey()))) {
+            vault.transaction(() -> { discardBlockedMessage(message); return null; });
+            return;
+        }
         if (vault.get("group-key/"+epochKey(message.groupId(),message.epoch())+"/"+sender.userId())==null) {
             if (blocked) vault.transaction(() -> { discardBlockedMessage(message); return null; });
             return;

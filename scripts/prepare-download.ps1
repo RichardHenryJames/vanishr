@@ -8,6 +8,9 @@ $tools = Join-Path $root '.tools'
 # Cutting an app version is also the moment BUILD_ISSUED_FLOOR has to be brought up to the issue time of that file, which -AppRelease
 # requires; checking it first means a floor that was forgotten costs a message and not a rebuild.
 & (Join-Path $PSScriptRoot 'sign-ota-settings.ps1') -Check -AppRelease | Out-Null
+# The admin identity certificate goes out too, and cutting an app version is the moment the app has to carry the newest one (its floor and
+# the built-in pin), which -AppRelease requires, so it is checked here for the same reason: before anything is built.
+& (Join-Path $PSScriptRoot 'sign-admin-identity.ps1') -Check -AppRelease | Out-Null
 . (Join-Path $PSScriptRoot 'ota-settings-rules.ps1')
 Assert-OtaNoLeftoverFile (Join-Path $root 'download/ota')
 $dependencies = Get-Content (Join-Path $root 'android/app/build/reports/distribution/dependencies.json') -Raw | ConvertFrom-Json
@@ -78,6 +81,7 @@ $sourcePaths = @('LICENSE', 'NOTICE.md', 'README.md', 'pom.xml', '.gitignore', '
     'scripts/test-release.ps1', 'scripts/test-google-config.ps1', 'scripts/prepare-ui-assets.ps1', 'scripts/verify.ps1', 'scripts/read-google-config.ps1', 'scripts/prepare-download.ps1',
     'scripts/render-website.ps1', 'scripts/prepare-website.ps1', 'scripts/prepare-site-assets.ps1',
     'scripts/google-certificates.json', 'scripts/new-ota-key.ps1', 'scripts/sign-ota-settings.ps1', 'scripts/ota-settings-rules.ps1', 'scripts/test-ota-settings.ps1',
+    'scripts/sign-admin-identity.ps1', 'scripts/admin-identity-rules.ps1', 'scripts/test-admin-identity.ps1',
     'ota/settings.source.json', 'ota/rules-cases.json',
     'download/index.html', 'download/icon.png', 'download/favicon.ico', 'download/apple-touch-icon.png',
     'download/site.css', 'download/site.js', 'download/site-settings.json', 'download/vercel.json', 'download/ota',

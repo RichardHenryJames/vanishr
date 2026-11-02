@@ -84,6 +84,15 @@ public final class MainActivity extends AppCompatActivity {
     private boolean checkingSettings;
     private boolean playBuild = BuildConfig.PLAY_STORE;
     private java.util.function.Supplier<RemoteSettings> settingsSource = RemoteSettings::new;
+    // The owner's signed statement of the official admin's current device identity (AdminIdentity). It is asked for only after the relay or a
+    // sender showed an identity for the official admin that is not the pinned one (AdminOnboarding.Mismatch), never on a schedule, not more
+    // than once in ten minutes however often the app is restarted (the time is kept in the store), and it is used only if it verifies and is newer.
+    private static final long ADMIN_IDENTITY_RETRY = TimeUnit.MINUTES.toMillis(10);
+    private AdminIdentityStore adminStore;
+    private volatile Map<String, java.security.PublicKey> adminKeys;
+    private final Object adminIdentityGate = new Object();
+    private volatile boolean checkingAdminIdentity;
+    private java.util.function.Supplier<RemoteSettings> adminIdentitySource = () -> RemoteSettings.forAdminIdentity(new okhttp3.OkHttpClient());
     private LinearLayout noticeHost;
     private BoundedScrollView noticeArea;
     private volatile ChatEngine engine;
@@ -543,6 +552,7 @@ public final class MainActivity extends AppCompatActivity {
             try {
                 vault.unlock();
                 ChatEngine loaded = new ChatEngine(vault);
+                applyStoredAdminIdentity(loaded);
                 if (!resumed || generation != screenGeneration) { loaded.close(); return; }
                 ui.post(() -> {
                     if (!resumed || isDestroyed() || generation != screenGeneration) { loaded.close(); return; }
@@ -747,6 +757,78 @@ public final class MainActivity extends AppCompatActivity {
                 ui.post(() -> checkingSettings = false);
             }
         });
+    }
+
+    private AdminIdentityStore adminStore() {
+        if (adminStore == null) adminStore = new AdminIdentityStore(getSharedPreferences("admin-identity", MODE_PRIVATE));
+        return adminStore;
+    }
+
+    private Map<String, java.security.PublicKey> adminKeys() {
+        Map<String, java.security.PublicKey> keys = adminKeys;
+        if (keys != null) return keys;
+        try (java.io.InputStream list = getResources().openRawResource(R.raw.admin_keys)) {
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+            byte[] chunk = new byte[1024];
+            for (int read; (read = list.read(chunk)) > 0; ) bytes.write(chunk, 0, read);
+            keys = RemoteSettings.keys(new String(bytes.toByteArray(), java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception failure) { keys = Map.of(); }
+        // Without a key nothing can be accepted, and the built-in identity stands alone.
+        adminKeys = keys;
+        return keys;
+    }
+
+    /** On the lane that loads the engine: a certificate kept from an earlier run is checked again and, if it holds, takes the place of the built-in pin. */
+    private void applyStoredAdminIdentity(ChatEngine target) {
+        try {
+            if (!adminStore().present()) return;
+            Map<String, java.security.PublicKey> keys = adminKeys();
+            if (keys.isEmpty()) return;
+            AdminIdentity.Certificate stored = adminStore().load(keys, target.onboarding().pin().userId());
+            if (stored != null) target.onboarding().adopt(stored);
+        } catch (RuntimeException unavailable) { /* the built-in identity stands */ }
+    }
+
+    /**
+     * The relay or a sender showed an identity for the official admin that is not the pinned one (AdminOnboarding.Mismatch). If the owner has
+     * certified it, the signed certificate is on the download site: ask for it (not more often than every ten minutes, however often the app is
+     * restarted, and only because of this), and use it only if it verifies and is newer than what is known. Anything else leaves things as they
+     * are, which means the admin stays unverified.
+     */
+    private void requestAdminIdentity(ChatEngine current) {
+        if (current == null || isDestroyed()) return;
+        synchronized (adminIdentityGate) {
+            if (checkingAdminIdentity) return;
+            checkingAdminIdentity = true;
+        }
+        java.util.function.Supplier<RemoteSettings> source = adminIdentitySource;
+        try {
+            updateWork.execute(() -> {
+                try {
+                    AdminIdentityStore store = adminStore();
+                    UUID admin = current.onboarding().pin().userId();
+                    Map<String, java.security.PublicKey> keys = adminKeys();
+                    // Another screen of this app may have fetched and kept the certificate already: this engine takes it from the store, without asking anybody.
+                    AdminIdentity.Certificate kept = store.load(keys, admin);
+                    AdminOnboarding.Pin pinned = current.onboarding().pin();
+                    if (kept != null && (!pinned.deviceId().equals(kept.deviceId()) || !pinned.fingerprint().equals(kept.fingerprint()))) {
+                        act(() -> current.onboarding().adopt(kept));
+                        queueSync();
+                        return;
+                    }
+                    if (!store.reserveAttempt(System.currentTimeMillis(), ADMIN_IDENTITY_RETRY)) return;
+                    try (RemoteSettings fetcher = source.get()) {
+                        byte[] envelope = fetcher.fetch();
+                        AdminIdentity.Certificate certificate = AdminIdentity.verify(envelope, keys, admin);
+                        if (AdminIdentity.newer(certificate, store.load(keys, admin), store.highWater()) && store.save(envelope, certificate.sequence())) {
+                            act(() -> current.onboarding().adopt(certificate));
+                            queueSync();
+                        }
+                    }
+                } catch (Exception failure) { /* nothing changes, and it is asked again later */ }
+                finally { checkingAdminIdentity = false; }
+            });
+        } catch (RuntimeException rejected) { checkingAdminIdentity = false; }
     }
 
     /** What is in force now: a file stops counting the moment it expires, with no network needed. */
@@ -3164,7 +3246,10 @@ public final class MainActivity extends AppCompatActivity {
         catch (GeneralSecurityException | AndroidVault.PhoneLockedException failure) {
             ui.post(() -> { if (engine == current && generation == screenGeneration && !busy) { hideContent(); storageFailure(failure); } }); return;
         }
-        catch (AdminOnboarding.Failure failure) { current.onboarding().blocked(failure); current.unverifiedIncoming = true; }
+        catch (AdminOnboarding.Failure failure) {
+            current.onboarding().blocked(failure); current.unverifiedIncoming = true;
+            if (failure instanceof AdminOnboarding.Mismatch) requestAdminIdentity(current);
+        }
         catch (Exception failure) { current.online = false; }
         // A user action is waiting: it runs first and the sync resumes right behind it from the stored state.
         if (!completed) { syncRequested.set(true); return; }
@@ -3278,7 +3363,10 @@ public final class MainActivity extends AppCompatActivity {
                 || failure instanceof AndroidVault.PhoneLockRequiredException) { hideContent(); storageFailure(failure); }
         else if (failure instanceof ChatEngine.CapacityReached)
             problem("This phone is holding the most unread messages it can. Open your chats to read them, then try again.");
-        else if (failure instanceof SecurityException) problem("Identity verification or secure storage check failed.");
+        else if (failure instanceof SecurityException) {
+            if (failure instanceof AdminOnboarding.Mismatch && engine != null) requestAdminIdentity(engine);
+            problem("Identity verification or secure storage check failed.");
+        }
         else if (failure instanceof RelayApi.ApiFailure apiFailure) {
             if (apiFailure.status == 401 && engine != null && engine.account() != null) {
                 ChatEngine current = engine;

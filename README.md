@@ -12,6 +12,23 @@ license notices at **https://vanishr-download.vercel.app**.
 The public [update feed](https://vanishr-download.vercel.app/updates.json), not
 the latest Git version, determines which release users can download and discover.
 
+Release **0.6.3/code 44** fixes the red warning "Official admin identity changed, a revised app update
+is required" that accounts saw after the official admin signed in on a new phone: every app pinned the old
+phone's identity, so every app refused the new one, the owner's included. The new phone's identity is built
+in, and a later phone change no longer needs a new app version. A small *signed admin certificate* on the
+download site (`/ota/admin-identity.json`, signed with a separate ECDSA P-256 key kept off the website) is
+fetched only when the relay shows an admin identity the app does not hold (at most every ten minutes), and
+the app follows it only if the signature, the account and a rising sequence number check out. It moves the
+pin's device and identity and replaces the saved official-admin chat with a fresh session (history stays),
+and only with exactly the identity the pin now names; every other contact's changed identity is still
+refused. From the moment the pin moves the old identity no longer counts as verified for anything, what was
+still waiting to be sent to it (a message, a group key, a profile-photo revocation) is dropped, and a photo session already
+running with it ends. Versions before 0.6.3 cannot follow a change. No relay change. Evidence is from an emulator and
+tooling tests only: no physical phone and no Google Play install was tested. See
+[changing the admin's phone](docs/DEPLOYMENT-GUIDE.md#changing-the-admins-phone), the
+[threat model](docs/THREAT-MODEL.md#the-admin-changes-phone-063) and
+[verification](docs/VERIFICATION.md#release-063--the-official-admin-changes-phone).
+
 Release **0.6.2/code 43** adds a way to change a few things without a new app version, and
 makes Google sign-in fixable for Google Play installs. A small *signed settings file* on the
 download site (checked at most once a day while the app is open, in the direct-download and

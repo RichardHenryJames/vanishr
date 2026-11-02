@@ -49,6 +49,8 @@ final class RemotePhotoSession implements AutoCloseable {
         final long deadline;
         final RelayApi api;
         final Session request;
+        // True once the other phone is the official admin's earlier identity (the pin has moved since this session was approved).
+        final java.util.function.BooleanSupplier retired;
         Prepared(ChatEngine engine, ChatEngine.Peer peer, Session request) throws Exception {
             if (!trustedContact(engine, peer))
                 throw new SecurityException("Verify this contact before sharing photos");
@@ -58,6 +60,7 @@ final class RemotePhotoSession implements AutoCloseable {
             ChatEngine.Account account = engine.account();
             own = new ChatEngine.Contact(account.userId(), account.deviceId(), Base64.getEncoder().encodeToString(engine.groupSignal().publicIdentity()));
             this.peer = current; peerName = peer.name(); owner = request != null; this.request = request;
+            retired = () -> engine.onboarding().retired(current.userId(), current);
             id = owner ? request.id() : UUID.randomUUID();
             if (owner && (!own.equals(request.owner()) || !current.equals(request.requester()) || request.accepted()
                     || request.key() == null || !current.identityKey().equals(Base64.getEncoder().encodeToString(request.key().identityKey()))))
@@ -144,6 +147,8 @@ final class RemotePhotoSession implements AutoCloseable {
 
     void tick() throws Exception {
         if (ended || stopping) return;
+        // The official admin's earlier identity: nothing more is encrypted to it, sent to it or read from it, and the session ends.
+        requireTrusted();
         if (SystemClock.elapsedRealtime() >= expiresElapsed) throw new IOException("Photo session expired");
         if (connectionFailed) throw new IOException("Photo connection ended");
         if (!connected) return;
@@ -181,16 +186,20 @@ final class RemotePhotoSession implements AutoCloseable {
             }
         }
         if (outgoing != null && outgoing.expiresAt() <= System.currentTimeMillis()) throw new IOException("Photo transfer expired");
+        requireTrusted();
         Delivery response;
         try { response = prepared.api.photoCall("POST", path() + "/exchange", new Exchange(lastReceived, outgoing), Delivery.class); }
         catch (RelayApi.ApiFailure failure) { if (failure.status == 409 && failure.code.equals("photo_transfer_busy")) return; throw failure; }
         if (ended || stopping) return;
         outgoing = null;
         if (response == null) throw new IOException("Photo transfer unavailable");
+        // The pin may have moved while the exchange was on its way: the answer of the earlier identity is not read.
+        requireTrusted();
         if (response.packet() != null && !response.packet().id().equals(lastReceived)) receive(response.packet());
     }
 
     private String path() { return "/remote-photos/" + prepared.id; }
+    private void requireTrusted() { if (prepared.retired.getAsBoolean()) throw new SecurityException("The other phone is no longer trusted"); }
     private void validateSession(Session value) {
         if (value == null || !prepared.id.equals(value.id()) || value.expiresAt() <= System.currentTimeMillis()
             || value.expiresAt() > System.currentTimeMillis() + LIFETIME + 5000

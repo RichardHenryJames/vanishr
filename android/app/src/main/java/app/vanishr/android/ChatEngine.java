@@ -166,8 +166,9 @@ final class ChatEngine implements AutoCloseable {
     // Online, typing and last seen follow a normal chat; groups, profile photos and backups still need independent verification.
     boolean sharesPresence(UUID userId) { return independentlyVerified(userId) || automaticConnection(userId); }
     private boolean savedContact(UUID userId) {
+        // A saved official admin that is not the pinned identity (the pin moved after it was saved) is not a contact for anything until it is replaced.
         return signal != null && !safety.deletionPending() && !safety.isBlocked(userId) && signal.isVerified(userId)
-                && vault.get("contact/" + userId) != null;
+                && vault.get("contact/" + userId) != null && !onboarding.rotationPending(userId);
     }
     void prepareConversation(Peer peer) throws Exception { safety.requireAllowed(peer.userId()); onboarding.prepare(peer); }
     /** The local half of opening a chat; false means the contact must still be introduced over the network. */
@@ -857,6 +858,16 @@ final class ChatEngine implements AutoCloseable {
             Send message = outbox.message();
             if (safety.isBlocked(message.recipientId())) { discardBlockedContact(message.recipientId()); continue; }
             if (message.expiresAt() <= System.currentTimeMillis()) continue;
+            if (onboarding.retiredDevice(message.recipientId(), message.recipientDeviceId())) {
+                // Queued while an identity was pinned that is retired now: it was encrypted for a device the app no longer trusts, so it is not sent.
+                vault.transaction(() -> {
+                    Entry entry = read("entry/" + message.id(), Entry.class);
+                    if (entry != null) write("entry/" + entry.id(), entry.withState("Not sent: contact unavailable"));
+                    vault.remove(name);
+                    return null;
+                });
+                continue;
+            }
             Status status;
             try {
                 if (message.mediaId() != null) api.upload(message.mediaId(), message.recipientId(), message.recipientDeviceId(), message.expiresAt(), outbox.media());
@@ -925,24 +936,30 @@ final class ChatEngine implements AutoCloseable {
         if (failure != null) throw failure;
     }
 
+    /** A message that is not read (from a blocked sender, or from a retired device): its routing is checked, the relay is asked to delete it, and it is marked seen. */
+    private void discard(Incoming message) throws Exception {
+        if (message.id() == null || !account.userId().equals(message.recipientId())
+                || !account.deviceId().equals(message.recipientDeviceId())
+                || message.expiresAt() > System.currentTimeMillis() + 86_400_000L)
+            throw new SecurityException("Invalid blocked message routing");
+        vault.transaction(() -> {
+            byte[] seen = vault.get("seen/" + message.id());
+            long deadline = seen == null ? message.expiresAt()
+                    : Math.min(message.expiresAt(), Long.parseLong(new String(seen, StandardCharsets.US_ASCII)));
+            write("ack/" + message.id(), new Ack(message.id(), deadline, "delete"));
+            vault.put("seen/" + message.id(), Long.toString(deadline).getBytes(StandardCharsets.US_ASCII));
+            return null;
+        });
+    }
+
     private void receive(Incoming message) throws Exception {
         if (message.expiresAt() <= System.currentTimeMillis()) return;
-        if (safety.isBlocked(message.senderId())) {
-            if (message.id() == null || !account.userId().equals(message.recipientId())
-                    || !account.deviceId().equals(message.recipientDeviceId())
-                    || message.expiresAt() > System.currentTimeMillis() + 86_400_000L)
-                throw new SecurityException("Invalid blocked message routing");
-            vault.transaction(() -> {
-                byte[] seen = vault.get("seen/" + message.id());
-                long deadline = seen == null ? message.expiresAt()
-                        : Math.min(message.expiresAt(), Long.parseLong(new String(seen, StandardCharsets.US_ASCII)));
-                write("ack/" + message.id(), new Ack(message.id(), deadline, "delete"));
-                vault.put("seen/" + message.id(), Long.toString(deadline).getBytes(StandardCharsets.US_ASCII));
-                return null;
-            });
-            return;
-        }
-        if (!signal.isVerified(message.senderId()) || read("contact/" + message.senderId(), Peer.class) == null)
+        if (safety.isBlocked(message.senderId())) { discard(message); return; }
+        // From the device that was the official admin's until the pin moved: not read, and deleted at the relay, so that it neither stops every
+        // sync that meets it nor is offered again. (A message from a device the app does not know is not this; see AdminOnboarding.)
+        if (onboarding.fromRetiredContact(message.senderId(), message.senderDeviceId())) { discard(message); return; }
+        if (!signal.isVerified(message.senderId()) || read("contact/" + message.senderId(), Peer.class) == null
+                || onboarding.rotationPending(message.senderId()))
             onboarding.acceptIncoming(message.senderId(), message.senderDeviceId());
         onboarding.requireSaved(message.senderId());
         Peer sender = read("contact/" + message.senderId(), Peer.class);

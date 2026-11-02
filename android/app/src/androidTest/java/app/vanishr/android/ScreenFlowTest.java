@@ -31,6 +31,8 @@ import static org.junit.Assert.*;
 @RunWith(AndroidJUnit4.class)
 public class ScreenFlowTest {
     private Context context;
+    // What the admin-onboarding transport was asked to delete at the relay (an unread message that was handed back by DELETE /messages/{id}).
+    private final List<String> deletedMessages = new ArrayList<>();
     private AndroidVault vault;
     private ChatEngine engine;
     private final UUID userId = UUID.randomUUID();
@@ -52,6 +54,7 @@ public class ScreenFlowTest {
         // The signed settings are not fetched from the real download site by a test that is about something else.
         assertTrue(context.getSharedPreferences("remote-settings", Context.MODE_PRIVATE).edit().clear()
             .putLong("last-check", System.currentTimeMillis()).commit());
+        assertTrue(context.getSharedPreferences("admin-identity", Context.MODE_PRIVATE).edit().clear().commit());
         createFixtureKey(AndroidVault.MASTER);
         vault = new AndroidVault(context); vault.unlock(); engine = new ChatEngine(vault);
         Bitmap image = Bitmap.createBitmap(720, 480, Bitmap.Config.ARGB_8888);
@@ -72,6 +75,7 @@ public class ScreenFlowTest {
         resetQaFixture();
         assertTrue(context.getSharedPreferences("updates", Context.MODE_PRIVATE).edit().clear().commit());
         assertTrue(context.getSharedPreferences("remote-settings", Context.MODE_PRIVATE).edit().clear().commit());
+        assertTrue(context.getSharedPreferences("admin-identity", Context.MODE_PRIVATE).edit().clear().commit());
     }
 
     private void resetQaFixture() throws Exception {
@@ -190,6 +194,7 @@ public class ScreenFlowTest {
             }
             if (path.equals("/messages/status")) return syntheticResponse(request, 200,
                 outgoing.stream().map(sent -> new ChatEngine.Status(sent.id(), "QUEUED", sent.expiresAt())).toList());
+            if (path.matches("/messages/[0-9a-f-]+") && request.method().equals("DELETE")) { deletedMessages.add(path); return syntheticResponse(request, 200, null); }
             if (path.matches("/messages/[0-9a-f-]+/(delivered|read)")) return syntheticResponse(request, 200, null);
             if (path.equals("/keys")) return syntheticResponse(request, 200, new ChatEngine.KeyCount(16));
             if (Set.of("/groups", "/profile/packets", "/remote-photos", "/presence").contains(path)) return syntheticResponse(request, 200, List.of());
@@ -6633,6 +6638,1080 @@ public class ScreenFlowTest {
     }
 
     // ==== end 0.6.2 ====
+
+    // ==== 0.6.3: the official admin changes phone ====
+
+    private static java.security.KeyPair adminAuthorityPair() throws Exception {
+        java.security.KeyPairGenerator generator = java.security.KeyPairGenerator.getInstance("EC");
+        generator.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"));
+        return generator.generateKeyPair();
+    }
+
+    private static String fingerprintOf(UUID account, SignalClient identity) throws Exception {
+        return ChatEngine.safetyNumber(account, Base64.getEncoder().encodeToString(identity.publicIdentity())).replace(" ", "").toLowerCase(Locale.ROOT);
+    }
+
+    // What the app holds after it has verified a certificate (the signature itself is covered by AdminIdentityTest and below).
+    private static AdminIdentity.Certificate certificate(UUID account, UUID device, SignalClient identity, long sequence) throws Exception {
+        return new AdminIdentity.Certificate("t1", sequence, account, device, fingerprintOf(account, identity));
+    }
+
+    private static byte[] signedAdminIdentity(java.security.KeyPair pair, String keyId, long sequence, UUID account, UUID device, String fingerprint) throws Exception {
+        byte[] payload = ("{\"schema\":1,\"sequence\":" + sequence + ",\"userId\":\"" + account + "\",\"deviceId\":\"" + device + "\",\"fingerprint\":\"" + fingerprint + "\"}")
+                .getBytes(StandardCharsets.UTF_8);
+        java.security.Signature signature = java.security.Signature.getInstance("SHA256withECDSA");
+        signature.initSign(pair.getPrivate());
+        signature.update("vanishr-admin-identity-v1\0".getBytes(StandardCharsets.US_ASCII));
+        signature.update(payload);
+        java.util.Base64.Encoder encoder = java.util.Base64.getUrlEncoder().withoutPadding();
+        return ("{\"v\":1,\"key\":\"" + keyId + "\",\"payload\":\"" + encoder.encodeToString(payload) + "\",\"sig\":\"" + encoder.encodeToString(signature.sign()) + "\"}")
+                .getBytes(StandardCharsets.UTF_8);
+    }
+
+    // This phone holds the official admin as it was before the pin changed: saved as an automatic contact, with its identity verified.
+    private void saveRetiredAdmin(AdminOnboarding.Introduction retired, SignalClient retiredIdentity) throws Exception {
+        vault.transaction(() -> {
+            engine.groupSignal().verifyPeer(peerId, retiredIdentity.publicIdentity());
+            write("contact/" + peerId, retired.peer());
+            write("admin-contact/" + peerId, true);
+            return null;
+        });
+    }
+
+    @Test public void aSavedOfficialAdminIsReplacedByTheNewPinnedIdentityAndNeverByAnyOtherOne() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient stranger = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID();
+        signedInFixture(adminPin(peerId, peerDevice, retired));
+        var before = introduction(peerId, peerDevice, retired, "vanishr");
+        var after = introduction(peerId, currentDevice, current, "vanishr");
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId, RemotePhotoSession.contact(before.peer()), List.of(before), null));
+        List<ChatEngine.Send> outgoing = new ArrayList<>();
+        adminTransport(directory, new ArrayList<>(), outgoing, retired.generatePreKey(Instant.now()));
+        engine.onboarding().refresh();
+        engine.send(before.peer(), "before the change", null, ChatEnvelope.Expiry.HOUR_1);
+        assertTrue("A session with the retired identity exists", engine.groupSignal().hasSession(peerId));
+        assertEquals(before.peer(), engine.peer(peerId));
+
+        // The relay now shows the owner's new phone, which this build has not been told about: nothing is replaced and the warning shows.
+        directory.set(new AdminOnboarding.Page(userId, RemotePhotoSession.contact(after.peer()), List.of(after), null));
+        AdminOnboarding.Failure refused = assertThrows(AdminOnboarding.Failure.class, () -> engine.onboarding().first());
+        engine.onboarding().blocked(refused);
+        assertNotNull(engine.onboarding().problem());
+        assertEquals(before.peer(), engine.peer(peerId));
+        assertTrue(engine.groupSignal().hasSession(peerId));
+        assertFalse("Nothing is pending while the pin is still the retired identity", engine.onboarding().rotationPending(peerId));
+
+        // A certificate for some other identity is not the one the relay shows: still refused, still nothing replaced.
+        engine.onboarding().adopt(certificate(peerId, UUID.randomUUID(), stranger, 2));
+        assertNull("Adopting clears the warning, the next look at the relay brings it back", engine.onboarding().problem());
+        assertThrows(AdminOnboarding.Failure.class, () -> engine.onboarding().first());
+        assertThrows(SecurityException.class, () -> engine.onboarding().prepare(before.peer()));
+        assertEquals(before.peer(), engine.peer(peerId));
+        assertTrue(engine.groupSignal().hasSession(peerId));
+        assertThrows("The retired identity is still the one that is verified", SecurityException.class,
+                () -> engine.groupSignal().verifyPeer(peerId, current.publicIdentity()));
+
+        // The certificate for the identity the relay shows: the saved contact is replaced, with a fresh start for the session.
+        engine.onboarding().adopt(certificate(peerId, currentDevice, current, 3));
+        long generation = engine.onboarding().generation();
+        assertTrue(engine.onboarding().rotationPending(peerId));
+        engine.onboarding().first();
+        assertNull(engine.onboarding().problem());
+        assertEquals(after.peer(), engine.peer(peerId));
+        assertFalse(engine.onboarding().rotationPending(peerId));
+        assertTrue(engine.groupSignal().isVerified(peerId));
+        assertFalse("The old session is gone", engine.groupSignal().hasSession(peerId));
+        assertThrows("The retired identity can no longer be verified", SecurityException.class,
+                () -> engine.groupSignal().verifyPeer(peerId, retired.publicIdentity()));
+        engine.groupSignal().verifyPeer(peerId, current.publicIdentity());
+        assertTrue(engine.onboarding().automatic(peerId));
+        assertFalse("Pinned by the app, not verified by the person", engine.independentlyVerified(peerId));
+        assertTrue(engine.sharesPresence(peerId));
+        assertTrue(engine.onboarding().generation() >= generation);
+
+        // And the conversation goes on with the new identity.
+        adminTransport(directory, new ArrayList<>(), outgoing, current.generatePreKey(Instant.now()));
+        engine.send(after.peer(), "after the change", null, ChatEnvelope.Expiry.HOUR_1);
+        assertEquals(2, outgoing.size());
+        current.verifyPeer(userId, engine.groupSignal().publicIdentity());
+        ChatEngine.Send sent = outgoing.get(1);
+        byte[] plaintext = current.decrypt(userId, new SignalClient.Packet(sent.type(), sent.ciphertext()));
+        try { assertEquals("after the change", RelayApi.JSON.fromJson(new String(plaintext, StandardCharsets.UTF_8), ChatEnvelope.class).text()); }
+        finally { Arrays.fill(plaintext, (byte) 0); }
+    }
+
+    @Test public void aContactThatIsNotTheOfficialAdminIsNeverReplacedByAPinChange() throws Exception {
+        SignalClient own = new SignalClient(userId, vault);
+        signedInFixture(adminPin(userId, deviceId, own));
+        ChatEngine.Contact official = new ChatEngine.Contact(userId, deviceId, Base64.getEncoder().encodeToString(own.publicIdentity()));
+        SignalClient first = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient second = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        var introduced = introduction(peerId, peerDevice, first, "newcomer");
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId, official, List.of(introduced), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        engine.onboarding().refresh();
+        assertEquals(introduced.peer(), engine.peer(peerId));
+        // On the admin's own phone a new account that comes back with another identity is exactly what a pin change must not touch.
+        var changed = introduction(peerId, peerDevice, second, "newcomer");
+        directory.set(new AdminOnboarding.Page(userId, official, List.of(changed), null));
+        assertThrows(SecurityException.class, () -> engine.onboarding().first());
+        assertThrows(SecurityException.class, () -> engine.onboarding().prepare(changed.peer()));
+        assertFalse(engine.onboarding().rotationPending(peerId));
+        engine.onboarding().adopt(certificate(userId, deviceId, own, 7));
+        assertThrows("A new pin does not make anyone else's changed identity acceptable", SecurityException.class, () -> engine.onboarding().first());
+        assertEquals(introduced.peer(), engine.peer(peerId));
+        assertThrows(SecurityException.class, () -> engine.groupSignal().verifyPeer(peerId, second.publicIdentity()));
+    }
+
+    // The pin is the new identity (as after adopt) while this phone still holds the retired official admin from before.
+    private AdminOnboarding.Introduction[] retiredAdminSetup(SignalClient retired, SignalClient current, UUID currentDevice) throws Exception {
+        signedInFixture(adminPin(peerId, currentDevice, current));
+        var before = introduction(peerId, peerDevice, retired, "vanishr");
+        var after = introduction(peerId, currentDevice, current, "vanishr");
+        saveRetiredAdmin(before, retired);
+        assertTrue(engine.onboarding().rotationPending(peerId));
+        return new AdminOnboarding.Introduction[]{before, after};
+    }
+
+    @Test public void anIncomingMessageFromTheNewAdminDeviceReplacesTheRetiredContactBeforeItIsRead() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID();
+        var setup = retiredAdminSetup(retired, current, currentDevice);
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId,
+                RemotePhotoSession.contact(setup[1].peer()), List.of(setup[1]), null));
+        List<ChatEngine.Incoming> incoming = new ArrayList<>();
+        adminTransport(directory, incoming, new ArrayList<>(), null);
+        current.verifyPeer(userId, engine.groupSignal().publicIdentity());
+        current.establish(userId, engine.groupSignal().generatePreKey(Instant.now()), Instant.now());
+        UUID id = UUID.randomUUID(); long now = System.currentTimeMillis(), deadline = now + 120_000;
+        ChatEnvelope envelope = new ChatEnvelope(1, id, peerId, currentDevice, userId, deviceId, now, deadline, ChatEnvelope.Expiry.HOUR_1, "from the new admin phone", null);
+        SignalClient.Packet packet = current.encrypt(userId, RelayApi.JSON.toJson(envelope).getBytes(StandardCharsets.UTF_8), Instant.now());
+        incoming.add(new ChatEngine.Incoming(id, peerId, currentDevice, userId, deviceId, ChatEnvelope.Expiry.HOUR_1, now, deadline, packet.type(), packet.ciphertext(), null));
+        engine.sync();
+        assertTrue("The message was read", engine.entries(peerId).stream().anyMatch(entry -> id.equals(entry.id()) && !entry.outgoing()));
+        assertEquals(setup[1].peer(), engine.peer(peerId));
+        assertFalse(engine.onboarding().rotationPending(peerId));
+        assertTrue(engine.onboarding().automatic(peerId));
+        assertTrue(engine.groupSignal().isVerified(peerId));
+        engine.groupSignal().verifyPeer(peerId, current.publicIdentity());
+        assertThrows("The retired identity was replaced, not added to", SecurityException.class, () -> engine.groupSignal().verifyPeer(peerId, retired.publicIdentity()));
+    }
+
+    @Test public void anAdminThePersonVerifiedByHandIsReplacedByThePinnedIdentityAndIsAutomaticAfterwards() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID();
+        var setup = retiredAdminSetup(retired, current, currentDevice);
+        // Verified by hand while the old identity was the pinned one: that contact has no automatic marker. The pin has moved since, so it
+        // is no longer verified for anything, although it is still the saved contact.
+        vault.transaction(() -> { vault.remove("admin-contact/" + peerId); return null; });
+        assertTrue(engine.onboarding().rotationPending(peerId));
+        assertFalse(engine.independentlyVerified(peerId));
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId,
+                RemotePhotoSession.contact(setup[1].peer()), List.of(setup[1]), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        engine.prepareConversation(setup[0].peer());
+        assertEquals(setup[1].peer(), engine.peer(peerId));
+        assertTrue(engine.onboarding().automatic(peerId));
+        assertFalse("The new identity is pinned by the app, not verified by the person", engine.independentlyVerified(peerId));
+        assertTrue(engine.groupSignal().isVerified(peerId));
+        assertThrows("The identity the person verified is gone, not kept beside the new one", SecurityException.class,
+                () -> engine.groupSignal().verifyPeer(peerId, retired.publicIdentity()));
+    }
+
+    @Test public void aMessageFromAnIdentityThatIsNeitherTheRetiredNorThePinnedOneIsNotReadAndReplacesNothing() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient impostor = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID(), impostorDevice = UUID.randomUUID();
+        var setup = retiredAdminSetup(retired, current, currentDevice);
+        var fake = introduction(peerId, impostorDevice, impostor, "vanishr");
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId,
+                RemotePhotoSession.contact(fake.peer()), List.of(fake), null));
+        List<ChatEngine.Incoming> incoming = new ArrayList<>();
+        adminTransport(directory, incoming, new ArrayList<>(), null);
+        impostor.verifyPeer(userId, engine.groupSignal().publicIdentity());
+        impostor.establish(userId, engine.groupSignal().generatePreKey(Instant.now()), Instant.now());
+        UUID id = UUID.randomUUID(); long now = System.currentTimeMillis(), deadline = now + 120_000;
+        ChatEnvelope envelope = new ChatEnvelope(1, id, peerId, impostorDevice, userId, deviceId, now, deadline, ChatEnvelope.Expiry.HOUR_1, "not the admin", null);
+        SignalClient.Packet packet = impostor.encrypt(userId, RelayApi.JSON.toJson(envelope).getBytes(StandardCharsets.UTF_8), Instant.now());
+        incoming.add(new ChatEngine.Incoming(id, peerId, impostorDevice, userId, deviceId, ChatEnvelope.Expiry.HOUR_1, now, deadline, packet.type(), packet.ciphertext(), null));
+        assertThrows(AdminOnboarding.Failure.class, engine::sync);
+        assertTrue(engine.entries(peerId).stream().noneMatch(entry -> id.equals(entry.id())));
+        assertEquals("Nothing was replaced", setup[0].peer(), engine.peer(peerId));
+        assertTrue(engine.onboarding().rotationPending(peerId));
+        assertThrows(SecurityException.class, () -> engine.groupSignal().verifyPeer(peerId, impostor.publicIdentity()));
+    }
+
+    @Test public void openingTheAdminChatAfterAPinChangeTakesTheNewIdentityFromTheNetworkInsteadOfFailing() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID();
+        var setup = retiredAdminSetup(retired, current, currentDevice);
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId,
+                RemotePhotoSession.contact(setup[1].peer()), List.of(setup[1]), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        assertFalse("The saved copy is the retired one, so the network has to say what the admin is now", engine.prepareSavedConversation(setup[0].peer()));
+        engine.prepareConversation(setup[0].peer());
+        assertEquals(setup[1].peer(), engine.peer(peerId));
+        assertTrue("Afterwards it opens locally again", engine.prepareSavedConversation(setup[1].peer()));
+        assertTrue(engine.automaticConnection(peerId));
+    }
+
+    @Test public void openingTheAdminChatWhenTheRelayShowsAnUnpinnedIdentityStillFailsClosed() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient impostor = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        var setup = retiredAdminSetup(retired, current, UUID.randomUUID());
+        var fake = introduction(peerId, UUID.randomUUID(), impostor, "vanishr");
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId,
+                RemotePhotoSession.contact(fake.peer()), List.of(fake), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        assertFalse(engine.prepareSavedConversation(setup[0].peer()));
+        assertThrows(AdminOnboarding.Failure.class, () -> engine.prepareConversation(setup[0].peer()));
+        assertEquals(setup[0].peer(), engine.peer(peerId));
+        assertFalse(engine.automaticConnection(peerId));
+        assertThrows(SecurityException.class, () -> engine.send(setup[0].peer(), "must not be sent", null, ChatEnvelope.Expiry.HOUR_1));
+    }
+
+    @Test public void theAdminsNewPhoneIsRecognisedOnlyOnceItsIdentityIsPinnedAndACertificateCanOnlyMoveTheDeviceAndTheIdentity() throws Exception {
+        SignalClient own = new SignalClient(userId, vault);
+        SignalClient retired = new SignalClient(userId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(adminPin(userId, UUID.randomUUID(), retired));
+        assertTrue(engine.onboarding().admin());
+        assertFalse("The account matches, this phone's identity does not", engine.onboarding().verifiedAdmin());
+        AdminOnboarding.Pin original = engine.onboarding().pin();
+        long generation = engine.onboarding().generation();
+        engine.onboarding().adopt(null);
+        engine.onboarding().adopt(certificate(UUID.randomUUID(), deviceId, own, 4));
+        assertEquals("A certificate for another account changes nothing", original, engine.onboarding().pin());
+        assertEquals(generation, engine.onboarding().generation());
+        assertFalse(engine.onboarding().verifiedAdmin());
+
+        engine.onboarding().adopt(certificate(userId, deviceId, own, 5));
+        assertTrue("This phone's device and identity are the pinned ones now", engine.onboarding().verifiedAdmin());
+        assertEquals("The relay stays what the app was built with", original.origin(), engine.onboarding().pin().origin());
+        assertEquals(userId, engine.onboarding().pin().userId());
+        assertEquals(deviceId, engine.onboarding().pin().deviceId());
+        assertTrue(engine.onboarding().generation() > generation);
+        long adopted = engine.onboarding().generation();
+        engine.onboarding().adopt(certificate(userId, deviceId, own, 6));
+        assertEquals("The same identity again changes nothing", adopted, engine.onboarding().generation());
+
+        // Nothing but the certificate decides who the admin is: the identity of another phone takes it away again.
+        engine.onboarding().adopt(certificate(userId, deviceId, retired, 8));
+        assertFalse(engine.onboarding().verifiedAdmin());
+        engine.onboarding().adopt(certificate(userId, UUID.randomUUID(), own, 9));
+        assertFalse("The right identity on another device is not the admin either", engine.onboarding().verifiedAdmin());
+    }
+
+    private okhttp3.OkHttpClient certificateTransport(java.util.concurrent.atomic.AtomicReference<byte[]> served, java.util.concurrent.atomic.AtomicInteger requests) {
+        return new okhttp3.OkHttpClient.Builder().addInterceptor(chain -> {
+            requests.incrementAndGet();
+            assertEquals(AdminIdentity.URL, chain.request().url().toString());
+            assertEquals("GET", chain.request().method());
+            assertNull(chain.request().header("Authorization"));
+            assertNull(chain.request().header("Cookie"));
+            byte[] body = served.get();
+            if (body == null) throw new IOException("Offline");
+            return new okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("OK")
+                    .body(okhttp3.ResponseBody.create(body, okhttp3.MediaType.get("application/json"))).build();
+        }).build();
+    }
+
+    @Test public void aMismatchOfTheAdminIdentityAsksForTheCertificateAndOnlyAVerifiedNewerOneIsFollowed() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient other = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID();
+        signedInFixture(adminPin(peerId, peerDevice, retired));
+        var before = introduction(peerId, peerDevice, retired, "vanishr");
+        var after = introduction(peerId, currentDevice, current, "vanishr");
+        saveRetiredAdmin(before, retired);
+        // The relay still shows the identity the pin knows while the refusals are tried, so that no sync of its own asks for anything.
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId, RemotePhotoSession.contact(before.peer()), List.of(before), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        java.security.KeyPair authority = adminAuthorityPair(), stranger = adminAuthorityPair();
+        UUID admin = peerId;
+        String currentFingerprint = fingerprintOf(admin, current);
+        java.util.concurrent.atomic.AtomicReference<byte[]> served = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicInteger requests = new java.util.concurrent.atomic.AtomicInteger();
+        okhttp3.OkHttpClient transport = certificateTransport(served, requests);
+        android.content.SharedPreferences stored = context.getSharedPreferences("admin-identity", Context.MODE_PRIVATE);
+        AdminOnboarding.Pin retiredPin = engine.onboarding().pin();
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                setField(activity, "adminKeys", Map.of("t1", authority.getPublic()));
+                setField(activity, "adminIdentitySource", (java.util.function.Supplier<RemoteSettings>) () -> RemoteSettings.forAdminIdentity(transport));
+                inject(activity);
+            });
+            java.util.function.Consumer<byte[]> ask = body -> {
+                served.set(body);
+                try {
+                    scenario.onActivity(activity -> {
+                        assertTrue(stored.edit().remove("last-attempt").commit());
+                        invoke(activity, "requestAdminIdentity", new Class<?>[]{ChatEngine.class}, engine);
+                    });
+                    awaitMainCondition(scenario, activity -> !(boolean) readField(activity, "checkingAdminIdentity"));
+                } catch (Exception failure) { throw new AssertionError(failure); }
+            };
+            byte[] good = signedAdminIdentity(authority, "t1", 3, admin, currentDevice, currentFingerprint);
+            byte[] tampered = good.clone(); tampered[tampered.length - 6] ^= 1;
+            int asked = 0;
+            for (byte[] refused : List.of(
+                    signedAdminIdentity(stranger, "t1", 3, admin, currentDevice, currentFingerprint),
+                    signedAdminIdentity(authority, "unknown", 3, admin, currentDevice, currentFingerprint),
+                    signedAdminIdentity(authority, "t1", 3, UUID.randomUUID(), currentDevice, currentFingerprint),
+                    signedAdminIdentity(authority, "t1", AdminIdentity.BUILD_SEQUENCE_FLOOR, admin, currentDevice, currentFingerprint),
+                    signedAdminIdentity(authority, "t1", 3, admin, currentDevice, currentFingerprint.toUpperCase(Locale.ROOT)),
+                    tampered, "<html>not a certificate</html>".getBytes(StandardCharsets.UTF_8), new byte[0])) {
+                ask.accept(refused);
+                assertEquals("It was asked for", ++asked, requests.get());
+                assertEquals("Nothing that does not verify, or is not newer, is followed", retiredPin, engine.onboarding().pin());
+                assertFalse(stored.contains("envelope"));
+            }
+            ask.accept(null);
+            assertEquals("An unreachable site changes nothing either", retiredPin, engine.onboarding().pin());
+
+            // Not more than once in ten minutes, whatever the screen keeps asking.
+            served.set(good);
+            scenario.onActivity(activity -> { invoke(activity, "requestAdminIdentity", new Class<?>[]{ChatEngine.class}, engine); invoke(activity, "requestAdminIdentity", new Class<?>[]{ChatEngine.class}, engine); });
+            awaitMainCondition(scenario, activity -> !(boolean) readField(activity, "checkingAdminIdentity"));
+            assertEquals("The retry period was not over, so nothing was asked", asked + 1, requests.get());
+            // A restart of the app does not make it due again: the time of the last request is kept with the certificate, not in the screen.
+            scenario.onActivity(activity -> {
+                setField(activity, "adminStore", null);
+                invoke(activity, "requestAdminIdentity", new Class<?>[]{ChatEngine.class}, engine);
+            });
+            awaitMainCondition(scenario, activity -> !(boolean) readField(activity, "checkingAdminIdentity"));
+            assertEquals("Still not due after a restart", asked + 1, requests.get());
+
+            // The relay now shows the owner's new phone, and this is the first moment a sync of its own can meet it.
+            directory.set(new AdminOnboarding.Page(userId, RemotePhotoSession.contact(after.peer()), List.of(after), null));
+            ask.accept(good);
+            assertEquals(asked + 2, requests.get());
+            assertEquals("The certificate was followed", certificate(admin, currentDevice, current, 3).pin(retiredPin.origin()), engine.onboarding().pin());
+            assertNotNull("and kept, exactly as it came", stored.getString("envelope", null));
+            assertEquals(new String(good, StandardCharsets.UTF_8), stored.getString("envelope", null));
+            // The next sync (it was asked for) replaces the retired contact, so the chat list no longer carries the warning.
+            awaitMainCondition(scenario, activity -> !engine.onboarding().rotationPending(peerId) && engine.onboarding().problem() == null);
+            assertEquals(after.peer(), engine.peer(peerId));
+            assertTrue(engine.groupSignal().isVerified(peerId));
+            // The same certificate, or an older one, is not taken again.
+            ask.accept(good);
+            assertEquals(good.length, stored.getString("envelope", "").getBytes(StandardCharsets.UTF_8).length);
+            ask.accept(signedAdminIdentity(authority, "t1", 2, admin, UUID.randomUUID(), fingerprintOf(admin, other)));
+            assertEquals("A lower number is not put back", currentDevice, engine.onboarding().pin().deviceId());
+            assertEquals(new String(good, StandardCharsets.UTF_8), stored.getString("envelope", null));
+        }
+    }
+
+    @Test public void aStoredCertificateIsCheckedAgainWhenTheEngineLoadsAndOneThatNoLongerHoldsIsIgnored() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID();
+        signedInFixture(adminPin(peerId, peerDevice, retired));
+        AdminOnboarding.Pin retiredPin = engine.onboarding().pin();
+        java.security.KeyPair authority = adminAuthorityPair(), stranger = adminAuthorityPair();
+        byte[] good = signedAdminIdentity(authority, "t1", 4, peerId, currentDevice, fingerprintOf(peerId, current));
+        android.content.SharedPreferences stored = context.getSharedPreferences("admin-identity", Context.MODE_PRIVATE);
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            java.util.function.Function<byte[], AdminOnboarding.Pin> start = envelope -> {
+                AdminOnboarding.Pin[] pin = new AdminOnboarding.Pin[1];
+                assertTrue(envelope == null ? stored.edit().clear().commit() : stored.edit().clear().putString("envelope", new String(envelope, StandardCharsets.UTF_8)).commit());
+                scenario.onActivity(activity -> {
+                    setField(activity, "adminKeys", Map.of("t1", authority.getPublic()));
+                    setField(engine.onboarding(), "pin", retiredPin);
+                    invoke(activity, "applyStoredAdminIdentity", new Class<?>[]{ChatEngine.class}, engine);
+                    pin[0] = engine.onboarding().pin();
+                });
+                return pin[0];
+            };
+            assertEquals("Nothing stored: the built-in identity stands", retiredPin, start.apply(null));
+            assertEquals("A stored certificate that verifies is followed from the start",
+                    certificate(peerId, currentDevice, current, 4).pin(retiredPin.origin()), start.apply(good));
+            assertEquals("One signed by anybody else is not", retiredPin, start.apply(signedAdminIdentity(stranger, "t1", 4, peerId, currentDevice, fingerprintOf(peerId, current))));
+            byte[] altered = good.clone(); altered[altered.length - 6] ^= 1;
+            assertEquals("Nor one that was altered on the phone", retiredPin, start.apply(altered));
+            assertEquals("Nor garbage", retiredPin, start.apply("not a certificate".getBytes(StandardCharsets.UTF_8)));
+            assertEquals("Nor one for another account", retiredPin, start.apply(signedAdminIdentity(authority, "t1", 4, UUID.randomUUID(), currentDevice, fingerprintOf(peerId, current))));
+            AdminOnboarding.Pin atFloor = start.apply(signedAdminIdentity(authority, "t1", AdminIdentity.BUILD_SEQUENCE_FLOOR, peerId, currentDevice, fingerprintOf(peerId, current)));
+            assertEquals("One this build already stands for is not used, and is dropped", retiredPin, atFloor);
+            assertFalse(stored.contains("envelope"));
+        }
+    }
+
+    @Test public void aRealSyncThatMeetsAnUnknownAdminIdentityFollowsTheCertificateAndClearsTheWarning() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID();
+        signedInFixture(adminPin(peerId, peerDevice, retired));
+        var before = introduction(peerId, peerDevice, retired, "vanishr");
+        var after = introduction(peerId, currentDevice, current, "vanishr");
+        saveRetiredAdmin(before, retired);
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId, RemotePhotoSession.contact(after.peer()), List.of(after), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        setField(engine, "nextKeyCheck", System.currentTimeMillis() + 300_000);
+        setField(engine, "nextProfileCheck", System.currentTimeMillis() + 300_000);
+        java.security.KeyPair authority = adminAuthorityPair();
+        java.util.concurrent.atomic.AtomicReference<byte[]> served = new java.util.concurrent.atomic.AtomicReference<>(
+                signedAdminIdentity(authority, "t1", 2, peerId, currentDevice, fingerprintOf(peerId, current)));
+        java.util.concurrent.atomic.AtomicInteger requests = new java.util.concurrent.atomic.AtomicInteger();
+        okhttp3.OkHttpClient transport = certificateTransport(served, requests);
+        AdminOnboarding.Pin retiredPin = engine.onboarding().pin();
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                setField(activity, "adminKeys", Map.of("t1", authority.getPublic()));
+                setField(activity, "adminIdentitySource", (java.util.function.Supplier<RemoteSettings>) () -> RemoteSettings.forAdminIdentity(transport));
+                inject(activity);
+                invoke(activity, "queueSync");
+            });
+            awaitMainCondition(scenario, activity -> engine.onboarding().pin().deviceId().equals(currentDevice) && !engine.onboarding().rotationPending(peerId)
+                    && engine.onboarding().problem() == null);
+            assertNotEquals(retiredPin, engine.onboarding().pin());
+            assertEquals("The certificate was asked for once, because the sync met an identity it did not know", 1, requests.get());
+            assertEquals(after.peer(), engine.peer(peerId));
+            assertTrue(engine.groupSignal().isVerified(peerId));
+            scenario.onActivity(activity -> assertFalse("The warning is gone from the chat list", hasText(activity, "Official admin identity changed. A reviewed app update is required.")));
+        }
+    }
+
+    // Waits until what the screen queued on its two background lanes (the sync and the update lane) has run.
+    private void drainLanes(ActivityScenario<MainActivity> scenario) throws Exception {
+        java.util.concurrent.ExecutorService[] lanes = new java.util.concurrent.ExecutorService[2];
+        scenario.onActivity(activity -> {
+            lanes[0] = (java.util.concurrent.ExecutorService) readField(activity, "work");
+            lanes[1] = (java.util.concurrent.ExecutorService) readField(activity, "updateWork");
+        });
+        for (java.util.concurrent.ExecutorService lane : lanes) lane.submit(() -> { }).get(15, java.util.concurrent.TimeUnit.SECONDS);
+        awaitMainCondition(scenario, activity -> !(boolean) readField(activity, "checkingAdminIdentity"));
+    }
+
+    @Test public void onlyAnIdentityMismatchAsksForTheCertificateAndNoOtherFailureOfTheDirectoryDoes() throws Exception {
+        SignalClient pinned = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient unknown = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(adminPin(peerId, peerDevice, pinned));
+        var admin = introduction(peerId, peerDevice, pinned, "vanishr");
+        var first = introduction(UUID.randomUUID(), UUID.randomUUID(), new SignalClient(UUID.randomUUID(), new DeviceSecurityTest.MemoryVault()), "newcomer");
+        var second = introduction(UUID.randomUUID(), UUID.randomUUID(), new SignalClient(UUID.randomUUID(), new DeviceSecurityTest.MemoryVault()), "another");
+        // The relay shows the pinned admin exactly, and then more accounts than an ordinary account is ever introduced to: refused, but the
+        // admin's identity is what the app expects, so no certificate could change anything.
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId, RemotePhotoSession.contact(admin.peer()), List.of(first, second), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        setField(engine, "nextKeyCheck", System.currentTimeMillis() + 300_000);
+        setField(engine, "nextProfileCheck", System.currentTimeMillis() + 300_000);
+        java.security.KeyPair authority = adminAuthorityPair();
+        java.util.concurrent.atomic.AtomicReference<byte[]> served = new java.util.concurrent.atomic.AtomicReference<>("{}".getBytes(StandardCharsets.UTF_8));
+        java.util.concurrent.atomic.AtomicInteger requests = new java.util.concurrent.atomic.AtomicInteger();
+        okhttp3.OkHttpClient transport = certificateTransport(served, requests);
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                setField(activity, "adminKeys", Map.of("t1", authority.getPublic()));
+                setField(activity, "adminIdentitySource", (java.util.function.Supplier<RemoteSettings>) () -> RemoteSettings.forAdminIdentity(transport));
+                inject(activity);
+                invoke(activity, "queueSync");
+            });
+            awaitMainCondition(scenario, activity -> "Unrelated admin contacts were returned".equals(engine.onboarding().problem()));
+            drainLanes(scenario);
+            assertEquals("A refusal that is not about the admin's identity does not ask the download site anything", 0, requests.get());
+            scenario.onActivity(activity -> assertFalse(context.getSharedPreferences("admin-identity", Context.MODE_PRIVATE).contains("last-attempt")));
+
+            // The same screen, the same engine: now the relay shows another identity for the admin, which is the one case that asks.
+            directory.set(new AdminOnboarding.Page(userId, RemotePhotoSession.contact(introduction(peerId, UUID.randomUUID(), unknown, "vanishr").peer()), List.of(), null));
+            setField(engine.onboarding(), "nextRefresh", 0L);
+            scenario.onActivity(activity -> invoke(activity, "queueSync"));
+            awaitMainCondition(scenario, activity -> requests.get() == 1);
+            drainLanes(scenario);
+            assertEquals(1, requests.get());
+            assertEquals("Official admin identity changed. A reviewed app update is required.", engine.onboarding().problem());
+        }
+    }
+
+    @Test public void aDamagedStoredCertificateDoesNotLetAnOlderOneBackInAndTheCertificateItWasCanTakeItsPlace() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID();
+        signedInFixture(adminPin(peerId, peerDevice, retired));
+        var before = introduction(peerId, peerDevice, retired, "vanishr");
+        var after = introduction(peerId, currentDevice, current, "vanishr");
+        saveRetiredAdmin(before, retired);
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId, RemotePhotoSession.contact(before.peer()), List.of(before), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        setField(engine, "nextKeyCheck", System.currentTimeMillis() + 300_000);
+        setField(engine, "nextProfileCheck", System.currentTimeMillis() + 300_000);
+        java.security.KeyPair authority = adminAuthorityPair();
+        java.util.concurrent.atomic.AtomicReference<byte[]> served = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicInteger requests = new java.util.concurrent.atomic.AtomicInteger();
+        okhttp3.OkHttpClient transport = certificateTransport(served, requests);
+        android.content.SharedPreferences stored = context.getSharedPreferences("admin-identity", Context.MODE_PRIVATE);
+        // Number 5 was taken before; the stored copy of it can no longer be used.
+        assertTrue(stored.edit().clear().putString("envelope", "damaged").putLong("sequence", 5).commit());
+        AdminOnboarding.Pin retiredPin = engine.onboarding().pin();
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                setField(activity, "adminKeys", Map.of("t1", authority.getPublic()));
+                setField(activity, "adminIdentitySource", (java.util.function.Supplier<RemoteSettings>) () -> RemoteSettings.forAdminIdentity(transport));
+                inject(activity);
+            });
+            java.util.function.Consumer<byte[]> ask = body -> {
+                served.set(body);
+                try {
+                    scenario.onActivity(activity -> {
+                        assertTrue(stored.edit().remove("last-attempt").commit());
+                        invoke(activity, "requestAdminIdentity", new Class<?>[]{ChatEngine.class}, engine);
+                    });
+                    awaitMainCondition(scenario, activity -> !(boolean) readField(activity, "checkingAdminIdentity"));
+                } catch (Exception failure) { throw new AssertionError(failure); }
+            };
+            ask.accept(signedAdminIdentity(authority, "t1", 3, peerId, currentDevice, fingerprintOf(peerId, current)));
+            assertEquals(1, requests.get());
+            assertEquals("A valid certificate older than the one that was taken is not put back because its stored copy is damaged", retiredPin, engine.onboarding().pin());
+            assertEquals("damaged", stored.getString("envelope", null));
+            assertEquals(5L, stored.getLong("sequence", 0));
+
+            // The relay now shows the new phone, and the certificate that the damaged copy was is the one that takes its place.
+            directory.set(new AdminOnboarding.Page(userId, RemotePhotoSession.contact(after.peer()), List.of(after), null));
+            byte[] five = signedAdminIdentity(authority, "t1", 5, peerId, currentDevice, fingerprintOf(peerId, current));
+            ask.accept(five);
+            awaitMainCondition(scenario, activity -> engine.onboarding().pin().deviceId().equals(currentDevice));
+            assertEquals(new String(five, StandardCharsets.UTF_8), stored.getString("envelope", null));
+            assertEquals(5L, stored.getLong("sequence", 0));
+            awaitMainCondition(scenario, activity -> !engine.onboarding().rotationPending(peerId) && engine.onboarding().problem() == null);
+            assertEquals(after.peer(), engine.peer(peerId));
+        }
+    }
+
+    @Test public void anAdminThePersonVerifiedByHandStopsCountingAsVerifiedTheMomentThePinMovesAndOpeningItAsksTheNetwork() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID();
+        signedInFixture(adminPin(peerId, peerDevice, retired));
+        var before = introduction(peerId, peerDevice, retired, "vanishr");
+        var after = introduction(peerId, currentDevice, current, "vanishr");
+        saveRetiredAdmin(before, retired);
+        // Verified by hand while the old identity was the pinned one: a saved contact without the automatic marker.
+        vault.transaction(() -> { vault.remove("admin-contact/" + peerId); return null; });
+        assertTrue(engine.independentlyVerified(peerId));
+        assertTrue(engine.sharesPresence(peerId));
+        assertFalse(engine.onboarding().rotationPending(peerId));
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId, RemotePhotoSession.contact(after.peer()), List.of(after), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+
+        // The pin moves, but nothing has replaced the saved contact yet: it is still there, and it is a contact for nothing.
+        engine.onboarding().adopt(certificate(peerId, currentDevice, current, 3));
+        assertTrue(engine.onboarding().rotationPending(peerId));
+        assertEquals(before.peer(), engine.peer(peerId));
+        assertFalse("Not verified for groups, photos or the backup", engine.independentlyVerified(peerId));
+        assertFalse("and no presence goes to it", engine.sharesPresence(peerId));
+        assertFalse(engine.automaticConnection(peerId));
+
+        // Opening it from the chat list does not take the shortcut for verified contacts: the network says what the admin is now.
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                inject(activity);
+                invoke(activity, "openContact", new Class<?>[]{ChatEngine.Peer.class}, before.peer());
+            });
+            awaitMainCondition(scenario, activity -> after.peer().equals(engine.peer(peerId)) && peerId.equals(readField(activity, "selectedPeer")));
+            assertFalse(engine.onboarding().rotationPending(peerId));
+            assertTrue(engine.automaticConnection(peerId));
+            assertFalse("The new identity is the app's introduction, not something the person verified", engine.independentlyVerified(peerId));
+            assertTrue(engine.sharesPresence(peerId));
+        }
+    }
+
+    @Test public void aGroupIOwnSendsNoKeysToTheRetiredAdminOnceThePinHasMoved() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID();
+        signedInFixture(adminPin(peerId, peerDevice, retired));
+        UUID groupId = UUID.randomUUID(), epoch = UUID.randomUUID();
+        retired.verifyPeer(userId, engine.groupSignal().publicIdentity());
+        engine.groupSignal().verifyPeer(peerId, retired.publicIdentity());
+        ChatEngine.Peer admin = new ChatEngine.Peer(peerId, peerDevice, Base64.getEncoder().encodeToString(retired.publicIdentity()), "vanishr", "vanishr", null);
+        GroupChat.Snapshot snapshot = new GroupChat.Snapshot(groupId, userId, 2, epoch, false, List.of(
+                new GroupChat.Member(userId, deviceId, Base64.getEncoder().encodeToString(engine.groupSignal().publicIdentity()), "alex", null, "ACTIVE", 0),
+                new GroupChat.Member(peerId, peerDevice, admin.identityKey(), "vanishr", null, "ACTIVE", 0)));
+        vault.transaction(() -> {
+            write("contact/" + peerId, admin); write("group/" + groupId, new GroupChat.Conversation(snapshot, "Private launch", null));
+            write("group-title/" + groupId, "Private launch"); write("group-allowed/" + groupId, snapshot.roster().members()); return null;
+        });
+        List<GroupChat.ControlSend> controls = new ArrayList<>(); List<GroupChat.Send> messages = new ArrayList<>();
+        ((RelayApi) readField(engine, "api")).close();
+        setField(engine, "api", syntheticApi(chain -> {
+            okhttp3.Request request = chain.request();
+            String path = request.url().encodedPath();
+            if (path.equals("/groups/" + groupId) && request.method().equals("GET")) return syntheticResponse(request, 200, snapshot);
+            if (path.endsWith("/keys")) {
+                try { return syntheticResponse(request, 200, List.of(new GroupChat.Claimed(peerId, retired.generatePreKey(Instant.now())))); }
+                catch (Exception failure) { throw new IOException("Synthetic prekey fixture failed"); }
+            }
+            okio.Buffer buffer = new okio.Buffer(); request.body().writeTo(buffer); String body = buffer.readUtf8();
+            if (path.endsWith("/controls")) { controls.addAll(RelayApi.JSON.fromJson(body, GroupChat.Controls.class).packets()); return syntheticResponse(request, 200, Map.of()); }
+            assertTrue(path.endsWith("/messages"));
+            GroupChat.Send message = RelayApi.JSON.fromJson(body, GroupChat.Send.class); messages.add(message);
+            return syntheticResponse(request, 200, new GroupChat.Status(message.id(), message.expiresAt(), 1, 0, 0, "QUEUED"));
+        }));
+        UUID first = UUID.randomUUID(); long created = System.currentTimeMillis();
+        createFixtureKey(AndroidVault.contentAlias(created + 3_600_000, first, userId));
+        engine.groups().send(groupId, "First group message", null, ChatEnvelope.Expiry.HOUR_1, first, created, () -> { });
+        assertEquals("Until the pin moves the admin is a verified member like any other", 2, controls.size());
+        assertEquals(1, messages.size());
+
+        engine.onboarding().adopt(certificate(peerId, currentDevice, current, 3));
+        UUID second = UUID.randomUUID(); long later = System.currentTimeMillis();
+        createFixtureKey(AndroidVault.contentAlias(later + 3_600_000, second, userId));
+        assertThrows("The retired identity is no longer a verified member, so nothing is approved or sent for it", SecurityException.class,
+                () -> engine.groups().send(groupId, "Second group message", null, ChatEnvelope.Expiry.HOUR_1, second, later, () -> { }));
+        assertEquals(2, controls.size());
+        assertEquals(1, messages.size());
+    }
+
+    // A group in which the official admin is a member and I am not the owner: the admin's key arrives and my own key is published.
+    private record AdminGroupRun(List<UUID> recipients, boolean adminKeyTaken, boolean adminControlSeen, boolean adminControlDeleted,
+                                 boolean queuedAdminControlSent, boolean queuedOwnerControlSent, boolean queuedAdminControlLeft, boolean queuedMessagePosted) { }
+
+    private AdminGroupRun runGroupWithTheAdminAsAMember(UUID adminId, UUID adminDevice, SignalClient retired, SignalClient owner) throws Exception {
+        return runGroupWithTheAdminAsAMember(adminId, adminDevice, retired, owner, false);
+    }
+
+    // With queued set, one control for the admin's device, one for the owner and a message of mine were already waiting to be sent when the group is synchronised.
+    private AdminGroupRun runGroupWithTheAdminAsAMember(UUID adminId, UUID adminDevice, SignalClient retired, SignalClient owner, boolean queued) throws Exception {
+        String ownerKey = Base64.getEncoder().encodeToString(owner.publicIdentity());
+        UUID groupId = UUID.randomUUID(), epoch = UUID.randomUUID();
+        GroupChat.Snapshot group = new GroupChat.Snapshot(groupId, peerId, 2, epoch, false, List.of(
+                new GroupChat.Member(peerId, peerDevice, ownerKey, "owner", null, "ACTIVE", 0),
+                new GroupChat.Member(userId, deviceId, Base64.getEncoder().encodeToString(engine.groupSignal().publicIdentity()), "alex", null, "ACTIVE", 0),
+                new GroupChat.Member(adminId, adminDevice, Base64.getEncoder().encodeToString(retired.publicIdentity()), "vanishr", null, "ACTIVE", 0)));
+        long deadline = System.currentTimeMillis() + 3_600_000;
+        SignalGroup sending = new SignalGroup(new DeviceSecurityTest.MemoryVault(), groupId, epoch, adminId);
+        GroupChat.ControlBody body = new GroupChat.ControlBody(1, "KEY", groupId, epoch, 2, adminId, userId, null, group.roster().digest(), sending.distribution(), deadline);
+        SignalClient.Packet encrypted = retired.encrypt(userId, RelayApi.JSON.toJson(body).getBytes(StandardCharsets.UTF_8), Instant.now());
+        GroupChat.Control control = new GroupChat.Control(UUID.randomUUID(), groupId, adminId, adminDevice, userId, deviceId, epoch, 2, deadline, encrypted.type(), encrypted.ciphertext());
+        UUID queuedAdmin = UUID.randomUUID(), queuedOwner = UUID.randomUUID(), queuedMessage = UUID.randomUUID();
+        vault.transaction(() -> {
+            write("group/" + groupId, new GroupChat.Conversation(group, "Private group", null));
+            write("group-approval/" + groupId + "/" + epoch, new GroupChat.Approval(group.roster(), "Private group", System.currentTimeMillis() + 86_400_000L));
+            if (queued) {
+                write("group-control-out/" + queuedAdmin, new GroupChat.QueuedControl(groupId, "group-mark/" + groupId + "/" + epoch + "/KEY/" + adminId,
+                        new GroupChat.ControlSend(queuedAdmin, adminId, adminDevice, epoch, 2, deadline, 3, new byte[]{1, 2, 3})));
+                write("group-control-out/" + queuedOwner, new GroupChat.QueuedControl(groupId, "group-mark/" + groupId + "/" + epoch + "/KEY/" + peerId,
+                        new GroupChat.ControlSend(queuedOwner, peerId, peerDevice, epoch, 2, deadline, 3, new byte[]{4, 5, 6})));
+                write("group-out/" + queuedMessage, new GroupChat.Outbox(groupId,
+                        new GroupChat.Send(queuedMessage, epoch, 2, ChatEnvelope.Expiry.HOUR_1, deadline, new byte[]{7, 8, 9}, null, null)));
+                write("entry/" + queuedMessage, new ChatEngine.Entry(queuedMessage, groupId, deadline, ChatEnvelope.Expiry.HOUR_1, true, false, "PENDING", userId, epoch, 2, userId));
+            }
+            return null;
+        });
+        List<GroupChat.ControlSend> posted = new ArrayList<>(); List<String> deleted = new ArrayList<>(); List<UUID> postedMessages = new ArrayList<>();
+        ((RelayApi) readField(engine, "api")).close();
+        setField(engine, "api", syntheticApi(chain -> {
+            okhttp3.Request request = chain.request(); String path = request.url().encodedPath();
+            if (path.equals("/groups")) return syntheticResponse(request, 200, List.of(group));
+            if (path.equals("/groups/" + groupId + "/controls") && request.method().equals("GET")) return syntheticResponse(request, 200, List.of(control));
+            if (path.startsWith("/groups/" + groupId + "/controls/") && request.method().equals("DELETE")) { deleted.add(path); return syntheticResponse(request, 200, Map.of()); }
+            okio.Buffer buffer = new okio.Buffer();
+            if (request.body() != null) request.body().writeTo(buffer);
+            String text = buffer.readUtf8();
+            if (path.endsWith("/keys")) {
+                List<GroupChat.Claimed> answer = new ArrayList<>();
+                try { for (UUID user : RelayApi.JSON.fromJson(text, GroupChat.Claims.class).users()) answer.add(new GroupChat.Claimed(user, (user.equals(peerId) ? owner : retired).generatePreKey(Instant.now()))); }
+                catch (Exception failure) { throw new IOException("Synthetic prekey fixture failed"); }
+                return syntheticResponse(request, 200, answer);
+            }
+            if (path.endsWith("/controls") && request.method().equals("POST")) { posted.addAll(RelayApi.JSON.fromJson(text, GroupChat.Controls.class).packets()); return syntheticResponse(request, 200, Map.of()); }
+            if (path.equals("/groups/" + groupId + "/messages") && request.method().equals("POST")) {
+                GroupChat.Send sent = RelayApi.JSON.fromJson(text, GroupChat.Send.class); postedMessages.add(sent.id());
+                return syntheticResponse(request, 200, new GroupChat.Status(sent.id(), sent.expiresAt(), 1, 0, 0, "QUEUED"));
+            }
+            if (path.endsWith("/messages") || path.endsWith("/status")) return syntheticResponse(request, 200, List.of());
+            throw new IOException("Unexpected synthetic group request");
+        }));
+        engine.groups().sync();
+        return new AdminGroupRun(posted.stream().map(GroupChat.ControlSend::recipientId).toList(),
+                vault.get("group-key/" + groupId + "/" + epoch + "/" + adminId) != null,
+                vault.get("group-control-seen/" + control.id()) != null,
+                deleted.contains("/groups/" + groupId + "/controls/" + control.id()),
+                posted.stream().anyMatch(item -> item.id().equals(queuedAdmin)),
+                posted.stream().anyMatch(item -> item.id().equals(queuedOwner)),
+                vault.get("group-control-out/" + queuedAdmin) != null,
+                postedMessages.contains(queuedMessage));
+    }
+
+    @Test public void aRetiredAdminInAGroupIAmNotTheOwnerOfGetsNoKeysFromMeAndNothingFromItIsBelieved() throws Exception {
+        UUID adminId = UUID.randomUUID(), adminDevice = UUID.randomUUID(), currentDevice = UUID.randomUUID();
+        SignalClient retired = new SignalClient(adminId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(adminId, new DeviceSecurityTest.MemoryVault());
+        SignalClient owner = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(adminPin(adminId, adminDevice, retired));
+        String ownerKey = Base64.getEncoder().encodeToString(owner.publicIdentity());
+        owner.verifyPeer(userId, engine.groupSignal().publicIdentity()); engine.groupSignal().verifyPeer(peerId, owner.publicIdentity());
+        retired.verifyPeer(userId, engine.groupSignal().publicIdentity());
+        retired.establish(userId, engine.groupSignal().generatePreKey(Instant.now()), Instant.now());
+        vault.transaction(() -> { write("contact/" + peerId, new ChatEngine.Peer(peerId, peerDevice, ownerKey, "Owner", "owner", null)); return null; });
+
+        AdminGroupRun before = runGroupWithTheAdminAsAMember(adminId, adminDevice, retired, owner);
+        assertEquals("While the retired identity is the pinned one it is a member like any other: both get my key", Set.of(peerId, adminId), Set.copyOf(before.recipients()));
+        assertEquals(2, before.recipients().size());
+        assertTrue("and its key is taken", before.adminKeyTaken());
+        assertTrue(before.adminControlSeen());
+
+        engine.onboarding().adopt(certificate(adminId, currentDevice, current, 3));
+        AdminGroupRun after = runGroupWithTheAdminAsAMember(adminId, adminDevice, retired, owner);
+        assertEquals("Once the pin has moved only the owner gets my key", List.of(peerId), after.recipients());
+        assertFalse("and nothing the retired identity sends is believed", after.adminKeyTaken());
+        assertFalse(after.adminControlSeen());
+        assertTrue("but it is taken off the relay's queue", after.adminControlDeleted());
+    }
+
+    @Test public void aMessageQueuedForTheAdminBeforeThePinMovedIsNotSentToTheRetiredDeviceAfterwards() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID();
+        signedInFixture(adminPin(peerId, peerDevice, retired));
+        var before = introduction(peerId, peerDevice, retired, "vanishr");
+        var after = introduction(peerId, currentDevice, current, "vanishr");
+        saveRetiredAdmin(before, retired);
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId, RemotePhotoSession.contact(before.peer()), List.of(before), null));
+        List<ChatEngine.Send> outgoing = new ArrayList<>();
+        adminTransport(directory, new ArrayList<>(), outgoing, null);
+        setField(engine, "nextKeyCheck", System.currentTimeMillis() + 300_000);
+        setField(engine, "nextProfileCheck", System.currentTimeMillis() + 300_000);
+        long expires = System.currentTimeMillis() + 3_600_000;
+        UUID first = UUID.randomUUID(), second = UUID.randomUUID();
+        java.util.function.Consumer<UUID> queue = id -> {
+            try {
+                vault.transaction(() -> {
+                    write("outbox/" + id, new ChatEngine.Outbox(new ChatEngine.Send(id, peerId, peerDevice, ChatEnvelope.Expiry.HOUR_1, expires, 3, new byte[]{1, 2, 3}, null), null));
+                    write("entry/" + id, new ChatEngine.Entry(id, peerId, expires, ChatEnvelope.Expiry.HOUR_1, true, false, "PENDING", userId));
+                    return null;
+                });
+            } catch (Exception failure) { throw new AssertionError(failure); }
+        };
+        // While the retired identity is the pinned one, what is queued for the admin is sent as for any contact.
+        queue.accept(first);
+        engine.sync();
+        assertEquals(List.of(first), outgoing.stream().map(ChatEngine.Send::id).toList());
+        assertNull(vault.get("outbox/" + first));
+        // The pin moves while something else is still waiting, encrypted for the device that is retired now.
+        queue.accept(second);
+        directory.set(new AdminOnboarding.Page(userId, RemotePhotoSession.contact(after.peer()), List.of(after), null));
+        engine.onboarding().adopt(certificate(peerId, currentDevice, current, 3));
+        engine.sync();
+        assertEquals("Nothing was sent to the retired device", 1, outgoing.size());
+        assertNull("and it is not kept to be tried again", vault.get("outbox/" + second));
+        assertEquals("Not sent: contact unavailable", engine.entries(peerId).stream().filter(entry -> entry.id().equals(second)).findFirst().orElseThrow().state());
+    }
+
+    @Test public void aGroupMessageFromTheRetiredAdminIsNotReadEvenThoughItsKeyWasAcceptedBeforeThePinMoved() throws Exception {
+        UUID adminId = UUID.randomUUID(), adminDevice = UUID.randomUUID(), currentDevice = UUID.randomUUID();
+        SignalClient retired = new SignalClient(adminId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(adminId, new DeviceSecurityTest.MemoryVault());
+        SignalClient owner = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(adminPin(adminId, adminDevice, retired));
+        String ownerKey = Base64.getEncoder().encodeToString(owner.publicIdentity());
+        owner.verifyPeer(userId, engine.groupSignal().publicIdentity()); engine.groupSignal().verifyPeer(peerId, owner.publicIdentity());
+        UUID groupId = UUID.randomUUID(), epoch = UUID.randomUUID();
+        GroupChat.Snapshot group = new GroupChat.Snapshot(groupId, peerId, 2, epoch, false, List.of(
+                new GroupChat.Member(peerId, peerDevice, ownerKey, "owner", null, "ACTIVE", 0),
+                new GroupChat.Member(userId, deviceId, Base64.getEncoder().encodeToString(engine.groupSignal().publicIdentity()), "alex", null, "ACTIVE", 0),
+                new GroupChat.Member(adminId, adminDevice, Base64.getEncoder().encodeToString(retired.publicIdentity()), "vanishr", null, "ACTIVE", 0)));
+        long created = System.currentTimeMillis(), deadline = created + 3_600_000;
+        SignalGroup sending = new SignalGroup(new DeviceSecurityTest.MemoryVault(), groupId, epoch, adminId);
+        byte[] distribution = sending.distribution();
+        String keyMarker = "group-key/" + groupId + "/" + epoch + "/" + adminId;
+        vault.transaction(() -> {
+            write("contact/" + peerId, new ChatEngine.Peer(peerId, peerDevice, ownerKey, "Owner", "owner", null));
+            write("group/" + groupId, new GroupChat.Conversation(group, "Private group", null));
+            write("group-approval/" + groupId + "/" + epoch, new GroupChat.Approval(group.roster(), "Private group", deadline));
+            // My key has been sent to everybody and the admin's key was accepted, all while the admin's earlier identity was the pinned one.
+            for (UUID member : List.of(peerId, adminId))
+                vault.put("group-mark/" + groupId + "/" + epoch + "/KEY/" + member, Long.toString(deadline).getBytes(StandardCharsets.US_ASCII));
+            new SignalGroup(vault.accountVault(engine.account()), groupId, epoch, userId).accept(adminId, distribution);
+            vault.put(keyMarker, Long.toString(deadline).getBytes(StandardCharsets.US_ASCII));
+            return null;
+        });
+        java.util.function.Function<String, GroupChat.Message> fromTheAdmin = text -> {
+            try {
+                UUID id = UUID.randomUUID();
+                GroupEnvelope envelope = new GroupEnvelope(1, groupId, epoch, 2, new ChatEnvelope(1, id, adminId, adminDevice, groupId, epoch, created, deadline, ChatEnvelope.Expiry.HOUR_1, text, null));
+                createFixtureKey(AndroidVault.contentAlias(deadline, id, userId));
+                return new GroupChat.Message(id, groupId, epoch, 2, adminId, adminDevice, ChatEnvelope.Expiry.HOUR_1, deadline,
+                        sending.encrypt(RelayApi.JSON.toJson(envelope).getBytes(StandardCharsets.UTF_8)), null);
+            } catch (Exception failure) { throw new AssertionError(failure); }
+        };
+        GroupChat.Message early = fromTheAdmin.apply("Sent while that identity was the admin"), late = fromTheAdmin.apply("Sent after the pin moved");
+        List<GroupChat.Message> inbox = new ArrayList<>(); List<String> acknowledgements = new ArrayList<>();
+        ((RelayApi) readField(engine, "api")).close();
+        setField(engine, "api", syntheticApi(chain -> {
+            okhttp3.Request request = chain.request(); String path = request.url().encodedPath();
+            if (path.equals("/groups")) return syntheticResponse(request, 200, List.of(group));
+            if (path.equals("/groups/" + groupId + "/controls") || path.equals("/groups/" + groupId + "/status")) return syntheticResponse(request, 200, List.of());
+            if (path.equals("/groups/" + groupId + "/messages") && request.method().equals("GET")) return syntheticResponse(request, 200, new ArrayList<>(inbox));
+            if (path.matches("/groups/" + groupId + "/messages/[0-9a-f-]+/(delivered|read|delete)")) { acknowledgements.add(path); return syntheticResponse(request, 200, Map.of()); }
+            throw new IOException("Unexpected synthetic group request");
+        }));
+
+        inbox.add(early);
+        engine.groups().sync();
+        assertEquals("While the earlier identity is the pinned one its message is read like anybody's", 1, engine.entries(groupId).size());
+        assertEquals(adminId, engine.entries(groupId).get(0).senderId());
+
+        engine.onboarding().adopt(certificate(adminId, currentDevice, current, 3));
+        inbox.clear(); inbox.add(late);
+        engine.groups().sync();
+        assertEquals("Once the pin has moved what that identity sends is not read, although its key is still on the phone", 1, engine.entries(groupId).size());
+        assertTrue("The key is still there, so it is the retirement and not a missing key that stops it", vault.get(keyMarker) != null);
+        assertTrue("and the relay is asked to delete this phone's copy", acknowledgements.stream().anyMatch(path -> path.endsWith("/messages/" + late.id() + "/delete")));
+        assertNotNull("so that it is not offered again", vault.get("seen/" + late.id()));
+        assertTrue("Nothing of it was kept", engine.entries(groupId).stream().noneMatch(entry -> entry.id().equals(late.id())));
+    }
+
+    @Test public void aGroupKeyQueuedForTheRetiredAdminDeviceIsNotSentOnceThePinHasMoved() throws Exception {
+        UUID adminId = UUID.randomUUID(), adminDevice = UUID.randomUUID(), currentDevice = UUID.randomUUID();
+        SignalClient retired = new SignalClient(adminId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(adminId, new DeviceSecurityTest.MemoryVault());
+        SignalClient owner = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(adminPin(adminId, adminDevice, retired));
+        String ownerKey = Base64.getEncoder().encodeToString(owner.publicIdentity());
+        owner.verifyPeer(userId, engine.groupSignal().publicIdentity()); engine.groupSignal().verifyPeer(peerId, owner.publicIdentity());
+        retired.verifyPeer(userId, engine.groupSignal().publicIdentity());
+        retired.establish(userId, engine.groupSignal().generatePreKey(Instant.now()), Instant.now());
+        vault.transaction(() -> { write("contact/" + peerId, new ChatEngine.Peer(peerId, peerDevice, ownerKey, "Owner", "owner", null)); return null; });
+
+        AdminGroupRun before = runGroupWithTheAdminAsAMember(adminId, adminDevice, retired, owner, true);
+        assertTrue("While the device is the pinned one, what was waiting for it is sent", before.queuedAdminControlSent());
+        assertTrue(before.queuedOwnerControlSent());
+        assertTrue("and my own message goes out", before.queuedMessagePosted());
+
+        engine.onboarding().adopt(certificate(adminId, currentDevice, current, 3));
+        AdminGroupRun after = runGroupWithTheAdminAsAMember(adminId, adminDevice, retired, owner, true);
+        assertFalse("Once the pin has moved it is not", after.queuedAdminControlSent());
+        assertFalse("and it is not kept to be tried again", after.queuedAdminControlLeft());
+        assertTrue("What was waiting for anybody else is sent as before", after.queuedOwnerControlSent());
+        assertTrue("and the group is not held up by a member that is retired: my message still goes out", after.queuedMessagePosted());
+    }
+
+    @Test public void theCheckInsideTheReplacementRefusesAnyIdentityButThePinnedOneEvenWhenNobodyValidatedFirst() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient impostor = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID();
+        var setup = retiredAdminSetup(retired, current, currentDevice);
+        java.lang.reflect.Method store = AdminOnboarding.class.getDeclaredMethod("store", ChatEngine.Peer.class);
+        store.setAccessible(true);
+        // Every caller of the replacement validates what the relay showed against the pin first. This calls it directly, as a caller that did
+        // not would, with an identity that is not the pinned one: it must be the replacement itself that refuses it.
+        var fake = introduction(peerId, UUID.randomUUID(), impostor, "vanishr");
+        Throwable refused = assertThrows(Exception.class, () -> vault.transaction(() -> { store.invoke(engine.onboarding(), fake.peer()); return null; }));
+        boolean mismatch = false;
+        for (Throwable cause = refused; cause != null && !mismatch; cause = cause.getCause()) mismatch = cause instanceof AdminOnboarding.Mismatch;
+        assertTrue("Refused because it is not the pinned identity", mismatch);
+        assertEquals("Nothing was replaced", setup[0].peer(), engine.peer(peerId));
+        assertThrows(SecurityException.class, () -> engine.groupSignal().verifyPeer(peerId, impostor.publicIdentity()));
+        assertTrue(engine.onboarding().rotationPending(peerId));
+        // The pinned identity, shown the same way, is what replaces it.
+        vault.transaction(() -> { store.invoke(engine.onboarding(), setup[1].peer()); return null; });
+        assertEquals(setup[1].peer(), engine.peer(peerId));
+        assertFalse(engine.onboarding().rotationPending(peerId));
+    }
+
+    @Test public void aCertificateKeptFromAnEarlierRunIsFollowedWhenTheScreenLoadsTheEngine() throws Exception {
+        signedInFixture();
+        UUID admin = AdminOnboarding.OFFICIAL.userId(), currentDevice = UUID.randomUUID();
+        SignalClient current = new SignalClient(admin, new DeviceSecurityTest.MemoryVault());
+        java.security.KeyPair authority = adminAuthorityPair();
+        long sequence = AdminIdentity.BUILD_SEQUENCE_FLOOR + 3;
+        String expectedFingerprint = fingerprintOf(admin, current);
+        byte[] kept = signedAdminIdentity(authority, "t1", sequence, admin, currentDevice, expectedFingerprint);
+        android.content.SharedPreferences stored = context.getSharedPreferences("admin-identity", Context.MODE_PRIVATE);
+        assertTrue(stored.edit().clear().putString("envelope", new String(kept, StandardCharsets.UTF_8)).putLong("sequence", sequence).commit());
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            awaitMainCondition(scenario, activity -> readField(activity, "engine") != null);
+            // The engine the screen loaded first could not check the certificate (it is signed by a key this build does not list). With the
+            // key in place, the screen loads its engine again, exactly as it does on a start.
+            scenario.onActivity(activity -> {
+                assertEquals("Without its key the certificate changes nothing", AdminOnboarding.OFFICIAL, ((ChatEngine) readField(activity, "engine")).onboarding().pin());
+                setField(activity, "adminKeys", Map.of("t1", authority.getPublic()));
+                ChatEngine first = (ChatEngine) readField(activity, "engine");
+                setField(activity, "engine", null);
+                if (first != engine) first.close();
+                setField(activity, "loadingGeneration", -1);
+                invoke(activity, "load");
+            });
+            awaitMainCondition(scenario, activity -> readField(activity, "engine") != null);
+            scenario.onActivity(activity -> {
+                AdminOnboarding.Pin pin = ((ChatEngine) readField(activity, "engine")).onboarding().pin();
+                assertEquals("A certificate kept from an earlier run is followed from the start", currentDevice, pin.deviceId());
+                assertEquals(expectedFingerprint, pin.fingerprint());
+                assertEquals("and only the device and the identity moved", AdminOnboarding.OFFICIAL.origin(), pin.origin());
+            });
+        }
+    }
+
+    @Test public void aLivePhotoSessionWithTheRetiredAdminEndsAtItsNextStepInsteadOfSendingAnotherFrame() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID();
+        signedInFixture(adminPin(peerId, peerDevice, retired));
+        var before = introduction(peerId, peerDevice, retired, "vanishr");
+        saveRetiredAdmin(before, retired);
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId, RemotePhotoSession.contact(before.peer()), List.of(before), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        long deadline = System.currentTimeMillis() + 300_000;
+        ChatEngine.Contact own = new ChatEngine.Contact(userId, deviceId, Base64.getEncoder().encodeToString(engine.groupSignal().publicIdentity()));
+        // The user approved a photo session for the admin while the earlier identity was the pinned one.
+        RemotePhotoSession.Session request = new RemotePhotoSession.Session(UUID.randomUUID(), RemotePhotoSession.contact(before.peer()), own,
+                false, deadline, retired.generatePreKey(Instant.now()));
+        RemotePhotoSession.Prepared prepared = new RemotePhotoSession.Prepared(engine, before.peer(), request);
+        try (RemotePhotoSession session = new RemotePhotoSession(context, prepared)) {
+            session.tick();
+            assertFalse("While that identity is the admin's the session goes on", prepared.retired.getAsBoolean());
+            engine.onboarding().adopt(certificate(peerId, currentDevice, current, 3));
+            assertTrue(prepared.retired.getAsBoolean());
+            assertThrows("The next step ends the session, so nothing more is encrypted to the retired identity or read from it", SecurityException.class, session::tick);
+        }
+    }
+
+    // An owner's photo session with the official admin's earlier identity, where the pin moves while the request for `movesAt` is on its way.
+    // Returns the steps that reached the relay.
+    private List<String> ownerPhotoStepWhileThePinMovesDuring(String movesAt) throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID();
+        signedInFixture(adminPin(peerId, peerDevice, retired));
+        var before = introduction(peerId, peerDevice, retired, "vanishr");
+        saveRetiredAdmin(before, retired);
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId, RemotePhotoSession.contact(before.peer()), List.of(before), null));
+        adminTransport(directory, new ArrayList<>(), new ArrayList<>(), null);
+        long deadline = System.currentTimeMillis() + 300_000;
+        ChatEngine.Contact own = new ChatEngine.Contact(userId, deviceId, Base64.getEncoder().encodeToString(engine.groupSignal().publicIdentity()));
+        RemotePhotoSession.Session request = new RemotePhotoSession.Session(UUID.randomUUID(), RemotePhotoSession.contact(before.peer()), own,
+                false, deadline, retired.generatePreKey(Instant.now()));
+        RemotePhotoSession.Prepared prepared = new RemotePhotoSession.Prepared(engine, before.peer(), request);
+        AdminIdentity.Certificate moved = certificate(peerId, currentDevice, current, 3);
+        List<String> steps = new ArrayList<>();
+        RelayApi photoApi = syntheticApi(chain -> {
+            okhttp3.Request http = chain.request(); String path = http.url().encodedPath();
+            String step = path.substring(path.lastIndexOf('/') + 1);
+            steps.add(step);
+            if (step.equals(movesAt)) engine.onboarding().adopt(moved);
+            if (step.equals("accept"))
+                return syntheticResponse(http, 200, new RemotePhotoSession.Session(request.id(), request.requester(), request.owner(), true, request.expiresAt(), request.key()));
+            if (step.equals("exchange"))
+                return syntheticResponse(http, 200, new RemotePhotoSession.Delivery(new RemotePhotoSession.Packet(UUID.randomUUID(), peerId, peerDevice,
+                        System.currentTimeMillis() + 60_000, 3, new byte[]{1, 2, 3})));
+            throw new IOException("Unexpected photo request");
+        });
+        setField(prepared.api, "client", readField(photoApi, "client"));
+        try (RemotePhotoSession session = new RemotePhotoSession(context, prepared)) {
+            setField(session, "connected", true);
+            SecurityException refused = assertThrows(SecurityException.class, session::tick);
+            assertEquals("The step ends because the other phone is no longer trusted, not because of what it sent", "The other phone is no longer trusted", refused.getMessage());
+            assertTrue(prepared.retired.getAsBoolean());
+        }
+        return steps;
+    }
+
+    @Test public void aPhotoStepPreparedWhileThePinMovesIsNeverSentToTheRetiredPhone() throws Exception {
+        assertEquals("Nothing was exchanged once the pin had moved", List.of("accept"), ownerPhotoStepWhileThePinMovesDuring("accept"));
+    }
+
+    @Test public void aPhotoExchangeOnItsWayWhenThePinMovesIsNotAnsweredByReadingTheRetiredPhone() throws Exception {
+        assertEquals(List.of("accept", "exchange"), ownerPhotoStepWhileThePinMovesDuring("exchange"));
+    }
+
+    @Test public void aProfilePhotoRevocationQueuedForTheAdminBeforeThePinMovedIsNotSentToTheRetiredDevice() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID();
+        signedInFixture(adminPin(peerId, peerDevice, retired));
+        saveRetiredAdmin(introduction(peerId, peerDevice, retired, "vanishr"), retired);
+        List<String> posted = new ArrayList<>();
+        engine.groupApi().close();
+        setField(engine, "api", syntheticApi(chain -> {
+            okhttp3.Request request = chain.request(); String path = request.url().encodedPath();
+            if (path.equals("/profile/packets") && request.method().equals("GET")) return syntheticResponse(request, 200, List.of());
+            if (path.equals("/profile/packets") && request.method().equals("POST")) { posted.add(path); return syntheticResponse(request, 200, null); }
+            throw new IOException("Unexpected profile photo request");
+        }));
+        long deadline = System.currentTimeMillis() + 120_000;
+        String identityKey = Base64.getEncoder().encodeToString(retired.publicIdentity());
+        java.util.function.Consumer<UUID> queue = id -> {
+            try {
+                vault.transaction(() -> {
+                    write("profile-photo-out/" + id, new ProfilePhotos.Queued(new ProfilePhotos.Send(id, peerId, peerDevice, deadline, 2, new byte[]{1}),
+                            ProfileEnvelope.Action.REVOKE, id, identityKey, 1));
+                    return null;
+                });
+            } catch (Exception failure) { throw new AssertionError(failure); }
+        };
+        UUID first = UUID.randomUUID(), second = UUID.randomUUID();
+        queue.accept(first);
+        engine.photos().sync();
+        assertEquals("While that identity is the pinned one a revocation is sent as to any contact", 1, posted.size());
+        queue.accept(second);
+        engine.onboarding().adopt(certificate(peerId, currentDevice, current, 3));
+        engine.photos().sync();
+        assertEquals("Once the pin has moved nothing is sent to the retired device", 1, posted.size());
+        assertNull("and it is not kept to be tried again", vault.get("profile-photo-out/" + second));
+    }
+
+    @Test public void aMessageFromTheRetiredAdminDeviceIsDeletedAtTheRelayInsteadOfStoppingEverySync() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID();
+        var setup = retiredAdminSetup(retired, current, currentDevice);
+        var directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId,
+                RemotePhotoSession.contact(setup[1].peer()), List.of(setup[1]), null));
+        List<ChatEngine.Incoming> incoming = new ArrayList<>();
+        adminTransport(directory, incoming, new ArrayList<>(), null);
+        setField(engine, "nextKeyCheck", System.currentTimeMillis() + 300_000);
+        setField(engine, "nextProfileCheck", System.currentTimeMillis() + 300_000);
+        // The pin is the new phone's. The old phone sent this before the change and it was still waiting at the relay.
+        UUID id = UUID.randomUUID(); long now = System.currentTimeMillis(), deadline = now + 120_000;
+        incoming.add(new ChatEngine.Incoming(id, peerId, peerDevice, userId, deviceId, ChatEnvelope.Expiry.HOUR_1, now, deadline, 3, new byte[]{1, 2, 3}, null));
+        engine.sync();
+        assertTrue("The relay is asked to delete it", deletedMessages.contains("/messages/" + id));
+        assertTrue("and it is not offered again", vault.get("seen/" + id) != null);
+        assertTrue("Nothing was read from it", engine.entries(peerId).stream().noneMatch(entry -> id.equals(entry.id())));
+        assertEquals("The sync went on to the end, so the saved contact is the new identity now", setup[1].peer(), engine.peer(peerId));
+        assertFalse(engine.onboarding().rotationPending(peerId));
+    }
+
+    @Test public void aCertificateAnotherScreenAlreadyKeptIsTakenWithoutAskingAnybody() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID();
+        signedInFixture(adminPin(peerId, peerDevice, retired));
+        AdminOnboarding.Pin retiredPin = engine.onboarding().pin();
+        java.security.KeyPair authority = adminAuthorityPair();
+        String fingerprint = fingerprintOf(peerId, current);
+        byte[] kept = signedAdminIdentity(authority, "t1", 3, peerId, currentDevice, fingerprint);
+        java.util.concurrent.atomic.AtomicReference<byte[]> served = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicInteger requests = new java.util.concurrent.atomic.AtomicInteger();
+        okhttp3.OkHttpClient transport = certificateTransport(served, requests);
+        android.content.SharedPreferences stored = context.getSharedPreferences("admin-identity", Context.MODE_PRIVATE);
+        // Another screen of the app fetched it a moment ago: it is kept with its number, and that request is on record.
+        assertTrue(stored.edit().clear().putString("envelope", new String(kept, StandardCharsets.UTF_8)).putLong("sequence", 3)
+                .putLong("last-attempt", System.currentTimeMillis()).commit());
+        try (ActivityScenario<MainActivity> scenario = launchSettled()) {
+            scenario.onActivity(activity -> {
+                setField(activity, "adminKeys", Map.of("t1", authority.getPublic()));
+                setField(activity, "adminIdentitySource", (java.util.function.Supplier<RemoteSettings>) () -> RemoteSettings.forAdminIdentity(transport));
+                inject(activity);
+            });
+            assertEquals("This engine was loaded before the certificate was kept", retiredPin, engine.onboarding().pin());
+            scenario.onActivity(activity -> invoke(activity, "requestAdminIdentity", new Class<?>[]{ChatEngine.class}, engine));
+            awaitMainCondition(scenario, activity -> engine.onboarding().pin().deviceId().equals(currentDevice));
+            assertEquals(fingerprint, engine.onboarding().pin().fingerprint());
+            assertEquals("It was taken from the store, without asking anybody", 0, requests.get());
+        }
+    }
+
+    // ==== end 0.6.3 ====
 
     private int dpPx(int value) { return Math.round(value * context.getResources().getDisplayMetrics().density); }
 

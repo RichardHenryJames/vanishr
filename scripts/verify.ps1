@@ -17,9 +17,12 @@ try {
         if ($Release) { $tasks += @(':app:assembleRelease', ':app:lintRelease') }
         & (Join-Path $PSScriptRoot 'build-android.ps1') -Tasks $tasks
     }
-    # No phone, network or real signing key: the Google release configuration, the over-the-air settings rules and tool, and the committed signed file.
+    # No phone, network or real signing key: the Google release configuration, the over-the-air settings and admin identity rules and tools, and the
+    # committed signed files.
     & (Join-Path $PSScriptRoot 'test-google-config.ps1')
     & (Join-Path $PSScriptRoot 'test-ota-settings.ps1')
     & (Join-Path $PSScriptRoot 'sign-ota-settings.ps1') -Check
+    & (Join-Path $PSScriptRoot 'test-admin-identity.ps1')
+    & (Join-Path $PSScriptRoot 'sign-admin-identity.ps1') -Check
     Write-Output 'Verification passed. Review docs/VERIFICATION.md for device and production release gates.'
 } finally { Pop-Location }

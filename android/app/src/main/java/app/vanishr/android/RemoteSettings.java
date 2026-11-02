@@ -87,10 +87,17 @@ final class RemoteSettings implements AutoCloseable {
     }
 
     private final OkHttpClient client;
+    private final String address;
 
     RemoteSettings() { this(new OkHttpClient()); }
 
-    RemoteSettings(OkHttpClient transport) {
+    RemoteSettings(OkHttpClient transport) { this(transport, URL); }
+
+    /** The same bounded, anonymous request for another signed file on the download site (the admin identity certificate). */
+    static RemoteSettings forAdminIdentity(OkHttpClient transport) { return new RemoteSettings(transport, AdminIdentity.URL); }
+
+    private RemoteSettings(OkHttpClient transport, String address) {
+        this.address = address;
         client = transport.newBuilder().connectionSpecs(List.of(ConnectionSpec.MODERN_TLS))
                 .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false)
                 .cookieJar(CookieJar.NO_COOKIES).cache(null)
@@ -99,7 +106,7 @@ final class RemoteSettings implements AutoCloseable {
 
     /** One bounded request to the fixed download host: no cookies, account data or identifiers, and no redirects. */
     byte[] fetch() throws IOException {
-        Request request = new Request.Builder().url(URL).header("Accept", "application/json")
+        Request request = new Request.Builder().url(address).header("Accept", "application/json")
                 .header("Cache-Control", "no-store").get().build();
         try (Response response = client.newCall(request).execute()) {
             ResponseBody body = response.body();

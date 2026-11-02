@@ -121,6 +121,11 @@ first, including the absent Google/Firebase client configuration.
    and not a rebuild) and stops if the floor is not exactly that value; a half-written
    `download\ota\settings.json.new` left by an interrupted signing also stops it. See
    [Push settings over the air](#push-settings-over-the-air-no-app-build-no-play-upload).
+6. The admin identity certificate (`download/ota/admin-identity.json`) goes out with every release too, and an app version
+   has to carry the newest one: `AdminIdentity.BUILD_SEQUENCE_FLOOR` is its sequence and `AdminOnboarding.OFFICIAL` is the
+   device and identity it names. `.\scripts\sign-admin-identity.ps1 -Check` prints what is committed;
+   `prepare-download.ps1` runs `-Check -AppRelease` right after the settings check and stops if the app and the certificate
+   disagree. See [Changing the admin's phone](#changing-the-admins-phone).
 
 ### 4.2 Verify and, only if needed, update the relay first
 
@@ -650,6 +655,75 @@ the issue time of the newest published file as of the release: when cutting an a
 `prepare-download.ps1` runs `-Check -AppRelease`, which stops the release if the floor is not exactly that value;
 `-Check` alone fails if the committed file was issued before the floor.
 
+### Changing the admin's phone
+
+The official admin account has one device identity, pinned in the app (`AdminOnboarding.OFFICIAL`). If you sign in as the
+admin on another phone and replace the registered device, the relay holds a new identity, and **every phone refuses the
+admin** ("Official admin identity changed. A reviewed app update is required.") until it learns the new one. From 0.6.3 a
+phone learns it from a certificate that only you can sign, without a new app version, **if it is running 0.6.3 or later**;
+older phones stay on the warning until they update. Read [the threat model](THREAT-MODEL.md#the-admin-changes-phone-063)
+first: the authority key you use here can name the admin's identity.
+
+**Before you need it (once).** The key exists once `.\scripts\new-ota-key.ps1 -Purpose Admin` has been run (it is a
+different key from the settings key: `.secrets\admin-authority`, public half in
+[admin_keys.txt](../android/app/src/main/res/raw/admin_keys.txt)). **Back up the whole `.secrets\admin-authority`
+folder offline, and keep the backup of the password apart from the backup of the key.** Without the key you can still
+move the admin, but only with a new app version for every user (below). Run `.\scripts\new-ota-key.ps1 -Purpose Admin
+-RestrictOnly` if the folder ever needs its permissions repaired.
+
+**When you change phone (as quickly as you can, because users see a warning until step 4):**
+
+1. **Do not uninstall, clear or reinstall the app on the phone that holds the admin identity** until the new one is certified:
+   its private key exists only there. Install Vanishr on the new phone, sign in with the admin's Google account and, when
+   asked, choose to replace the device. The relay now holds the new identity.
+2. On the new phone open **My profile > Verify identity** and keep the **Safety number** on screen (8 groups of 8
+   characters, 0-9 and A-F).
+3. On your computer run `.\scripts\sign-admin-identity.ps1`. It reads the admin's device from the relay (one read-only
+   query on the relay's VM in `vanishr-dev-rg`; it needs the Azure CLI signed in, as for `publish-azure.ps1`; pass
+   `-DeviceId` and `-IdentityKey` instead only if you read both from the relay yourself: the phone's number covers the
+   account and the identity key, **not the device ID**, so a device ID typed by hand cannot be checked, the tool warns about
+   it, and a wrong one would make every phone refuse the admin until a corrected certificate is published), asks you to type
+   the number the phone shows (**before**
+   it shows the relay's: type all of it, or only its first and last group, and nothing is signed if it does not match),
+   and writes `download\ota\admin-identity.json` with the next sequence number (`-Sequence` is only for recovery and has to be
+   above the committed one: a lower or equal number is refused). If the number does not match, stop: the
+   relay does not hold the identity of the phone in your hand, and somebody else may have replaced it.
+4. Publish it with a website release (section 8; `prepare-website.ps1` and the stage check the file first), then run
+   `.\scripts\sign-admin-identity.ps1 -Check -Live -RequireIdentical`: the website must serve exactly the committed file as
+   `application/json`, `no-store`. Phones of 0.6.3 or later that meet the new identity fetch it within moments of opening
+   the app and switch; nothing is announced in the app. The request is made only after the app has found that the admin's
+   identity is not the pinned one, at most once in ten minutes (the time is remembered across restarts).
+5. Commit the file. **At the next app version** set `AdminOnboarding.OFFICIAL` (device ID and fingerprint) to the new identity and
+   `AdminIdentity.BUILD_SEQUENCE_FLOOR` to the certificate's sequence (`-Check` prints both); `prepare-download.ps1`
+   runs `sign-admin-identity.ps1 -Check -AppRelease` first of all and stops if they disagree. That version also retires
+   the old phone's certificate for fresh installs.
+
+`.\scripts\sign-admin-identity.ps1 -Check` (no key needed) shows what is committed and compares it with the app's build;
+`-Check -Live` compares it with the website before a release. `verify.ps1` runs the tests and the check.
+
+**What users and the old phone see.** A phone that has taken the certificate stops treating the old admin identity as
+verified at once (for the chat, presence, photos, backup and groups), and replaces the saved admin chat with the new
+identity the next time it looks at the relay or opens that chat (history stays; the new identity is the app's automatic
+introduction, also for people who had verified the old one by hand). A message that was still waiting to be sent to the
+old identity is not sent (it shows "Not sent: contact unavailable"), and neither are a group key or a profile-photo
+revocation that were waiting; a photo-sharing session already running with it ends; a message the old phone sent that was
+still waiting at the relay is deleted unread. A group that has the admin as a member keeps the old
+identity in its roster: the app sends it no key and believes nothing from
+it (no control, no group message), but only that group's owner can remove it
+and invite the new one. If the old phone is lost or sold, certify the new one as soon as you can and treat the old key as
+exposed until the next app version raises the floor.
+
+**If you do not have the authority key, or a phone older than 0.6.3 matters:** the only way is a new app version with the new
+built-in pin (`AdminOnboarding.OFFICIAL`) and an upload to Google Play; users see the warning until they update. The new
+version replaces the saved admin contact on its own (the same code), so no one has to remove and add the admin again.
+
+**If the authority key is lost or may have been copied:** there is no remote revocation. Create a new key with
+`.\scripts\new-ota-key.ps1 -Purpose Admin` (up to three public keys are listed, so a new one can ship before the old one is
+removed), release a new app version (a new bundle for Google Play) and certify with the new key; sequence numbers
+count on across keys, so keep going from the committed file's number. Treat an admin phone that was lost or sold as
+holding a key that matters: raise `BUILD_SEQUENCE_FLOOR` and the built-in pin in the next version so that it no longer
+counts.
+
 ## 9. Quick troubleshooting
 
 | Symptom | Check |
@@ -663,4 +737,5 @@ the issue time of the newest published file as of the release: when cutting an a
 | Website text changed but native popup did not | Edit the native policy source and release a new signed app; web HTML is not the popup's text source. |
 | Vercel succeeded but Google Play is unchanged | Upload/review/roll out the Play AAB separately, subject to [Play readiness gates](PLAY-STORE.md). |
 | Phones do not show a new notice | Run `.\scripts\sign-ota-settings.ps1 -Check -Live -RequireIdentical`: the file the website serves must be 200, JSON, `no-store`, `noindex`, exactly the committed file, verify under the app's keys, pass the app's rules and not be expired (a signature, expiry, key or rule problem makes every phone ignore it silently). The app looks at most once a day while open; My profile shows the sequence it holds. A file with a sequence no higher than the phone's for that key, or issued earlier than a file the phone already took, is ignored. |
+| Users see "Official admin identity changed. A reviewed app update is required." | The identity the relay holds for the admin is not the one this app pins: the admin signed in on another phone (or somebody replaced the device). Follow [Changing the admin's phone](#changing-the-admins-phone). Phones older than 0.6.3 cannot follow a certificate and need the update. Run `.\scripts\sign-admin-identity.ps1 -Check -Live -RequireIdentical` to see what is published. Do not clear the app on the phone that holds the identity. |
 | Google sign-in says "cancelled" on a Google Play install only | The Play app-signing certificate is not registered for Google sign-in, see [GOOGLE-SETUP.md](GOOGLE-SETUP.md#phone-installs-from-google-play-play-app-signing). It is configuration, not a defect in the bundle. |
