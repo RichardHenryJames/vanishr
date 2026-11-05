@@ -1642,7 +1642,17 @@ public final class MainActivity extends AppCompatActivity {
                 if (request == null || request.id() == null || request.accepted() || !own.equals(request.owner()) || request.requester() == null
                         || request.expiresAt() <= System.currentTimeMillis() || request.expiresAt() > System.currentTimeMillis() + RemotePhotoSession.LIFETIME + 5000) continue;
                 ChatEngine.Peer peer = current.peers().stream().filter(value -> RemotePhotoSession.contact(value).equals(request.requester())).findFirst().orElse(null);
+                if (peer == null && current.onboarding().official(request.requester().userId())) {
+                    // The official admin's identity may have moved (a certified phone change) since this phone last saved it: resolve it
+                    // the same way an incoming message from a new admin device does, instead of silently never matching this request.
+                    current.onboarding().acceptIncoming(request.requester().userId(), request.requester().deviceId());
+                    peer = current.peers().stream().filter(value -> RemotePhotoSession.contact(value).equals(request.requester())).findFirst().orElse(null);
+                    // Still unresolved (most likely this phone's own pin has not followed the certificate yet): surface the mismatch
+                    // instead of a silent stall, so the usual certificate check is triggered.
+                    if (peer == null) current.onboarding().requireOfficial(request.requester());
+                }
                 if (!RemotePhotoSession.trustedContact(current, peer)) continue;
+                ChatEngine.Peer resolvedPeer = peer;
                 ui.post(() -> {
                     promptedPhotos.entrySet().removeIf(entry -> entry.getValue() <= System.currentTimeMillis());
 
@@ -1660,7 +1670,7 @@ public final class MainActivity extends AppCompatActivity {
                         return;
                     }
 
-                    photoChoice = new PhotoChoice(account, peer, request);
+                    photoChoice = new PhotoChoice(account, resolvedPeer, request);
                     photoPermissionsRequested = false;
                     continuePhotoChoice();
                     return;

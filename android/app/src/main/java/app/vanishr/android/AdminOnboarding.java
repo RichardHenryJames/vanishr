@@ -112,8 +112,13 @@ final class AdminOnboarding {
     }
 
     void requireOfficial(ChatEngine.Peer peer) throws Exception {
-        if (official(peer.userId())) pin.require(RemotePhotoSession.contact(peer));
+        requireOfficial(RemotePhotoSession.contact(peer));
         if (automatic(peer.userId())) requireLocalAdmin();
+    }
+
+    /** Same check when only the three identity fields are known (no display name), such as a remote-photo requester reported by the relay. */
+    void requireOfficial(ChatEngine.Contact contact) throws Exception {
+        if (official(contact.userId())) pin.require(contact);
     }
 
     void requireSaved(UUID userId) throws Exception {

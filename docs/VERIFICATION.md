@@ -81,7 +81,8 @@ part of the repository), showed:
   copy the person had verified by hand is replaced by the automatic one and is not shown as verified. Any other saved
   identity that changes still throws `Introduced identity changed; the saved identity was not replaced`.
   `prepareSaved` and `prepare` take the new identity from the network when the saved copy is the retired one, and the
-  first message from the new admin device is accepted the same way (`ChatEngine.receive`).
+  first message from the new admin device is accepted the same way (`ChatEngine.receive`), and so is a pending
+  remote-photo request from it (`MainActivity.photoRequestsOnce`; see the follow-up below).
 - Owner tooling (PowerShell 7, tested without the real key): `new-ota-key.ps1 -Purpose Admin` creates the authority key
   (private half encrypted, in `.secrets/admin-authority`, git-ignored, **to be backed up offline**);
   [sign-admin-identity.ps1](../scripts/sign-admin-identity.ps1) signs the next certificate for the identity the relay
@@ -235,6 +236,40 @@ build's, even if a later one exists.
   identity key is lost if the app there is uninstalled, cleared or reinstalled. The admin authority key
   (`.secrets\admin-authority`) and the settings signing key exist only on this computer and have to be backed up
   offline.
+
+**Follow-up, 2026-11-05: a remote-photo request from the new admin identity was never matched.** Reported: with a
+contact's Vanishr open, the admin requesting that contact's photos stayed on "Waiting for approval..." instead of the
+approval being automatic, as it always had been. Read from the code, then reproduced and fixed on the emulator (no
+relay change, no production phone used):
+
+- **Cause.** The owner side's background check for a pending request
+  (`MainActivity.photoRequestsOnce`) only ever matched a request against a contact **already saved exactly as
+  that request names it**; it never asked the network. A chat message from the admin's new, certified identity
+  already resolved itself this way (`ChatEngine.receive` → `AdminOnboarding.acceptIncoming`, built for 0.6.3), but
+  remote photos did not share that path. So once the admin's phone was certified onto its new identity, a contact
+  whose saved admin entry had not separately been refreshed by an ordinary chat or directory sync saw every
+  request from the admin match nothing: no saved contact equalled it, so the loop moved on to the next request
+  with **no error, no retry logic and nothing shown** — not even the usual "Official admin identity changed"
+  warning. The admin's own screen had no way to know why, and after the relay's own two-minute window for an
+  unaccepted request the session simply ended, which looks exactly like a hang.
+- **Fix.** `photoRequestsOnce` now resolves a request from the official admin's account the same way an incoming
+  message already does: a network-verified lookup of the admin's current identity
+  (`AdminOnboarding.acceptIncoming`), which replaces the stale saved contact once it verifies against this phone's
+  pin. If the pin itself has not yet followed a certificate, this surfaces as the same identity-mismatch failure
+  chat already raises (`AdminOnboarding.requireOfficial`, now also callable with just the three identity fields a
+  remote-photo request carries, no display name needed) instead of a silent stall, so the usual once-per-ten-minutes
+  certificate check is triggered the normal way. No change to the "no separate approval flow" design: a contact
+  whose saved admin entry already matches reality, or who is not interacting with the admin's rotated identity at
+  all, sees no change in behavior.
+- **Verified**: one new emulator test,
+  `aRemotePhotoRequestFromTheAdminsCertifiedNewIdentityIsMatchedInsteadOfWaitingOnAStaleSavedContactForever`
+  (synthetic account and transport; a contact with a stale saved admin entry and an already-certified pin), checked
+  against a mutation of the fix (removing it makes the new test fail with the exact symptom: the saved contact
+  stays stale); the whole 28-test 0.6.3 section, including it, passes; the full gate
+  (`verify.ps1 -Android`) passes unchanged (relay 101 / 2 skipped, app 64, lint 0 errors / 19 warnings).
+- **Not verified**: two real phones, a live relay, or the exact "stuck" report reproduced as it happened (this was
+  diagnosed from the code and reproduced with a synthetic request, not from the reporter's own devices). No new app
+  version has been cut for this fix; it is in the source tree only.
 
 ## Release 0.6.2 / Signed settings and Google Play sign-in
 

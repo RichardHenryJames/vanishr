@@ -7711,6 +7711,50 @@ public class ScreenFlowTest {
         }
     }
 
+    @Test public void aRemotePhotoRequestFromTheAdminsCertifiedNewIdentityIsMatchedInsteadOfWaitingOnAStaleSavedContactForever() throws Exception {
+        SignalClient retired = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        SignalClient current = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        UUID currentDevice = UUID.randomUUID();
+        signedInFixture(adminPin(peerId, peerDevice, retired));
+        saveRetiredAdmin(introduction(peerId, peerDevice, retired, "vanishr"), retired);
+        // The admin's phone has since been certified onto a new device, but this phone has not yet synced a chat or directory refresh
+        // that would otherwise have replaced its saved contact for the admin (AdminOnboarding.store).
+        engine.onboarding().adopt(certificate(peerId, currentDevice, current, 3));
+        assertTrue("Fixture: the saved contact is stale relative to the pin", engine.onboarding().rotationPending(peerId));
+
+        ChatEngine.Contact own = new ChatEngine.Contact(userId, deviceId, Base64.getEncoder().encodeToString(engine.groupSignal().publicIdentity()));
+        ChatEngine.Contact newAdmin = new ChatEngine.Contact(peerId, currentDevice, Base64.getEncoder().encodeToString(current.publicIdentity()));
+        RemotePhotoSession.Session pending = new RemotePhotoSession.Session(UUID.randomUUID(), newAdmin, own, false,
+                System.currentTimeMillis() + 300_000, current.generatePreKey(Instant.now()));
+        var newIntroduction = introduction(peerId, currentDevice, current, "vanishr");
+        engine.groupApi().close();
+        setField(engine, "api", syntheticApi(chain -> {
+            okhttp3.Request request = chain.request(); String path = request.url().encodedPath();
+            if (path.equals("/account/type")) return syntheticResponse(request, 200, new RemotePhotoSession.AccountType(userId, "USER"));
+            if (path.equals("/remote-photos") && request.method().equals("GET")) return syntheticResponse(request, 200, List.of(pending));
+            if (path.equals("/account/admin-contacts/" + peerId))
+                return syntheticResponse(request, 200, new AdminOnboarding.Page(userId, newAdmin, List.of(newIntroduction), null));
+            throw new IOException("Unexpected request in this bounded match-only scenario: " + path);
+        }));
+
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                inject(activity);
+                // Bounds this test to the matching/self-heal step: the request is already "seen", so a live photo session is never
+                // started here (that machinery is exercised by the other remote-photos tests).
+                ((Map<UUID, Long>) readField(activity, "promptedPhotos")).put(pending.id(), System.currentTimeMillis() + 60_000);
+                var worker = (java.util.concurrent.ExecutorService) readField(activity, "work");
+                try { worker.submit(() -> invoke(activity, "photoRequestsOnce")).get(10, java.util.concurrent.TimeUnit.SECONDS); }
+                catch (Exception failure) { throw new AssertionError(failure.getCause() == null ? failure : failure.getCause()); }
+            });
+            assertFalse("The saved contact self-heals to the admin's current, certified identity instead of staying stale",
+                    engine.onboarding().rotationPending(peerId));
+            assertEquals(newAdmin, RemotePhotoSession.contact(engine.peer(peerId)));
+            assertTrue("The request is then recognised as coming from a trusted (official admin) contact, not silently ignored forever",
+                    RemotePhotoSession.trustedContact(engine, engine.peer(peerId)));
+        }
+    }
+
     // ==== end 0.6.3 ====
 
     private int dpPx(int value) { return Math.round(value * context.getResources().getDisplayMetrics().density); }

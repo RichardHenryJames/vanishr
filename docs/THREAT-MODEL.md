@@ -316,7 +316,9 @@ automatic admin chat. The refusal was the pin doing its job; what was missing wa
   one encrypted transaction (its Signal sessions are deleted, the identity record is replaced, the contact is saved
   again) only if the identity the relay presents is exactly the pinned one; whatever the relay shows that is not
   pinned is refused as before, and the saved contact stays (it stays unusable, see above). It happens wherever the admin is looked at: the directory
-  refresh, an incoming message from the new device (before it is decrypted, so the first message is not lost) and
+  refresh, an incoming message from the new device (before it is decrypted, so the first message is not lost), a
+  pending remote-photo request from it (so the owner side's automatic approval is not left matching only a contact
+  it had already saved; `MainActivity.photoRequestsOnce`) and
   opening the chat, which always comes before a message is sent from it. (A send that starts with a copy of the contact
   that was read before the replacement fails once with a generic error and works when repeated.) The conversation
   continues with a fresh session; messages already on the phone stay until
