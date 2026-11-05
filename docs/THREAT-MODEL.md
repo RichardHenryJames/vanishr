@@ -985,8 +985,67 @@ commit for every local effect plus its outbound control message.
 Not claimed: this has run only on the dedicated test emulator with synthetic accounts
 (see [VERIFICATION.md](VERIFICATION.md)), never on a physical phone or across a real relay
 between two devices. The quoted snippet, reaction chips and "edited" label are verified as
-stored and retrievable engine state, not by inspecting a rendered screen. Voice messages and
-multi-device support, considered in the same pass, are not built.
+stored and retrievable engine state, not by inspecting a rendered screen. Voice messages,
+considered in the same pass, are not built; the relay side of several devices per account is
+described next, and no app uses it.
+
+### Several devices per account: relay foundation (unreleased, not deployed, no app uses it)
+
+The relay can now hold more than one device for an ordinary account (migration V14 drops the
+unique constraint that allowed exactly one). **Every released app is still one device per
+account and behaves exactly as before**: nothing asks for a second device yet, and this relay
+has not been deployed. What exists, and what does not:
+
+- **Adding a device is an explicit request.** `POST /devices` adds a device only when the
+  request says `addDevice`. An older app never sends that, so it is still answered
+  `device_already_registered` for any second device (an app signing in on a new phone is still
+  offered the replace question, not silently turned into a second device that receives
+  nothing), and the same device registering again with the same key is still the idempotent
+  resume. `replaceExisting` is still a full reset and now removes every device the account has;
+  asking for both at once is refused (400) rather than guessed at. A device id that already
+  exists under a different identity key is never an add.
+- **The admin account stays exactly one device.** `addDevice` for the admin is refused like any
+  second device, so the pinned official identity (see
+  [The admin changes phone](#the-admin-changes-phone-063)) cannot gain a sibling.
+- **At most five devices per account**, counted in the registration transaction (the account row
+  is locked), so two phones registering at once cannot pass the limit.
+- **Each device has its own identity key.** Prekey and fallback-key uploads are validated against
+  the identity key of the device making the request; before this they were checked against "the"
+  device of the account, which would have refused every second device and, worse, would have
+  accepted a bundle from the wrong one.
+- **The first-registered device stays "the" device for everything that was written for one.** The
+  single-contact lookups (`/users/id/{id}`, `/users/{handle}`), the one-argument prekey claim and
+  the administrator's contact directory all mean that device (the directory lists each person
+  once). Groups, presence and remote-photo sessions already compared the acting device with it
+  and still answer 401 or 404 for any other, so **a secondary device cannot be a group member,
+  publish presence or take part in a remote-photo session**; a test shows it cannot create a
+  group. Those three keep working on the first device only until they are built for several.
+- **New endpoints, same access rule as the single lookup:** the active devices of another account
+  (`GET /users/id/{id}/devices`, oldest first, for a sender that encrypts separately to each),
+  a prekey claim for one named device of an account (404 unless that device belongs to it), the
+  caller's own devices (`GET /account/devices`) and revocation of one of them
+  (`DELETE /account/devices/{id}`). Only the caller's **other** devices can be revoked (the
+  current one is refused with 400; another account's is a 404 that changes nothing). Revoking
+  deletes the device's record and its prekeys, so its tokens stop working at once, clears its
+  push registration and presence record, and its sockets close at the next check (within 30
+  seconds). Ciphertext already queued for it stays in Redis until its normal deadline and cannot
+  be fetched, since nothing can authenticate as that device any more.
+
+**Open decision, nothing built:** with an identity key per device, every contact would have to
+verify each new device of a person on its own, and until they did, that device's messages would
+be refused and nothing would be sent to it; the alternative, one identity key shared by an
+account's devices and handed from an existing device to a new one through a linking step, avoids
+that but needs a secure transfer of a private key, which this app has never done. The app has
+neither: it still addresses a contact as one device, and a sender fanning out to every device,
+sessions per device, a way to join as a second phone and a screen for managing devices are all
+unbuilt. Messages sent from one phone would also not appear on the person's other phone, and a
+phone that joins would see only what arrives afterwards.
+
+Not verified: any behavior of an app against this relay with two devices; the migration on the
+existing production database (it ran on freshly created test databases only, where the
+constraint it drops exists under the name the first migration gives it); several devices at the
+same time under load; and what happens to a contact's pinned identity when a second device
+appears.
 
 ## Notification navigation
 

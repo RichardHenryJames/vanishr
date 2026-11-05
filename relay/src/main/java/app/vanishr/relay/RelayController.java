@@ -90,6 +90,25 @@ public class RelayController {
         return accounts.contact(userId);
     }
 
+    /** Every active device of {@code userId} (one for the admin account, up to the cap for an ordinary one), so a sender
+     * can encrypt separately to each instead of only the one {@code /users/id/{userId}} treats as primary. */
+    @GetMapping("/users/id/{userId}/devices") public List<AccountDirectory.Contact> devices(@AuthenticationPrincipal Actor actor, @PathVariable UUID userId) {
+        accounts.requireInteraction(actor.userId(), userId);
+        return accounts.devices(userId);
+    }
+
+    @GetMapping("/account/devices") public List<AccountDirectory.Contact> ownDevices(@AuthenticationPrincipal Actor actor) {
+        return accounts.devices(actor.userId());
+    }
+
+    @DeleteMapping("/account/devices/{deviceId}") @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void revokeDevice(@AuthenticationPrincipal Actor actor, @PathVariable UUID deviceId) {
+        rates.require("revoke-device:" + actor.deviceId(), 10, 60);
+        accounts.revokeDevice(actor, deviceId);
+        presence.clear(deviceId);
+        notifications.unregister(deviceId);
+    }
+
     @GetMapping("/account/username") public AccountDirectory.Username username(@AuthenticationPrincipal Actor actor) {
         return accounts.username(actor.userId());
     }
@@ -149,6 +168,15 @@ public class RelayController {
         rates.require("claims:" + actor.deviceId(), 20, 60);
         accounts.requireInteraction(actor.userId(), userId);
         return accounts.claim(userId, fallback);
+    }
+
+    /** Claims from one specific device of {@code userId}, for establishing or refreshing a session with exactly that
+     * device of a (possibly multi-device) recipient instead of whichever one {@code /keys/{userId}/claim} treats as primary. */
+    @PostMapping("/keys/{userId}/{deviceId}/claim") public AccountDirectory.PreKey claim(@AuthenticationPrincipal Actor actor,
+            @PathVariable UUID userId, @PathVariable UUID deviceId, @RequestParam(defaultValue = "false") boolean fallback) {
+        rates.require("claims:" + actor.deviceId(), 20, 60);
+        accounts.requireInteraction(actor.userId(), userId);
+        return accounts.claim(userId, deviceId, fallback);
     }
 
     private void recipient(UUID userId, UUID deviceId) {

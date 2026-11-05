@@ -1602,6 +1602,208 @@ class RelayIntegrationTest {
         assertFalse(Boolean.TRUE.equals(redis.hasKey("m:" + message.id())));
         }
 
+    /** Registers one more device for an already-existing non-admin account, with its own independent identity key. */
+    private Device addDevice(Device owner, String handle) throws Exception {
+        AuthService.Token session = recentLogin(handle, null);
+        Device enrolling = new Device(owner.userId(), null, session.accessToken(), owner.crypto());
+        UUID deviceId = UUID.randomUUID();
+        SignalClient crypto = new SignalClient(owner.userId(), new TestVault());
+        String registered = request(body(post("/devices"), new AccountDirectory.DeviceRequest(deviceId, crypto.publicIdentity(), false, true)), enrolling)
+                .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
+        AuthService.Token token = json.readValue(registered, AuthService.Token.class);
+        return new Device(owner.userId(), deviceId, token.accessToken(), crypto);
+    }
+
+    @Test void aNonAdminAccountAddsDevicesUpToTheCapWhenAskedToAndTheAdminAccountStaysSingleDevice() throws Exception {
+        Device owner = device("multidevice_owner");
+        List<Device> devices = new ArrayList<>(List.of(owner));
+        for (int extra = 1; extra < 5; extra++) devices.add(addDevice(owner, "multidevice_owner"));
+        assertEquals(5, database.queryForObject("SELECT COUNT(*) FROM devices WHERE user_id = ?", Integer.class, owner.userId()));
+        AuthService.Token sixth = recentLogin("multidevice_owner", null);
+        Device sixthEnrolling = new Device(owner.userId(), null, sixth.accessToken(), owner.crypto());
+        request(body(post("/devices"), new AccountDirectory.DeviceRequest(UUID.randomUUID(), new SignalClient(owner.userId(), new TestVault()).publicIdentity(), false, true)), sixthEnrolling)
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.error").value("device_limit_reached"));
+        assertEquals(5, database.queryForObject("SELECT COUNT(*) FROM devices WHERE user_id = ?", Integer.class, owner.userId()));
+        for (Device device : devices) request(get("/auth/me"), device).andExpect(status().isOk());
+
+        Device admin = device("multidevice_admin");
+        assignAdmin(admin);
+        AuthService.Token adminSecond = recentLogin("multidevice_admin", null);
+        Device adminEnrolling = new Device(admin.userId(), null, adminSecond.accessToken(), admin.crypto());
+        request(body(post("/devices"), new AccountDirectory.DeviceRequest(UUID.randomUUID(), new SignalClient(admin.userId(), new TestVault()).publicIdentity(), false, true)), adminEnrolling)
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.error").value("device_already_registered"));
+        assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM devices WHERE user_id = ?", Integer.class, admin.userId()));
+    }
+
+    @Test void anAppThatDoesNotAskToAddADeviceIsAnsweredExactlyAsBeforeEvenOnAnAccountWithSeveral() throws Exception {
+        Device owner = device("legacy_owner");
+        Device second = addDevice(owner, "legacy_owner");
+        AuthService.Token login = recentLogin("legacy_owner", null);
+        Device enrolling = new Device(owner.userId(), null, login.accessToken(), owner.crypto());
+        // A device nobody has registered, with no add request: refused, as for every older app, and the token is not spent.
+        request(body(post("/devices"), new AccountDirectory.DeviceRequest(UUID.randomUUID(), new SignalClient(owner.userId(), new TestVault()).publicIdentity(), false)), enrolling)
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.error").value("device_already_registered"));
+        // A known device claimed again under another key: never an add.
+        request(body(post("/devices"), new AccountDirectory.DeviceRequest(second.deviceId(), new SignalClient(owner.userId(), new TestVault()).publicIdentity(), false, true)), enrolling)
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.error").value("device_already_registered"));
+        // The second device resuming itself (same id, same key) works without asking to add anything.
+        request(body(post("/devices"), new AccountDirectory.DeviceRequest(second.deviceId(), second.crypto().publicIdentity(), false)), enrolling)
+                .andExpect(status().isCreated());
+        assertEquals(2, database.queryForObject("SELECT COUNT(*) FROM devices WHERE user_id = ?", Integer.class, owner.userId()));
+        // Replace and add at once is ambiguous, so it is refused instead of guessed at.
+        AuthService.Token again = recentLogin("legacy_owner", null);
+        request(body(post("/devices"), new AccountDirectory.DeviceRequest(UUID.randomUUID(), new SignalClient(owner.userId(), new TestVault()).publicIdentity(), true, true)),
+                new Device(owner.userId(), null, again.accessToken(), owner.crypto())).andExpect(status().isBadRequest());
+        assertEquals(2, database.queryForObject("SELECT COUNT(*) FROM devices WHERE user_id = ?", Integer.class, owner.userId()));
+    }
+
+    @Test void replacingAnAccountThatHasSeveralDevicesRemovesEveryOtherOne() throws Exception {
+        Device owner = device("replace_many_owner");
+        Device second = addDevice(owner, "replace_many_owner");
+        Device third = addDevice(owner, "replace_many_owner");
+        AuthService.Token login = recentLogin("replace_many_owner", null);
+        UUID replacement = UUID.randomUUID();
+        SignalClient replacementCrypto = new SignalClient(owner.userId(), new TestVault());
+        request(body(post("/devices"), new AccountDirectory.DeviceRequest(replacement, replacementCrypto.publicIdentity(), true)),
+                new Device(owner.userId(), null, login.accessToken(), owner.crypto())).andExpect(status().isCreated());
+        assertEquals(List.of(replacement), database.queryForList("SELECT id FROM devices WHERE user_id = ?", UUID.class, owner.userId()));
+        for (Device gone : List.of(owner, second, third)) request(get("/auth/me"), gone).andExpect(status().isUnauthorized());
+    }
+
+    @Test void aSecondaryDeviceCannotActAsTheAccountsGroupMember() throws Exception {
+        Device owner = device("group_primary_owner");
+        Device secondary = addDevice(owner, "group_primary_owner");
+        ApiException refused = assertThrows(ApiException.class, () -> groups.create(actor(secondary), UUID.randomUUID()));
+        assertEquals(org.springframework.http.HttpStatus.UNAUTHORIZED, refused.status);
+        assertEquals(0, database.queryForObject("SELECT COUNT(*) FROM private_groups", Integer.class));
+        // The primary device is unaffected.
+        assertNotNull(groups.create(actor(owner), UUID.randomUUID()));
+    }
+
+    @Test void anAccountCannotRevokeAnotherAccountsDevice() throws Exception {
+        Device attacker = device("revoke_attacker"), victim = device("revoke_victim");
+        Device victimSecond = addDevice(victim, "revoke_victim");
+        request(delete("/account/devices/" + victim.deviceId()), attacker).andExpect(status().isNotFound());
+        request(delete("/account/devices/" + victimSecond.deviceId()), attacker).andExpect(status().isNotFound());
+        assertEquals(2, database.queryForObject("SELECT COUNT(*) FROM devices WHERE user_id = ?", Integer.class, victim.userId()));
+        request(get("/auth/me"), victim).andExpect(status().isOk());
+        request(get("/auth/me"), victimSecond).andExpect(status().isOk());
+        // The attacker's own listing never includes the victim's devices.
+        request(get("/account/devices"), attacker).andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].deviceId").value(attacker.deviceId().toString()));
+        assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM devices WHERE user_id = ?", Integer.class, attacker.userId()));
+    }
+
+    @Test void devicesEndpointListsEveryActiveDeviceForSenderFanOutAndTheOwnerCanRevokeAnotherOneButNotTheCurrentOne() throws Exception {
+        Device owner = device("fanout_owner");
+        Device second = addDevice(owner, "fanout_owner");
+        Device third = addDevice(owner, "fanout_owner");
+        Device peer = device("fanout_peer");
+
+        List<AccountDirectory.Contact> seenByPeer = json.readValue(
+                request(get("/users/id/" + owner.userId() + "/devices"), peer).andExpect(status().isOk()).andReturn().getResponse().getContentAsString(),
+                json.getTypeFactory().constructCollectionType(List.class, AccountDirectory.Contact.class));
+        assertEquals(List.of(owner.deviceId(), second.deviceId(), third.deviceId()), seenByPeer.stream().map(AccountDirectory.Contact::deviceId).toList());
+        // The single-contact lookups older apps use still answer with the primary (first-registered) device only.
+        request(get("/users/id/" + owner.userId()), peer).andExpect(status().isOk())
+                .andExpect(jsonPath("$.deviceId").value(owner.deviceId().toString()));
+        request(get("/users/fanout_owner"), peer).andExpect(status().isOk())
+                .andExpect(jsonPath("$.deviceId").value(owner.deviceId().toString()));
+        assertEquals(Set.of(
+                Base64.getEncoder().encodeToString(owner.crypto().publicIdentity()),
+                Base64.getEncoder().encodeToString(second.crypto().publicIdentity()),
+                Base64.getEncoder().encodeToString(third.crypto().publicIdentity())),
+                Set.copyOf(seenByPeer.stream().map(AccountDirectory.Contact::identityKey).toList()));
+
+        List<AccountDirectory.Contact> ownList = json.readValue(
+                request(get("/account/devices"), owner).andExpect(status().isOk()).andReturn().getResponse().getContentAsString(),
+                json.getTypeFactory().constructCollectionType(List.class, AccountDirectory.Contact.class));
+        assertEquals(3, ownList.size());
+
+        request(delete("/account/devices/" + owner.deviceId()), owner).andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("cannot_revoke_current_device"));
+        request(body(post("/devices/push"), new RelayController.PushToken("synthetic-push-token-for-revocation", true)), second).andExpect(status().isNoContent());
+        assertTrue(Boolean.TRUE.equals(redis.hasKey("push:" + second.deviceId())));
+        request(delete("/account/devices/" + second.deviceId()), owner).andExpect(status().isNoContent());
+        assertFalse(Boolean.TRUE.equals(redis.hasKey("push:" + second.deviceId())), "Revoking also drops the device's push registration");
+        request(get("/auth/me"), second).andExpect(status().isUnauthorized());
+        request(get("/auth/me"), owner).andExpect(status().isOk());
+        request(get("/auth/me"), third).andExpect(status().isOk());
+        List<AccountDirectory.Contact> afterRevoke = json.readValue(
+                request(get("/users/id/" + owner.userId() + "/devices"), peer).andExpect(status().isOk()).andReturn().getResponse().getContentAsString(),
+                json.getTypeFactory().constructCollectionType(List.class, AccountDirectory.Contact.class));
+        assertEquals(List.of(owner.deviceId(), third.deviceId()), afterRevoke.stream().map(AccountDirectory.Contact::deviceId).toList());
+        request(delete("/account/devices/" + UUID.randomUUID()), owner).andExpect(status().isNotFound());
+        request(delete("/account/devices/" + second.deviceId()), owner).andExpect(status().isNotFound());
+    }
+
+    @Test void devicesEndpointRequiresInteractionJustLikeTheSingleContactLookup() throws Exception {
+        Device blocked = device("fanout_blocked"), blocker = device("fanout_blocker");
+        request(put("/account/blocks/" + blocked.userId()), blocker).andExpect(status().isNoContent());
+        request(get("/users/id/" + blocked.userId() + "/devices"), blocker).andExpect(status().isNotFound());
+        request(get("/users/id/" + UUID.randomUUID() + "/devices"), blocker).andExpect(status().isNotFound());
+    }
+
+    @Test void claimingFromASpecificDeviceEstablishesASessionWithExactlyThatDeviceOfAMultiDeviceAccount() throws Exception {
+        Device owner = device("claim_owner");
+        Device second = addDevice(owner, "claim_owner");
+        Device sender = device("claim_sender");
+        request(body(post("/keys"), Map.of("keys", List.of(second.crypto().generatePreKey(Instant.now())))), second).andExpect(status().isNoContent());
+
+        AccountDirectory.PreKey fromFirst = json.readValue(
+                request(post("/keys/" + owner.userId() + "/" + owner.deviceId() + "/claim"), sender).andExpect(status().isOk()).andReturn().getResponse().getContentAsString(),
+                AccountDirectory.PreKey.class);
+        AccountDirectory.PreKey fromSecond = json.readValue(
+                request(post("/keys/" + owner.userId() + "/" + second.deviceId() + "/claim"), sender).andExpect(status().isOk()).andReturn().getResponse().getContentAsString(),
+                AccountDirectory.PreKey.class);
+        assertArrayEquals(owner.crypto().publicIdentity(), fromFirst.identityKey());
+        assertArrayEquals(second.crypto().publicIdentity(), fromSecond.identityKey());
+        assertFalse(Arrays.equals(fromFirst.identityKey(), fromSecond.identityKey()));
+
+        // The existing single-argument claim (no device named) still resolves to the primary (first-registered) device.
+        request(body(post("/keys"), Map.of("keys", List.of(owner.crypto().generatePreKey(Instant.now())))), owner).andExpect(status().isNoContent());
+        AccountDirectory.PreKey primary = json.readValue(
+                request(post("/keys/" + owner.userId() + "/claim"), sender).andExpect(status().isOk()).andReturn().getResponse().getContentAsString(),
+                AccountDirectory.PreKey.class);
+        assertArrayEquals(owner.crypto().publicIdentity(), primary.identityKey());
+
+        request(post("/keys/" + owner.userId() + "/" + UUID.randomUUID() + "/claim"), sender).andExpect(status().isNotFound());
+        request(post("/keys/" + sender.userId() + "/" + owner.deviceId() + "/claim"), sender).andExpect(status().isNotFound());
+    }
+
+    @Test void uploadedKeysAreValidatedAgainstTheUploadingDevicesOwnIdentityNotAnotherDeviceOfTheSameAccount() throws Exception {
+        Device owner = device("validate_owner");
+        Device second = addDevice(owner, "validate_owner");
+        // The second device's own prekeys, naming its own identity key: accepted (would have failed before the fix,
+        // which validated against whichever device contact(userId) treated as primary).
+        request(body(post("/keys"), Map.of("keys", List.of(second.crypto().generatePreKey(Instant.now())))), second).andExpect(status().isNoContent());
+        assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM prekeys WHERE device_id = ?", Integer.class, second.deviceId()));
+        // A bundle claiming the first device's identity key, uploaded by the second device: still rejected.
+        request(body(post("/keys"), Map.of("keys", List.of(owner.crypto().generatePreKey(Instant.now())))), second).andExpect(status().isBadRequest());
+        // The same two rules for the fallback key.
+        Instant now = Instant.now();
+        long deadline = now.plusSeconds(3600).toEpochMilli();
+        request(body(put("/keys/fallback"), Map.of("key", second.crypto().generateFallbackPreKey(now, Instant.ofEpochMilli(deadline)), "expiresAt", deadline)), second)
+                .andExpect(status().isNoContent());
+        request(body(put("/keys/fallback"), Map.of("key", owner.crypto().generateFallbackPreKey(now, Instant.ofEpochMilli(deadline)), "expiresAt", deadline)), second)
+                .andExpect(status().isBadRequest());
+        assertEquals(1, database.queryForObject("SELECT COUNT(*) FROM fallback_prekeys WHERE device_id = ?", Integer.class, second.deviceId()));
+    }
+
+    @Test void theAdminDirectoryNeverListsAMultiDeviceContactMoreThanOnce() throws Exception {
+        Device admin = device("intro_multidevice_admin");
+        assignAdmin(admin);
+        // The trigger that introduces a new account to the current admin fires once, on account creation; extra
+        // devices of that same account must not turn into extra rows in the admin's contacts list.
+        Device contact = device("intro_multidevice_contact");
+        addDevice(contact, "intro_multidevice_contact");
+        addDevice(contact, "intro_multidevice_contact");
+        request(get("/account/admin-contacts"), admin).andExpect(status().isOk())
+                .andExpect(jsonPath("$.contacts.length()").value(1))
+                .andExpect(jsonPath("$.contacts[0].userId").value(contact.userId().toString()))
+                .andExpect(jsonPath("$.contacts[0].deviceId").value(contact.deviceId().toString()));
+    }
+
     @Test void detachedUploadsAndEveryEphemeralKeyHaveBoundedTtls() throws Exception {
         Device alice = device("alice");
         Device bob = device("bob");

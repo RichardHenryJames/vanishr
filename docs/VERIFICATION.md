@@ -3,6 +3,60 @@
 Evidence refreshed on Windows, 2026-11-05 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
+## Several devices per account (relay only, unreleased, not deployed, 2026-11-05)
+
+The relay can now hold up to five devices for an ordinary account **when an app asks it to**. No app asks yet, no
+released app changes behavior, and this relay has not been deployed (that needs approval, and a relay JAR from before
+V14 cannot start against a V14 database). Design and limits:
+[THREAT-MODEL.md](THREAT-MODEL.md#several-devices-per-account-relay-foundation-unreleased-not-deployed-no-app-uses-it).
+
+- **Changed.** Migration `V14__multi_device_for_user_accounts.sql` (drops `devices_user_id_key`, adds a plain index).
+  `AccountDirectory`: registration with an explicit `addDevice` request, a cap of five, the admin account kept to one
+  device, `replaceExisting` removing every device, prekey and fallback uploads validated against the identity key of the
+  device making the request (they were checked against "the" device of the account), the first-registered device as the
+  one the single-contact lookups and the one-argument prekey claim mean, the administrator's directory listing each
+  contact once, a device list, a prekey claim for one named device, and listing and revoking the caller's own devices.
+  `RelayController`: the four endpoints; revoking also clears the device's push registration and presence record.
+  `GroupDirectory`, presence and remote photos are unchanged: they already refuse any device but the first one.
+- **Tests.** `RelayIntegrationTest` has **10 new tests, all passing** (the class is 95 tests, was 85): an ordinary
+  account adds devices up to the cap and a sixth is refused, while the admin refuses a second even when asked to add; an
+  app that does not ask to add is answered exactly as before, even on an account that has several devices (a new device
+  refused, a known device claimed under another key refused, a device resuming itself accepted, replace-and-add at once
+  refused); replacing an account that has several removes every other one and their tokens stop working; a secondary
+  device cannot create a group; one account cannot revoke another's device; the device list shows each active device
+  oldest first, `/users/id/{id}` and `/users/{handle}` still answer with the first one, the owner can revoke another of
+  their devices (its tokens stop, its push registration is gone, the list shrinks) but not the one in use; the list
+  needs the same interaction rights as the single lookup (a blocked or unknown account is a 404); a prekey claim for a
+  named device returns that device's bundle, the one-argument claim still returns the first device's, and a device that
+  does not belong to the account is a 404; a second device's own prekeys and fallback key are accepted while a bundle
+  naming another device's identity is refused; and a contact with three devices is listed once by the administrator.
+- **Older apps.** `returningDeviceKeepsQueuedMessagesIdentityAndPrekeysAfterSignOut`, which asserts that an ordinary
+  account's second device without `replaceExisting` is refused, **passes unmodified**. (A first version of this change
+  let any sign-in on a new phone add a device; it was caught by reading this test, and adding is now opt-in so an
+  older app signing in on a new phone is still offered the replace question instead of becoming a silent second device
+  that receives nothing.)
+- **Mutation checks** (do the tests fail when the code is broken?). **14 mutations of the relay code in four runs, all
+  caught, each by the test written for it** (a run applied several at once that cannot share a failing test, then the
+  remainder separately): not requiring the add request (also fails the unmodified test above), the admin guard, the
+  cap, the replace-and-add refusal, replace removing only one device, the identity check on prekey uploads and on the
+  fallback key, the directory's one-row-per-contact condition, the ownership check of the named-device claim, the
+  ownership check and the current-device refusal of revocation, the interaction check of the device list, the push
+  clean-up on revocation, and the primary-device guard of group creation. One mutation of an earlier run was masked by
+  an assertion failing first and was caught when run alone. The mutated files were restored and checked byte for byte
+  by SHA-256 each time. Not covered by a mutation: the oldest-first order that picks the first device (a database
+  returns rows in insertion order for a table this small, so a mutation would not be reliably noticed), and the
+  presence clean-up on revocation (done in code, not asserted).
+- **The gate.** `verify.ps1` without `-Android` (the app was not touched) passed: client-core 29 tests; relay **111 tests,
+  0 failures, 2 skipped** (the opt-in live-relay tests; the relay was 101 before); the relay artifact still holds no
+  client-only crypto dependency; the PowerShell suites (21 Google configuration, 25 signed settings, 15 admin
+  identity) and the signed-file checks. The Android build, lint and emulator tests were **not** run for this change.
+- **Not verified, not built.** Any app behavior against this relay with two devices; the migration on the existing
+  production database (it ran on freshly created test databases only); several devices under load; groups, presence
+  and remote photos on a second device (they refuse it); and everything on the app side: a contact still addresses a
+  person as one device, nothing fans a message out to every device, no screen adds or lists devices, and sessions are
+  not kept per device. **Whether a second device shares its account's identity key (one verification per contact, a
+  secure hand-over of a private key needed) or has its own (every contact verifies each new device) is undecided.**
+
 ## Release 0.6.4 / Message actions, and the remote-photo fix
 
 Release 0.6.4 / code 45 ships two changes already described as follow-ups under 0.6.3 below: the fix for remote

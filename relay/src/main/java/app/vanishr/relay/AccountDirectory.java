@@ -28,7 +28,14 @@ public class AccountDirectory {
     public record AccountType(UUID userId, UserType userType) { }
     public record Introduction(UUID userId, UUID deviceId, String identityKey, String handle, String displayName) { }
     public record Introductions(UUID userId, Contact admin, List<Introduction> contacts, UUID nextAfter) { }
-    public record DeviceRequest(@NotNull UUID deviceId, @NotNull @Size(min = 33, max = 33) byte[] identityKey, boolean replaceExisting) { }
+    /** {@code addDevice} is how a newer app asks to join an account that already has a device, rather than replace it; an
+     * older app never sends it, so it keeps getting exactly the answers it always did. */
+    public record DeviceRequest(@NotNull UUID deviceId, @NotNull @Size(min = 33, max = 33) byte[] identityKey,
+                                boolean replaceExisting, boolean addDevice) {
+        public DeviceRequest(UUID deviceId, byte[] identityKey, boolean replaceExisting) { this(deviceId, identityKey, replaceExisting, false); }
+    }
+    /** The device cap for a non-admin account; the admin account is always held to exactly one device regardless of this. */
+    static final int MAX_DEVICES_PER_ACCOUNT = 5;
     public record PreKey(@Min(1) @Max(16380) int registrationId, @PositiveOrZero int preKeyId,
                          @Size(min = 33, max = 33) byte[] preKey, @Positive int signedPreKeyId,
                          @NotNull @Size(min = 33, max = 33) byte[] signedPreKey,
@@ -136,6 +143,7 @@ public class AccountDirectory {
                 FROM admin_introductions link
                 JOIN accounts a ON a.id = CASE WHEN link.admin_id = ? THEN link.user_id ELSE link.admin_id END
                 JOIN devices d ON d.user_id = a.id
+                    AND d.registered_at = (SELECT MIN(dd.registered_at) FROM devices dd WHERE dd.user_id = a.id)
                 WHERE link.admin_id = ? AND (link.admin_id = ? OR link.user_id = ?)
                   AND a.deletion_state = 'ACTIVE'
                   AND NOT EXISTS (SELECT 1 FROM account_blocks b
@@ -256,31 +264,61 @@ public class AccountDirectory {
                 """, Boolean.class, destination.conversationId(), destination.userId(), destination.deviceId()));
     }
 
+    /**
+     * With neither flag set this is exactly what it always was: the first device registers, the same device may register
+     * again with the same key (a resume), and anything else is refused with {@code device_already_registered}, for every
+     * account type. {@code replaceExisting} is a full reset: every existing device of the account is removed first. A
+     * newer app that wants a second phone to join instead sends {@code addDevice}; a non-admin account then keeps its
+     * existing devices and gains one, up to {@link #MAX_DEVICES_PER_ACCOUNT}. The admin account never gains one: it
+     * stays a single pinned device. A device id that already exists under a different identity key is never an add.
+     */
     @Transactional
     public void registerDevice(UUID userId, DeviceRequest request) {
+        if (request.replaceExisting() && request.addDevice()) throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_request");
         database.queryForObject("SELECT id FROM accounts WHERE id = ? FOR UPDATE", UUID.class, userId);
         requireAvailable(userId);
-        Integer count = database.queryForObject("SELECT COUNT(*) FROM devices WHERE user_id = ?", Integer.class, userId);
-        if (count != null && count > 0 && !request.replaceExisting()) {
-            Contact registered = contact(userId);
-            if (registered.deviceId().equals(request.deviceId())
-                    && registered.identityKey().equals(Base64.getEncoder().encodeToString(request.identityKey()))) return;
-            throw new ApiException(HttpStatus.CONFLICT, "device_already_registered");
+        String identityKey = Base64.getEncoder().encodeToString(request.identityKey());
+        if (!request.replaceExisting()) {
+            Optional<String> existingKey = database.query("SELECT identity_key FROM devices WHERE user_id = ? AND id = ?",
+                    (row, index) -> row.getString(1), userId, request.deviceId()).stream().findFirst();
+            if (existingKey.isPresent()) {
+                if (existingKey.get().equals(identityKey)) return;
+                throw new ApiException(HttpStatus.CONFLICT, "device_already_registered");
+            }
+            int count = database.queryForObject("SELECT COUNT(*) FROM devices WHERE user_id = ?", Integer.class, userId);
+            if (count > 0) {
+                if (!request.addDevice() || UserType.ADMIN.equals(userType(userId))) throw new ApiException(HttpStatus.CONFLICT, "device_already_registered");
+                if (count >= MAX_DEVICES_PER_ACCOUNT) throw new ApiException(HttpStatus.CONFLICT, "device_limit_reached");
+            }
+            insertDevice(userId, request.deviceId(), identityKey);
+            return;
         }
         database.update("DELETE FROM devices WHERE user_id = ?", userId);
+        insertDevice(userId, request.deviceId(), identityKey);
+    }
+
+    private void insertDevice(UUID userId, UUID deviceId, String identityKey) {
         try {
-                database.update("INSERT INTO devices(id, user_id, identity_key, auth_version) VALUES (?, ?, ?, ?)",
-                    request.deviceId(), userId, Base64.getEncoder().encodeToString(request.identityKey()), UUID.randomUUID());
+            database.update("INSERT INTO devices(id, user_id, identity_key, auth_version) VALUES (?, ?, ?, ?)",
+                deviceId, userId, identityKey, UUID.randomUUID());
         } catch (DataIntegrityViolationException failure) { throw new ApiException(HttpStatus.CONFLICT, "device_unavailable"); }
+    }
+
+    private UserType userType(UUID userId) {
+        String type = database.queryForObject("SELECT user_type FROM accounts WHERE id = ?", String.class, userId);
+        return UserType.valueOf(type);
     }
 
     public Contact contact(UUID userId) {
         requireAvailable(userId);
-        return findContact("SELECT user_id, id, identity_key FROM devices WHERE user_id = ?", userId);
+        return findContact("SELECT user_id, id, identity_key FROM devices WHERE user_id = ? ORDER BY registered_at ASC LIMIT 1", userId);
     }
 
     public Contact contact(String handle) {
-        return findContact("SELECT devices.user_id, devices.id, devices.identity_key FROM devices JOIN accounts ON accounts.id = devices.user_id WHERE accounts.handle = ? AND accounts.deletion_state = 'ACTIVE'", handle);
+        return findContact("""
+                SELECT devices.user_id, devices.id, devices.identity_key FROM devices JOIN accounts ON accounts.id = devices.user_id
+                WHERE accounts.handle = ? AND accounts.deletion_state = 'ACTIVE' ORDER BY devices.registered_at ASC LIMIT 1
+                """, handle);
     }
 
     private Contact findContact(String query, Object parameter) {
@@ -288,15 +326,34 @@ public class AccountDirectory {
                 .stream().findFirst().orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "not_found"));
     }
 
+    /** Every active device of a non-admin account, oldest first, for a sender to encrypt separately to each one. The admin
+     * account only ever has the one device this already returns for a single-device account. */
+    public List<Contact> devices(UUID userId) {
+        requireAvailable(userId);
+        List<Contact> found = database.query("SELECT user_id, id, identity_key FROM devices WHERE user_id = ? ORDER BY registered_at ASC",
+                (row, index) -> new Contact(row.getObject("user_id", UUID.class), row.getObject("id", UUID.class), row.getString("identity_key")), userId);
+        if (found.isEmpty()) throw new ApiException(HttpStatus.NOT_FOUND, "not_found");
+        return found;
+    }
+
+    /** Removes one of the caller's own devices other than the one making the request; it stops that device authenticating
+     * or receiving anything further, but does not touch message content already on either phone. */
+    @Transactional
+    public void revokeDevice(RelayTypes.Actor actor, UUID deviceId) {
+        if (deviceId.equals(actor.deviceId())) throw new ApiException(HttpStatus.BAD_REQUEST, "cannot_revoke_current_device");
+        if (database.update("DELETE FROM devices WHERE id = ? AND user_id = ?", deviceId, actor.userId()) != 1)
+            throw new ApiException(HttpStatus.NOT_FOUND, "not_found");
+    }
+
     @Transactional
     public void uploadKeys(RelayTypes.Actor actor, KeyUpload upload) {
         database.queryForObject("SELECT id FROM devices WHERE id = ? FOR UPDATE", UUID.class, actor.deviceId());
-        Contact contact = contact(actor.userId());
+        String identityKey = deviceIdentityKey(actor.deviceId());
         int count = keyCount(actor.deviceId());
         if (count + upload.keys().size() > 256) throw new ApiException(HttpStatus.CONFLICT, "prekey_capacity");
         for (PreKey key : upload.keys()) {
             if (key.preKeyId() <= 0 || key.preKey() == null
-                    || !contact.identityKey().equals(Base64.getEncoder().encodeToString(key.identityKey()))
+                    || !identityKey.equals(Base64.getEncoder().encodeToString(key.identityKey()))
                     || key.preKeyId() != key.signedPreKeyId() || key.preKeyId() != key.kyberPreKeyId())
                 throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_public_bundle");
             try {
@@ -304,6 +361,12 @@ public class AccountDirectory {
                         actor.deviceId(), key.preKeyId(), json.writeValueAsString(key), clock.instant().plusSeconds(86400).getEpochSecond());
             } catch (com.fasterxml.jackson.core.JsonProcessingException failure) { throw new IllegalStateException("Public key serialization failed"); }
         }
+    }
+
+    /** The exact device's own identity key, never another device of the same (possibly multi-device) account. */
+    private String deviceIdentityKey(UUID deviceId) {
+        return database.query("SELECT identity_key FROM devices WHERE id = ?", (row, index) -> row.getString(1), deviceId)
+                .stream().findFirst().orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "not_found"));
     }
 
     public int keyCount(UUID deviceId) {
@@ -320,11 +383,11 @@ public class AccountDirectory {
     @Transactional
     public void uploadFallback(RelayTypes.Actor actor, FallbackUpload upload) {
         database.queryForObject("SELECT id FROM devices WHERE id = ? FOR UPDATE", UUID.class, actor.deviceId());
-        Contact contact = contact(actor.userId());
+        String identityKey = deviceIdentityKey(actor.deviceId());
         PreKey key = upload.key();
         long now = clock.millis();
         if (key.preKeyId() != 0 || key.preKey() != null || key.signedPreKeyId() != key.kyberPreKeyId()
-                || !contact.identityKey().equals(Base64.getEncoder().encodeToString(key.identityKey()))
+                || !identityKey.equals(Base64.getEncoder().encodeToString(key.identityKey()))
                 || upload.expiresAt() <= now || upload.expiresAt() > now + 30L * 86400_000)
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_public_bundle");
         try {
@@ -354,7 +417,19 @@ public class AccountDirectory {
 
     @Transactional
     public PreKey claim(UUID recipientId, boolean fallback) {
-        UUID device = contact(recipientId).deviceId();
+        return claimFrom(contact(recipientId).deviceId(), fallback);
+    }
+
+    /** Claims from one specific device of a (possibly multi-device) account, for a sender establishing or refreshing a
+     * session with that exact device rather than whichever one {@link #contact(UUID)} treats as primary. */
+    @Transactional
+    public PreKey claim(UUID recipientId, UUID deviceId, boolean fallback) {
+        if (!Boolean.TRUE.equals(database.queryForObject("SELECT EXISTS(SELECT 1 FROM devices WHERE id = ? AND user_id = ?)",
+                Boolean.class, deviceId, recipientId))) throw new ApiException(HttpStatus.NOT_FOUND, "not_found");
+        return claimFrom(deviceId, fallback);
+    }
+
+    private PreKey claimFrom(UUID device, boolean fallback) {
         List<String> bundles = database.query("DELETE FROM prekeys WHERE (device_id, id) IN (SELECT device_id, id FROM prekeys WHERE device_id = ? AND expires_at > now() ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING public_bundle::text",
                 (row, index) -> row.getString(1), device);
         if (bundles.isEmpty() && fallback)

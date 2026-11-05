@@ -163,6 +163,15 @@ opaque blob (at most 512 KiB per account, 90-day retention), so no new Azure
 resource, VM size change or paid add-on is involved; the table adds at most
 512 KiB per opted-in account to the existing PostgreSQL volume.
 
+Relay schema V14 (up to five devices for an ordinary account, only when an app
+sends `addDevice`) is in the source but **has not been deployed, and no app uses
+it**. It only drops a unique constraint, so no row is rewritten and released apps
+behave exactly as before, but the next `publish-azure.ps1 -Action Publish` of
+this source applies it, and once applied a relay JAR from before V14 fails Flyway
+validation, as with V13 (keep a V14-capable JAR for any redeploy; no rollback is
+tested). Publish it only on purpose. See
+[the verification record](VERIFICATION.md#several-devices-per-account-relay-only-unreleased-not-deployed-2026-11-05).
+
 ### 4.3 Generate notices, then build the final signed direct APK
 
 ```powershell
