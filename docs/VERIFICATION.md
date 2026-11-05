@@ -3,6 +3,56 @@
 Evidence refreshed on Windows, 2026-11-05 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
+## Release 0.6.4 / Message actions, and the remote-photo fix
+
+Release 0.6.4 / code 45 ships two changes already described as follow-ups under 0.6.3 below: the fix for remote
+photos never matching the admin's new certified identity, and message reply/quote, reactions, a fixed six-emoji
+palette, edit and delete-for-everyone (1:1 conversations only). See those two entries for the design and the JVM/
+emulator test evidence; this entry covers the release-specific steps only (no relay change, build, stage, Vercel,
+public verification).
+
+- **Relay.** Unchanged since 0.6.3 (`git diff 25bb9ec HEAD -- relay/` is empty), so no relay deployment and no
+  Azure write ran.
+- **Build and stage.** `package-apk.ps1` built the signed APK from commit `50da989` plus the version bump:
+  **44,535,424 bytes**, SHA-256 `6c7cac79f8ae96358be3acd50d659dce18a37af3ddb757d2ecefef360bc76b1a`, version
+  0.6.4 / code 45, min API 28, target API 36, the same 15 permissions and the same certificate as every release
+  since 0.6.0 (SHA-256 `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`; `apksigner` reports the
+  v2 scheme only, as before). `.tools\vercel-download-0.6.4` holds 33 files / 60,071,876 bytes (limit 99,000,000),
+  recorded in `.tools\distribution-audit-0.6.4.json`. Name-pattern scans (`.secrets`, `.env`, keystore/`.jks`/`.p12`,
+  token, credential, `google-services.json`, service-account) of the stage and the source ZIP found nothing besides
+  expected third-party library names that happen to contain "credentials" (e.g. `androidx.credentials`); the Vercel
+  CLI's own transient `.env.local`, written while linking the stage, was found and deleted before upload. This is a
+  filename/pattern inspection, not the exhaustive by-value secret scan 0.6.3 recorded; nothing this release touches
+  changes what that scan covers.
+- **Vercel.** Deployment `dpl_GkpDiitSaUHXV52p3iMbgRSDuVax` (production, READY) was uploaded from that stage with
+  the existing Vanishr project link (project and team IDs checked; the live feed served 0.6.3 / code 44, so code 45
+  is no downgrade). The canonical alias `vanishr-download.vercel.app`, which still served 0.6.3, was moved to it
+  explicitly.
+- **Public verification** (`.tools\public-release-verification-0.6.4.json`). The canonical feed reports 0.6.4 / 45
+  with `no-store`; the downloaded public APK is byte-identical to the staged one and verifies with the original
+  certificate; `/`, `/android/`, `/security/`, `/privacy/`, `/terms/` and `/delete-account/` all return 200;
+  `/.secrets/`, `/.git/config`, `/.vercel/project.json` and a nonexistent page all resolve to 404 (two of them only
+  after the site's own trailing-slash redirect, which is expected). The signed settings file and the admin identity
+  certificate are both live and byte-identical to committed (`sign-ota-settings.ps1` and `sign-admin-identity.ps1`,
+  both `-Check -Live -RequireIdentical`, passing; the settings file still needs renewal before 2026-12-01).
+- **In-place upgrade.** On the dedicated test emulator: the published 0.6.3 release APK was installed, then the
+  published 0.6.4 release APK installed over it (`adb install -r`, no uninstall first) — accepted as a compatible
+  update on the same signing certificate, version code 44 → 45, and the app launched afterward with an empty crash
+  buffer. This is narrower than the historical OTA walkthrough (0.5.6 through 0.6.3): it confirms the install itself
+  is compatible, not the in-app "Check for updates" banner or the Chrome download step.
+- **Google Play bundle** (`.tools\play-store-0.6.4\vanishr-0.6.4.aab`, not uploaded anywhere and not part of the
+  Vercel stage). **45,842,411 bytes**, SHA-256 `389de83ad7e1b55d2d449d2a92795e8e9eb183f924b5ff9b70aae81b33fa85bd`.
+  The official bundletool 1.18.3 `validate` passed; `dump manifest` shows package `app.vanishr.android`, version
+  0.6.4 / code 45, min API 28, target API 36, and the same 15 permissions as the APK (no new permission: voice
+  messages, which would have needed `RECORD_AUDIO`, was not built this round). Signed with the same upload key as
+  every bundle since 0.6.1. Not independently re-checked this round, because nothing this release touches affects
+  them and both were clean for 0.6.3: native-library page alignment, and an exhaustive by-value secret scan of the
+  decompressed bundle.
+- **What this does not show.** A physical phone, an install from Google Play, or whether Google Play accepts the
+  0.6.4 bundle; the remote-photo/reaction/edit/delete features, or the admin certificate path, against the
+  production relay with two real phones (the emulator tests use a synthetic transport); the in-app update-prompt
+  and Chrome-download walkthrough specifically (see "In-place upgrade" above for the narrower check done instead).
+
 ## Release 0.6.3 / The official admin changes phone
 
 Release 0.6.3 / code 44 fixes the red warning "Official admin identity changed, a revised app update is required",
