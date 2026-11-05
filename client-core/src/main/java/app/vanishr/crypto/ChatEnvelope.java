@@ -3,11 +3,18 @@ package app.vanishr.crypto;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
 public record ChatEnvelope(int version, UUID id, UUID senderId, UUID senderDeviceId,
                            UUID recipientId, UUID recipientDeviceId, long sentAt, long expiresAt,
-                           Expiry expiry, String text, Attachment image) {
+                           Expiry expiry, String text, Attachment image, String kind, Reference reference, Action action) {
+    /** Every field before {@code kind} keeps its exact 0.6.x meaning; an envelope with no kind is an ordinary message. */
+    public ChatEnvelope(int version, UUID id, UUID senderId, UUID senderDeviceId, UUID recipientId, UUID recipientDeviceId,
+                        long sentAt, long expiresAt, Expiry expiry, String text, Attachment image) {
+        this(version, id, senderId, senderDeviceId, recipientId, recipientDeviceId, sentAt, expiresAt, expiry, text, image, null, null, null);
+    }
+
     public enum Expiry {
         VIEW_ONCE(24), HOUR_1(1), HOURS_6(6), HOURS_24(24);
         public final long milliseconds;
@@ -15,6 +22,19 @@ public record ChatEnvelope(int version, UUID id, UUID senderId, UUID senderDevic
     }
 
     public record Attachment(UUID id, byte[] key, byte[] nonce, String mimeType) { }
+
+    /** What an ordinary message optionally quotes: a short, self-contained copy, not a live link, because the quoted message can
+     * expire or be deleted before the reply is read. */
+    public record Reference(UUID messageId, String snippet) { }
+
+    /** The payload of a control message ({@link #kind} non-null): which earlier message it is about, and, depending on the kind,
+     * one reaction emoji (REACTION) or replacement text (EDIT). DELETE carries neither. */
+    public record Action(UUID targetId, String emoji, String text) { }
+
+    public static final String REACTION = "REACTION", EDIT = "EDIT", DELETE = "DELETE";
+    private static final Set<String> KINDS = Set.of(REACTION, EDIT, DELETE);
+    /** A fixed, small palette: exact string equality only, never arbitrary text, so a reaction can never carry hidden content. */
+    public static final Set<String> REACTIONS = Set.of("\uD83D\uDC4D", "\u2764\uFE0F", "\uD83D\uDE02", "\uD83D\uDE2E", "\uD83D\uDE22", "\uD83D\uDE4F");
 
     public void verify(UUID expectedId, UUID sender, UUID senderDevice, UUID recipient, UUID recipientDevice,
                        Expiry expectedExpiry, long expectedDeadline, UUID mediaId, Instant now) {
@@ -26,13 +46,29 @@ public record ChatEnvelope(int version, UUID id, UUID senderId, UUID senderDevic
                 || expiresAt > now.toEpochMilli() + expiry.milliseconds
                 || expiresAt <= sentAt || expiresAt - sentAt > expiry.milliseconds)
             throw new SecurityException("Message context or deadline is invalid");
-        if (image == null) {
-            if (mediaId != null || text == null || text.trim().isEmpty() || text.getBytes(StandardCharsets.UTF_8).length > 16_384)
-                throw new SecurityException("Invalid encrypted text message");
-        } else if (text != null || !Objects.equals(image.id(), mediaId) || image.id() == null
-                || image.key() == null || image.key().length != 32 || image.nonce() == null || image.nonce().length != 12
-                || !("image/jpeg".equals(image.mimeType()) || "image/png".equals(image.mimeType()))) {
-            throw new SecurityException("Invalid encrypted image descriptor");
+        if (kind == null) {
+            if (action != null) throw new SecurityException("An ordinary message cannot carry a control action");
+            if (reference != null && (reference.messageId() == null || reference.snippet() == null || reference.snippet().isBlank()
+                    || reference.snippet().getBytes(StandardCharsets.UTF_8).length > 160))
+                throw new SecurityException("Invalid message reference");
+            if (image == null) {
+                if (mediaId != null || text == null || text.trim().isEmpty() || text.getBytes(StandardCharsets.UTF_8).length > 16_384)
+                    throw new SecurityException("Invalid encrypted text message");
+            } else if (text != null || !Objects.equals(image.id(), mediaId) || image.id() == null
+                    || image.key() == null || image.key().length != 32 || image.nonce() == null || image.nonce().length != 12
+                    || !("image/jpeg".equals(image.mimeType()) || "image/png".equals(image.mimeType()))) {
+                throw new SecurityException("Invalid encrypted image descriptor");
+            }
+            return;
+        }
+        if (text != null || image != null || reference != null || mediaId != null || !KINDS.contains(kind) || action == null || action.targetId() == null)
+            throw new SecurityException("Invalid control message");
+        switch (kind) {
+            case REACTION -> { if (action.text() != null || action.emoji() != null && !REACTIONS.contains(action.emoji()))
+                throw new SecurityException("Invalid reaction"); }
+            case EDIT -> { if (action.emoji() != null || action.text() == null || action.text().isBlank()
+                    || action.text().getBytes(StandardCharsets.UTF_8).length > 16_384) throw new SecurityException("Invalid edit"); }
+            case DELETE -> { if (action.emoji() != null || action.text() != null) throw new SecurityException("Invalid delete"); }
         }
     }
 }

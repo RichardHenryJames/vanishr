@@ -375,15 +375,18 @@ no Azure resources or paid add-ons were changed for this website.
 - Official Signal libsignal sessions with mandatory independent peer verification.
 - Text and encrypted image messages; per-image keys remain inside Signal envelopes.
 - View once, one hour, six hours or 24 hours; delivery/read status and hard Redis TTLs.
+- Reply-with-quote, a fixed six-emoji reaction and delete-for-everyone (no placeholder left behind) for a
+  1:1 message, and edit for a sent 1:1 text message; none of these apply to group messages.
 - Foreground HTTPS polling / WSS, bounded offline ciphertext queues, optional generic FCM.
 - Phone-unlocked Android Keystore vault without a separate app lock, per-message content keys, screenshot flags,
   no-backup storage and background expiry cleanup.
 - Automatic update prompts and a manual update check; Android-approved signed APK installation.
 - Real Redis/PostgreSQL integration tests and Android security instrumentation.
 
-No calls, reactions, stories, public channels, history search, browser client or permanent
-message/media history. Images are bounded to 2 MiB and stored transiently in Redis,
-not persistent object storage. Java 21 is required by the pinned libsignal release.
+No calls, voice messages, multiple active devices per account, stories, public channels, history
+search, browser client or permanent message/media history. Images are bounded to 2 MiB and stored
+transiently in Redis, not persistent object storage. Java 21 is required by the pinned libsignal
+release.
 
 ## Local Setup
 

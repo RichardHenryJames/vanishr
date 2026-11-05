@@ -199,7 +199,7 @@ public class ScreenFlowTest {
             if (path.equals("/keys")) return syntheticResponse(request, 200, new ChatEngine.KeyCount(16));
             if (Set.of("/groups", "/profile/packets", "/remote-photos", "/presence").contains(path)) return syntheticResponse(request, 200, List.of());
             if (path.equals("/events")) return syntheticResponse(request, 503, Map.of("error", "fixture_offline"));
-            throw new AssertionError("Unexpected admin-onboarding fixture request");
+            throw new AssertionError("Unexpected admin-onboarding fixture request: " + request.method() + " " + path);
         }));
     }
 
@@ -5483,12 +5483,12 @@ public class ScreenFlowTest {
                 Map<UUID, String> text = new java.util.HashMap<>();
                 for (ChatEngine.Entry entry : all)
                     text.put(entry.id(), "Synthetic message with several words so that the chat is long enough to wrap onto a second line here");
-                Class<?>[] types = {ChatEngine.Peer.class, List.class, Map.class, Map.class};
-                invoke(activity, "applyMessages", types, peer, new ArrayList<>(all.subList(all.size() - 16, all.size())), text, new java.util.HashMap<UUID, String>());
+                Class<?>[] types = {ChatEngine.Peer.class, List.class, Map.class, Map.class, Map.class};
+                invoke(activity, "applyMessages", types, peer, new ArrayList<>(all.subList(all.size() - 16, all.size())), text, new java.util.HashMap<UUID, String>(), Map.of());
                 decor.measure(widthSpec, heightSpec); decor.layout(0, 0, decor.getWidth(), decor.getHeight());
                 assertTrue("The first stage must be taller than the screen for this to be the case being tested",
                         list.getHeight() > messageScroll(activity).getHeight() + dpPx(100));
-                invoke(activity, "applyMessages", types, peer, new ArrayList<>(all.subList(all.size() - 32, all.size())), text, new java.util.HashMap<UUID, String>());
+                invoke(activity, "applyMessages", types, peer, new ArrayList<>(all.subList(all.size() - 32, all.size())), text, new java.util.HashMap<UUID, String>(), Map.of());
             });
             InstrumentationRegistry.getInstrumentation().waitForIdleSync();
             scenario.onActivity(activity -> assertEquals(32, ((Map<?, ?>) readField(activity, "messageRows")).size()));
@@ -6569,9 +6569,9 @@ public class ScreenFlowTest {
 
     private Object pendingSend(ChatEngine.Peer to, String text, byte[] image) throws Exception {
         Class<?> type = Class.forName("app.vanishr.android.MainActivity$PendingSend");
-        var constructor = type.getDeclaredConstructor(ChatEngine.Peer.class, String.class, byte[].class, ChatEnvelope.Expiry.class);
+        var constructor = type.getDeclaredConstructor(ChatEngine.Peer.class, String.class, byte[].class, ChatEnvelope.Expiry.class, ChatEnvelope.Reference.class);
         constructor.setAccessible(true);
-        return constructor.newInstance(to, text, image, ChatEnvelope.Expiry.HOUR_1);
+        return constructor.newInstance(to, text, image, ChatEnvelope.Expiry.HOUR_1, null);
     }
 
     @Test public void aRetryOfAnUnsentImageIsRefusedOnceImagesAreSwitchedOff() throws Exception {
@@ -7756,6 +7756,208 @@ public class ScreenFlowTest {
     }
 
     // ==== end 0.6.3 ====
+
+    // ==== message replies, reactions, edits and delete-for-everyone ====
+
+    /** A plain, non-admin synthetic relay for {@code peer}: messages, keys and an empty admin directory (so sync still completes),
+     * and the plain identity lookup that both sending and the automatic profile-photo exchange make for a verified contact. */
+    private void plainTransport(List<ChatEngine.Incoming> incoming, List<ChatEngine.Send> outgoing) {
+        engine.groupApi().close();
+        setField(engine, "api", syntheticApi(chain -> {
+            var request = chain.request(); String path = request.url().encodedPath();
+            if (path.equals("/account/admin-contacts")) return syntheticResponse(request, 200, new AdminOnboarding.Page(userId, null, List.of(), null));
+            if (path.equals("/users/id/" + peerId)) return syntheticResponse(request, 200, RemotePhotoSession.contact(peer));
+            if (path.equals("/account/profile")) return syntheticResponse(request, 200, new ChatEngine.Profile(userId, "alex", null));
+            if (path.equals("/account/type")) return syntheticResponse(request, 200, new RemotePhotoSession.AccountType(userId, "USER"));
+            if (path.equals("/messages/pending")) {
+                List<ChatEngine.Incoming> batch = new ArrayList<>(incoming); incoming.clear();
+                return syntheticResponse(request, 200, batch);
+            }
+            if (path.equals("/messages") && request.method().equals("POST")) {
+                okio.Buffer body = new okio.Buffer(); request.body().writeTo(body);
+                ChatEngine.Send sent = RelayApi.JSON.fromJson(body.readUtf8(), ChatEngine.Send.class); outgoing.add(sent);
+                return syntheticResponse(request, 200, new ChatEngine.Status(sent.id(), "QUEUED", sent.expiresAt()));
+            }
+            if (path.startsWith("/messages/status")) return syntheticResponse(request, 200,
+                outgoing.stream().map(sent -> new ChatEngine.Status(sent.id(), "QUEUED", sent.expiresAt())).toList());
+            if (path.matches("/messages/[0-9a-f-]+") && request.method().equals("DELETE")) return syntheticResponse(request, 200, null);
+            if (path.matches("/messages/[0-9a-f-]+/(delivered|read)")) return syntheticResponse(request, 200, null);
+            if (path.equals("/keys")) return syntheticResponse(request, 200, new ChatEngine.KeyCount(16));
+            if (Set.of("/groups", "/profile/packets", "/remote-photos", "/presence").contains(path)) return syntheticResponse(request, 200, List.of());
+            if (path.equals("/events")) return syntheticResponse(request, 503, Map.of("error", "fixture_offline"));
+            throw new AssertionError("Unexpected plain-transport fixture request: " + request.method() + " " + path);
+        }));
+        // Not under test here, and the fixture does not serve a profile for an ordinary (non-admin-directory) contact.
+        setField(engine, "nextProfileCheck", System.currentTimeMillis() + 300_000);
+    }
+
+    /** {@code peer}/{@code peerId}/{@code peerDevice} become a saved, verified, session-ready contact of {@code remote}, with no network call. */
+    private void establishedConversation(SignalClient remote) throws Exception {
+        peer = new ChatEngine.Peer(peerId, peerDevice, Base64.getEncoder().encodeToString(remote.publicIdentity()), "Test peer");
+        vault.transaction(() -> { engine.groupSignal().verifyPeer(peerId, remote.publicIdentity()); write("contact/" + peerId, peer); return null; });
+        remote.verifyPeer(userId, engine.groupSignal().publicIdentity());
+        // Both directions are independently established (as two real phones would be after their first messages), so either side
+        // can encrypt first in these tests without needing the other to have sent something yet.
+        engine.groupSignal().establish(peerId, remote.generatePreKey(Instant.now()), Instant.now());
+        remote.establish(userId, engine.groupSignal().generatePreKey(Instant.now()), Instant.now());
+    }
+
+    private ChatEnvelope decryptControl(SignalClient remote, ChatEngine.Send sent) throws Exception {
+        byte[] plaintext = remote.decrypt(userId, new SignalClient.Packet(sent.type(), sent.ciphertext()));
+        try { return RelayApi.JSON.fromJson(new String(plaintext, StandardCharsets.UTF_8), ChatEnvelope.class); }
+        finally { Arrays.fill(plaintext, (byte) 0); }
+    }
+
+    private void deliverControl(SignalClient remote, List<ChatEngine.Incoming> incoming, String kind, ChatEnvelope.Action action) throws Exception {
+        UUID id = UUID.randomUUID(); long now = System.currentTimeMillis(), deadline = now + 3_600_000;
+        ChatEnvelope envelope = new ChatEnvelope(1, id, peerId, peerDevice, userId, deviceId, now, deadline,
+            ChatEnvelope.Expiry.HOUR_1, null, null, kind, null, action);
+        SignalClient.Packet packet = remote.encrypt(userId, RelayApi.JSON.toJson(envelope).getBytes(StandardCharsets.UTF_8), Instant.now());
+        incoming.add(new ChatEngine.Incoming(id, peerId, peerDevice, userId, deviceId, ChatEnvelope.Expiry.HOUR_1, now, deadline, packet.type(), packet.ciphertext(), null));
+    }
+
+    @Test public void aReactionIsSentAppliedLocallyAtOnceAndCanBeRemoved() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        ChatEngine.Entry message = entry(true, "Hello there", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -60_000);
+        List<ChatEngine.Incoming> incoming = new ArrayList<>(); List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(incoming, outgoing);
+        String emoji = ChatEnvelope.REACTIONS.iterator().next();
+        engine.react(message, emoji);
+        assertEquals("Exactly one control message is sent", 1, outgoing.size());
+        assertEquals(emoji, engine.entry(message.id()).reactionMine());
+        ChatEnvelope sent = decryptControl(remote, outgoing.get(0));
+        assertEquals(ChatEnvelope.REACTION, sent.kind());
+        assertEquals(message.id(), sent.action().targetId());
+        assertEquals(emoji, sent.action().emoji());
+        assertFalse("The control itself is never a visible message", engine.entries(peerId).stream().anyMatch(e -> e.id().equals(outgoing.get(0).id())));
+        engine.react(message, null);
+        assertNull(engine.entry(message.id()).reactionMine());
+        assertEquals(2, outgoing.size());
+    }
+
+    @Test public void aReplySendsTheQuotedMessagesIdAndSnippetWithoutMarkingTheQuotedMessageItself() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        List<ChatEngine.Incoming> incoming = new ArrayList<>(); List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(incoming, outgoing);
+        UUID originalId = UUID.randomUUID();
+        engine.send(peer, "Original message", null, ChatEnvelope.Expiry.HOUR_1, null, originalId, System.currentTimeMillis(), () -> { });
+        UUID replyId = UUID.randomUUID();
+        ChatEnvelope.Reference reference = new ChatEnvelope.Reference(originalId, "Original mess\u2026");
+        engine.send(peer, "Here is my reply", null, ChatEnvelope.Expiry.HOUR_1, reference, replyId, System.currentTimeMillis(), () -> { });
+        assertEquals(reference, engine.content(engine.entry(replyId), false, false).envelope().reference());
+        assertNull("The quoted message itself carries no reference", engine.content(engine.entry(originalId), false, false).envelope().reference());
+        assertEquals("Both messages were sent over the wire", 2, outgoing.size());
+        ChatEnvelope wire = decryptControl(remote, outgoing.get(1));
+        assertEquals(reference, wire.reference());
+        assertNull("A reply is an ordinary message, not a control kind", wire.kind());
+    }
+
+    @Test public void onlyTheSenderCanEditOrDeleteTheirOwnSentMessageForEveryone() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        ChatEngine.Entry theirs = entry(false, "From the other side", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -60_000);
+        assertThrows(SecurityException.class, () -> engine.editMessage(theirs, "not allowed"));
+        assertThrows(SecurityException.class, () -> engine.deleteForEveryone(theirs));
+        assertNotNull("Neither call changed anything", engine.entry(theirs.id()));
+    }
+
+    @Test public void anEditReplacesTheTextSentToThePeerAndMarksTheMessageEdited() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        ChatEngine.Entry message = entry(true, "Original text", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -60_000);
+        List<ChatEngine.Incoming> incoming = new ArrayList<>(); List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(incoming, outgoing);
+        engine.editMessage(message, "Updated text");
+        assertEquals("Updated text", engine.content(engine.entry(message.id()), false, false).envelope().text());
+        assertTrue(engine.entry(message.id()).edited());
+        assertEquals(message.expiresAt(), engine.entry(message.id()).expiresAt());
+        ChatEnvelope sent = decryptControl(remote, outgoing.get(0));
+        assertEquals(ChatEnvelope.EDIT, sent.kind());
+        assertEquals("Updated text", sent.action().text());
+        assertThrows("Blank text is refused before anything is sent", IllegalArgumentException.class, () -> engine.editMessage(message, "   "));
+    }
+
+    @Test public void aDeleteForEveryoneRemovesTheMessageLocallyAndTellsThePeer() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        ChatEngine.Entry message = entry(true, "To be withdrawn", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -60_000);
+        List<ChatEngine.Incoming> incoming = new ArrayList<>(); List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(incoming, outgoing);
+        engine.deleteForEveryone(message);
+        assertNull(engine.entry(message.id()));
+        ChatEnvelope sent = decryptControl(remote, outgoing.get(0));
+        assertEquals(ChatEnvelope.DELETE, sent.kind());
+        assertEquals(message.id(), sent.action().targetId());
+    }
+
+    @Test public void anIncomingReactionEditOrDeleteOnlyAppliesToAnEntryFromThatSameSender() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        ChatEngine.Entry fromPeer = entry(false, "Sent by the peer", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -60_000);
+        List<ChatEngine.Incoming> incoming = new ArrayList<>(); List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(incoming, outgoing);
+        deliverControl(remote, incoming, ChatEnvelope.REACTION, new ChatEnvelope.Action(fromPeer.id(), ChatEnvelope.REACTIONS.iterator().next(), null));
+        UUID unrelated = UUID.randomUUID();
+        deliverControl(remote, incoming, ChatEnvelope.REACTION, new ChatEnvelope.Action(unrelated, ChatEnvelope.REACTIONS.iterator().next(), null));
+        engine.sync();
+        assertEquals("The entry really sent by this peer is reacted to", ChatEnvelope.REACTIONS.iterator().next(), engine.entry(fromPeer.id()).reactionTheirs());
+        assertNull("A reaction naming an id that is not an entry from this peer changes nothing", engine.entry(unrelated));
+    }
+
+    @Test public void anIncomingEditOrDeleteNeverAppliesToAMessageThisPhoneSentToThatPeer() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        ChatEngine.Entry mine = entry(true, "Sent by me", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -60_000);
+        List<ChatEngine.Incoming> incoming = new ArrayList<>(); List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(incoming, outgoing);
+        deliverControl(remote, incoming, ChatEnvelope.EDIT, new ChatEnvelope.Action(mine.id(), null, "forged edit"));
+        engine.sync();
+        assertEquals("Sent by me", engine.content(engine.entry(mine.id()), false, false).envelope().text());
+        assertFalse(engine.entry(mine.id()).edited());
+        deliverControl(remote, incoming, ChatEnvelope.DELETE, new ChatEnvelope.Action(mine.id(), null, null));
+        engine.sync();
+        assertNotNull("A delete claimed by the peer for a message I sent is ignored", engine.entry(mine.id()));
+        // A reaction on my own sent message is still allowed, from either side.
+        deliverControl(remote, incoming, ChatEnvelope.REACTION, new ChatEnvelope.Action(mine.id(), ChatEnvelope.REACTIONS.iterator().next(), null));
+        engine.sync();
+        assertEquals(ChatEnvelope.REACTIONS.iterator().next(), engine.entry(mine.id()).reactionTheirs());
+    }
+
+    @Test public void anIncomingEditUpdatesWhatIsStoredAndDisplayedForAMessageThePeerSentToMe() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        ChatEngine.Entry theirs = entry(false, "Original from the peer", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -60_000);
+        List<ChatEngine.Incoming> incoming = new ArrayList<>(); List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(incoming, outgoing);
+        deliverControl(remote, incoming, ChatEnvelope.EDIT, new ChatEnvelope.Action(theirs.id(), null, "Updated by the peer"));
+        engine.sync();
+        assertEquals("Updated by the peer", engine.content(engine.entry(theirs.id()), false, false).envelope().text());
+        assertTrue(engine.entry(theirs.id()).edited());
+        deliverControl(remote, incoming, ChatEnvelope.DELETE, new ChatEnvelope.Action(theirs.id(), null, null));
+        engine.sync();
+        assertNull("A delete from the peer for their own message removes it here too", engine.entry(theirs.id()));
+    }
+
+    @Test public void anIncomingReplyCarriesItsQuotedMessageIdAndSnippetToTheRecipient() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        List<ChatEngine.Incoming> incoming = new ArrayList<>(); List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(incoming, outgoing);
+        ChatEnvelope.Reference reference = new ChatEnvelope.Reference(UUID.randomUUID(), "What they are replying to");
+        UUID id = UUID.randomUUID(); long now = System.currentTimeMillis(), deadline = now + 3_600_000;
+        ChatEnvelope envelope = new ChatEnvelope(1, id, peerId, peerDevice, userId, deviceId, now, deadline,
+            ChatEnvelope.Expiry.HOUR_1, "Replying to your earlier message", null, null, reference, null);
+        SignalClient.Packet packet = remote.encrypt(userId, RelayApi.JSON.toJson(envelope).getBytes(StandardCharsets.UTF_8), Instant.now());
+        incoming.add(new ChatEngine.Incoming(id, peerId, peerDevice, userId, deviceId, ChatEnvelope.Expiry.HOUR_1, now, deadline, packet.type(), packet.ciphertext(), null));
+        engine.sync();
+        ChatEngine.Entry stored = engine.entry(id);
+        assertNotNull("The message was received", stored);
+        assertEquals(reference, engine.content(stored, false, false).envelope().reference());
+    }
+
+    // ==== end message replies, reactions, edits and delete-for-everyone ====
 
     private int dpPx(int value) { return Math.round(value * context.getResources().getDisplayMetrics().density); }
 

@@ -53,14 +53,24 @@ final class ChatEngine implements AutoCloseable {
     record Outbox(Send message, byte[] media) { }
     record Status(UUID id, String state, long expiresAt) { }
     record Entry(UUID id, UUID peerId, long expiresAt, ChatEnvelope.Expiry expiry, boolean outgoing, boolean image, String state, UUID keyOwner,
-                 UUID groupEpoch, long groupRevision, UUID senderId) {
+                 UUID groupEpoch, long groupRevision, UUID senderId, boolean edited, String reactionMine, String reactionTheirs) {
+        Entry(UUID id, UUID peerId, long expiresAt, ChatEnvelope.Expiry expiry, boolean outgoing, boolean image, String state, UUID keyOwner,
+              UUID groupEpoch, long groupRevision, UUID senderId) {
+            this(id,peerId,expiresAt,expiry,outgoing,image,state,keyOwner,groupEpoch,groupRevision,senderId,false,null,null);
+        }
         Entry(UUID id, UUID peerId, long expiresAt, ChatEnvelope.Expiry expiry, boolean outgoing, boolean image, String state, UUID keyOwner) {
             this(id,peerId,expiresAt,expiry,outgoing,image,state,keyOwner,null,0,null);
         }
         Entry(UUID id, UUID peerId, long expiresAt, ChatEnvelope.Expiry expiry, boolean outgoing, boolean image, String state) {
             this(id, peerId, expiresAt, expiry, outgoing, image, state, null);
         }
-        Entry withState(String state) { return new Entry(id, peerId, expiresAt, expiry, outgoing, image, state, keyOwner,groupEpoch,groupRevision,senderId); }
+        Entry withState(String state) { return new Entry(id, peerId, expiresAt, expiry, outgoing, image, state, keyOwner,groupEpoch,groupRevision,senderId,edited,reactionMine,reactionTheirs); }
+        Entry withEdited() { return new Entry(id, peerId, expiresAt, expiry, outgoing, image, state, keyOwner,groupEpoch,groupRevision,senderId,true,reactionMine,reactionTheirs); }
+        /** {@code mine} is this phone's own reaction; otherwise the conversation's other party's. A null emoji removes it. */
+        Entry withReaction(boolean mine, String emoji) {
+            return new Entry(id, peerId, expiresAt, expiry, outgoing, image, state, keyOwner,groupEpoch,groupRevision,senderId,edited,
+                    mine ? emoji : reactionMine, mine ? reactionTheirs : emoji);
+        }
     }
     record Content(ChatEnvelope envelope, byte[] image) { }
     record Ack(UUID id, long expiresAt, String action) { }
@@ -578,10 +588,14 @@ final class ChatEngine implements AutoCloseable {
     }
 
     void send(Peer peer, String text, byte[] image, ChatEnvelope.Expiry expiry) throws Exception {
-        send(peer, text, image, expiry, UUID.randomUUID(), System.currentTimeMillis(), () -> { });
+        send(peer, text, image, expiry, null, UUID.randomUUID(), System.currentTimeMillis(), () -> { });
     }
 
     void send(Peer peer, String text, byte[] image, ChatEnvelope.Expiry expiry, UUID id, long createdAt, Runnable stored) throws Exception {
+        send(peer, text, image, expiry, null, id, createdAt, stored);
+    }
+
+    void send(Peer peer, String text, byte[] image, ChatEnvelope.Expiry expiry, ChatEnvelope.Reference reference, UUID id, long createdAt, Runnable stored) throws Exception {
         safety.requireAllowed(peer.userId());
         safety.refresh();
         safety.requireAllowed(peer.userId());
@@ -608,7 +622,7 @@ final class ChatEngine implements AutoCloseable {
         ImageCipher.EncryptedImage encryptedImage = image == null ? null : ImageCipher.encrypt(mediaId, image);
         ChatEnvelope.Attachment attachment = encryptedImage == null ? null : new ChatEnvelope.Attachment(mediaId, encryptedImage.key(), encryptedImage.nonce(), "image/jpeg");
         ChatEnvelope envelope = new ChatEnvelope(1, id, account.userId(), account.deviceId(), peer.userId(), peer.deviceId(),
-            createdAt, expiresAt, expiry, image == null ? text : null, attachment);
+            createdAt, expiresAt, expiry, image == null ? text : null, attachment, null, reference, null);
         envelope.verify(id, account.userId(), account.deviceId(), peer.userId(), peer.deviceId(), expiry, expiresAt, mediaId, now);
         Entry entry = new Entry(id, peer.userId(), expiresAt, expiry, true, image != null, "PENDING", account.userId());
         try {
@@ -631,6 +645,90 @@ final class ChatEngine implements AutoCloseable {
             online = false;
             if (failure instanceof RelayApi.ApiFailure apiFailure && apiFailure.status == 401) invalidateToken();
         }
+    }
+
+    /** Built and verified, but not yet queued: every control message (a reaction, an edit or a delete-for-everyone) shares this. */
+    private Send buildControl(UUID peerId, String kind, ChatEnvelope.Action action, Instant now) throws Exception {
+        Peer peer = peer(peerId);
+        if (peer == null) throw new SecurityException("Unknown contact");
+        safety.requireAllowed(peerId);
+        onboarding.prepare(peer);
+        if (!signal.hasSession(peerId)) { PublicBundle bundle = claimPreKey(peerId); signal.establish(peerId, bundle, now); }
+        UUID id = UUID.randomUUID();
+        long expiresAt = now.toEpochMilli() + ChatEnvelope.Expiry.HOUR_1.milliseconds;
+        ChatEnvelope envelope = new ChatEnvelope(1, id, account.userId(), account.deviceId(), peer.userId(), peer.deviceId(),
+                now.toEpochMilli(), expiresAt, ChatEnvelope.Expiry.HOUR_1, null, null, kind, null, action);
+        envelope.verify(id, account.userId(), account.deviceId(), peer.userId(), peer.deviceId(), ChatEnvelope.Expiry.HOUR_1, expiresAt, null, now);
+        SignalClient.Packet encrypted = signal.encrypt(peer.userId(), bytes(envelope), now);
+        return new Send(id, peer.userId(), peer.deviceId(), ChatEnvelope.Expiry.HOUR_1, expiresAt, encrypted.type(), encrypted.ciphertext(), null);
+    }
+
+    /** {@code emoji} null removes this phone's own reaction; otherwise it must be one of {@link ChatEnvelope#REACTIONS}. Either party's
+     * message, in a 1:1 conversation only (a group reaction is not part of this). */
+    void react(Entry entry, String emoji) throws Exception {
+        if (entry.groupEpoch() != null) throw new IllegalArgumentException("React to a group message through the group, not this method");
+        if (emoji != null && !ChatEnvelope.REACTIONS.contains(emoji)) throw new IllegalArgumentException("Not an offered reaction");
+        safety.refresh();
+        Instant now = Instant.now();
+        Send control = buildControl(entry.peerId(), ChatEnvelope.REACTION, new ChatEnvelope.Action(entry.id(), emoji, null), now);
+        vault.transaction(() -> {
+            Entry current = read("entry/" + entry.id(), Entry.class);
+            if (current != null) write("entry/" + entry.id(), current.withReaction(true, emoji));
+            write("outbox/" + control.id(), new Outbox(control, null));
+            return null;
+        });
+        try { flushOutgoing(); }
+        catch (IOException failure) { online = false; if (failure instanceof RelayApi.ApiFailure apiFailure && apiFailure.status == 401) invalidateToken(); }
+    }
+
+    /** Only a text message this phone sent, still alive, can be edited; the lifetime does not reset. 1:1 only. */
+    void editMessage(Entry entry, String newText) throws Exception {
+        if (entry.groupEpoch() != null) throw new IllegalArgumentException("Edit a group message through the group, not this method");
+        if (!entry.outgoing()) throw new SecurityException("Only the sender can edit a message");
+        if (entry.image() || entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE) throw new IllegalArgumentException("Only a sent text message can be edited");
+        if (entry.expiresAt() <= System.currentTimeMillis()) throw new IllegalArgumentException("Message expired");
+        String trimmed = newText == null ? "" : newText.trim();
+        if (trimmed.isEmpty() || trimmed.getBytes(StandardCharsets.UTF_8).length > 16_384) throw new IllegalArgumentException("Invalid message text");
+        safety.refresh();
+        Instant now = Instant.now();
+        Send control = buildControl(entry.peerId(), ChatEnvelope.EDIT, new ChatEnvelope.Action(entry.id(), null, trimmed), now);
+        vault.transaction(() -> {
+            safety.requireNotDeleting();
+            byte[] plaintext = vault.unseal(contentKey(entry), vault.get("body/" + entry.id()));
+            Content previous;
+            try { previous = JSON.fromJson(new String(plaintext, StandardCharsets.UTF_8), Content.class); }
+            finally { Arrays.fill(plaintext, (byte) 0); }
+            ChatEnvelope original = previous.envelope();
+            ChatEnvelope updated = new ChatEnvelope(original.version(), original.id(), original.senderId(), original.senderDeviceId(),
+                    original.recipientId(), original.recipientDeviceId(), original.sentAt(), original.expiresAt(), original.expiry(),
+                    trimmed, null, null, original.reference(), null);
+            updated.verify(original.id(), original.senderId(), original.senderDeviceId(), original.recipientId(), original.recipientDeviceId(),
+                    original.expiry(), original.expiresAt(), null, Instant.now());
+            storeContent(entry, new Content(updated, null));
+            write("entry/" + entry.id(), entry.withEdited());
+            write("outbox/" + control.id(), new Outbox(control, null));
+            return null;
+        });
+        try { flushOutgoing(); }
+        catch (IOException failure) { online = false; if (failure instanceof RelayApi.ApiFailure apiFailure && apiFailure.status == 401) invalidateToken(); }
+    }
+
+    /** Only a message this phone sent, still alive, can be withdrawn for both sides; unlike the other party's own local "Delete",
+     * this removes it on both phones, at once, with no trace left behind (not a placeholder). 1:1 only. */
+    void deleteForEveryone(Entry entry) throws Exception {
+        if (entry.groupEpoch() != null) throw new IllegalArgumentException("Delete a group message through the group, not this method");
+        if (!entry.outgoing()) throw new SecurityException("Only the sender can delete a message for everyone");
+        if (entry.expiresAt() <= System.currentTimeMillis()) throw new IllegalArgumentException("Message expired");
+        safety.refresh();
+        Instant now = Instant.now();
+        Send control = buildControl(entry.peerId(), ChatEnvelope.DELETE, new ChatEnvelope.Action(entry.id(), null, null), now);
+        vault.transaction(() -> {
+            erase(entry, "delete");
+            write("outbox/" + control.id(), new Outbox(control, null));
+            return null;
+        });
+        try { flushOutgoing(); }
+        catch (IOException failure) { online = false; if (failure instanceof RelayApi.ApiFailure apiFailure && apiFailure.status == 401) invalidateToken(); }
     }
 
     void storeContent(Entry entry, Content content) throws Exception {
@@ -976,6 +1074,7 @@ final class ChatEngine implements AutoCloseable {
                     ChatEnvelope envelope = JSON.fromJson(new String(plaintext, StandardCharsets.UTF_8), ChatEnvelope.class);
                     envelope.verify(message.id(), message.senderId(), message.senderDeviceId(), account.userId(), account.deviceId(),
                             message.expiry(), message.expiresAt(), message.mediaId(), Instant.now());
+                    if (envelope.kind() != null) { receiveControl(message, envelope); return null; }
                     byte[] image = imageCiphertext == null ? null : ImageCipher.decrypt(message.mediaId(), imageCiphertext,
                             envelope.image().key(), envelope.image().nonce());
                     Entry entry = new Entry(message.id(), message.senderId(), message.expiresAt(), message.expiry(), false, image != null, "DELIVERED", account.userId());
@@ -988,6 +1087,37 @@ final class ChatEngine implements AutoCloseable {
                 return null;
             });
         } catch (Exception failure) { AndroidVault.deleteContentKey(message.expiresAt(), message.id(), account.userId()); throw failure; }
+    }
+
+    /**
+     * A reaction, an edit or a delete-for-everyone from the device that sent {@code target}: never a different conversation, and
+     * never a device impersonating the one that actually sent the original (that binding is the Signal session's, not checked again
+     * here). An edit or a delete can only apply to an entry this phone received from exactly that sender; a reaction can apply to
+     * either side's own entry. The control itself is never shown as a message and never creates one.
+     */
+    private void receiveControl(Incoming message, ChatEnvelope envelope) throws Exception {
+        Entry target = read("entry/" + envelope.action().targetId(), Entry.class);
+        boolean owned = target != null && target.groupEpoch() == null && target.peerId().equals(message.senderId());
+        if (owned) switch (envelope.kind()) {
+            case ChatEnvelope.REACTION -> write("entry/" + target.id(), target.withReaction(false, envelope.action().emoji()));
+            case ChatEnvelope.EDIT -> {
+                if (!target.outgoing()) {
+                    byte[] plaintext = vault.unseal(contentKey(target), vault.get("body/" + target.id()));
+                    Content previous;
+                    try { previous = JSON.fromJson(new String(plaintext, StandardCharsets.UTF_8), Content.class); }
+                    finally { Arrays.fill(plaintext, (byte) 0); }
+                    ChatEnvelope original = previous.envelope();
+                    ChatEnvelope updated = new ChatEnvelope(original.version(), original.id(), original.senderId(), original.senderDeviceId(),
+                            original.recipientId(), original.recipientDeviceId(), original.sentAt(), original.expiresAt(), original.expiry(),
+                            envelope.action().text(), null, null, original.reference(), null);
+                    storeContent(target, new Content(updated, null));
+                    write("entry/" + target.id(), target.withEdited());
+                }
+            }
+            case ChatEnvelope.DELETE -> { if (!target.outgoing()) erase(target, null); }
+        }
+        write("ack/" + message.id(), new Ack(message.id(), message.expiresAt(), "delivered"));
+        vault.put("seen/" + message.id(), Long.toString(message.expiresAt()).getBytes(StandardCharsets.US_ASCII));
     }
 
     void sync() throws Exception { sync(() -> false); }

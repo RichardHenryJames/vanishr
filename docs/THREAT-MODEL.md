@@ -933,6 +933,61 @@ keys each Keystore operation is slower, so the first screen of a long chat is th
 matters, and the commit of a large vault (many photos) is still the cost this release does not
 remove.
 
+### Message reply, reactions, edit and delete for everyone (unreleased)
+
+Four 1:1-only additions: quoting an earlier message when replying, reacting with a fixed emoji,
+editing a sent text message, and deleting a sent message for both sides. None of them change the
+relay: the envelope is still opaque ciphertext of the same bounded size, so the relay carries a
+reaction, an edit or a delete exactly as it carries any other message, with no new endpoint and
+no new thing for it to see.
+
+- **Scope is 1:1 only.** `ChatEngine.react`, `editMessage` and `deleteForEveryone` all throw for a
+  group entry (`groupEpoch() != null`); a group message can only be sent, read and acknowledged,
+  the same as before. Reply quoting is accepted only when composing to a single contact; the
+  reference is dropped if the draft is for a group.
+- **Two kinds of envelope.** An ordinary message is unchanged except for one new optional field,
+  `reference` (the quoted message's id and a snippet of its text, frozen at send time, at most 160
+  UTF-8 bytes, never blank when present). A reaction, edit or delete is a second, short-lived kind
+  of envelope (`ChatEnvelope.kind`: `REACTION`, `EDIT` or `DELETE`, `Expiry.HOUR_1`) that names the
+  message it is about and never carries text or an image itself; `ChatEnvelope.verify` enforces
+  both shapes, including that a reaction's emoji is one of a fixed six-entry palette (never
+  arbitrary text) and that only an ordinary message may carry a reference. A control envelope
+  never becomes a visible chat entry of its own: it only changes an existing one, the same way a
+  delivery or read receipt already does, and leaves the same kind of durable "seen" marker so the
+  relay does not hand it over twice.
+- **Ownership is checked on receipt, not assumed from the network.** `ChatEngine.receiveControl`
+  applies an incoming reaction, edit or delete only to an entry that (a) exists, (b) is 1:1, and
+  (c) was actually sent by the account the control envelope claims to be from
+  (`target.peerId().equals(message.senderId())`); a control naming an id that is not a real entry
+  from that exact peer changes nothing. An edit or a delete is refused in addition unless the
+  target entry is one *that peer* sent to this phone (`!target.outgoing()`): an incoming claim can
+  never edit or delete a message this phone sent, only react to it. The matching local-call guard
+  (`editMessage`/`deleteForEveryone` throw `SecurityException` unless `entry.outgoing()`) keeps the
+  same rule the other way: only the sender's own phone can call these for a message it sent.
+- **Delete for everyone has no tombstone.** Both sides remove the message outright
+  (`ChatEngine.erase`, the same path expiry already uses) the moment the delete is applied; there
+  is no "this message was deleted" placeholder left behind. This differs from some other
+  messengers on purpose: Vanishr's design is that nothing outlives its purpose, so a deleted
+  message leaves exactly as much trace as an expired one, which is none.
+- **An edit does not reset the clock.** The replacement text keeps the original message's
+  `expiresAt`; editing cannot be used to extend a message's life past what the recipient already
+  agreed to by receiving it.
+- **A reply's quoted snippet is a frozen copy, not a live link.** It is read once, at the moment of
+  composing the reply, and stored with the reply's own encrypted content from then on. If the
+  quoted message later expires or is deleted, the reply still shows its frozen snippet; nothing is
+  re-fetched from a message that may no longer exist, and the snippet itself is bounded exactly
+  like a short message so it cannot be used to smuggle a large hidden payload.
+
+Unchanged: no relay change, no new logging, the same per-message Keystore key and expiry
+enforcement, fail-closed behavior for expired content and changed identities, and the whole-vault
+commit for every local effect plus its outbound control message.
+
+Not claimed: this has run only on the dedicated test emulator with synthetic accounts
+(see [VERIFICATION.md](VERIFICATION.md)), never on a physical phone or across a real relay
+between two devices. The quoted snippet, reaction chips and "edited" label are verified as
+stored and retrievable engine state, not by inspecting a rendered screen. Voice messages and
+multi-device support, considered in the same pass, are not built.
+
 ## Notification navigation
 
 From 0.3.6, an absent notification preference defaults to enabled. Existing saved

@@ -153,6 +153,15 @@ public final class MainActivity extends AppCompatActivity {
     // still waiting is following the bottom too: measuring the list at that moment would find it laid out but not yet scrolled.
     private int bottomScrollsPending;
     private long nextRowExpiry = Long.MAX_VALUE;
+    private ChatEngine.Entry pendingReplyTo;
+    private String pendingReplySnippet;
+    private View replyStrip;
+    private TextView replySnippetLabel;
+    private void updateReplyStrip() {
+        if (replyStrip == null) return;
+        replyStrip.setVisibility(pendingReplyTo == null ? View.GONE : View.VISIBLE);
+        if (pendingReplyTo != null && replySnippetLabel != null) replySnippetLabel.setText(pendingReplySnippet);
+    }
     // Counts how often the expiry tick had to walk the rows, so a test can show that it does so only when a message is due.
     private int rowScans;
     private static final class MessageLoad {
@@ -206,6 +215,7 @@ public final class MainActivity extends AppCompatActivity {
         final UUID id = UUID.randomUUID();
         final ChatEngine.Peer peer;
         final ChatEnvelope.Expiry expiry;
+        final ChatEnvelope.Reference reference;
         final long createdAt = System.currentTimeMillis();
         String text;
         byte[] image;
@@ -213,8 +223,8 @@ public final class MainActivity extends AppCompatActivity {
         boolean failed;
         volatile boolean cancelled;
         View row;
-        PendingSend(ChatEngine.Peer peer, String text, byte[] image, ChatEnvelope.Expiry expiry) {
-            this.peer = peer; this.text = text; this.image = image; this.expiry = expiry;
+        PendingSend(ChatEngine.Peer peer, String text, byte[] image, ChatEnvelope.Expiry expiry, ChatEnvelope.Reference reference) {
+            this.peer = peer; this.text = text; this.image = image; this.expiry = expiry; this.reference = reference;
         }
         long expiresAt() { return createdAt + expiry.milliseconds; }
         synchronized byte[] copyImage() { return image == null ? null : image.clone(); }
@@ -1365,6 +1375,22 @@ public final class MainActivity extends AppCompatActivity {
         expiryLabel.setBackground(design.feedback(Color.TRANSPARENT, 8));
         expiryLabel.setOnClickListener(view -> expiryDialog()); settings.addView(expiryLabel);
         composeArea.addView(settings);
+        replyStrip = null; replySnippetLabel = null;
+        if (group == null) {
+            pendingReplyTo = null; pendingReplySnippet = null;
+            LinearLayout strip = horizontal(); strip.setGravity(Gravity.CENTER_VERTICAL); strip.setPadding(dp(10), dp(6), dp(6), dp(6));
+            strip.setBackground(design.background(Ui.CANVAS, 6, Ui.LINE)); strip.setVisibility(View.GONE);
+            View accent = new View(this); accent.setBackgroundColor(Ui.PRIMARY); strip.addView(accent, new LinearLayout.LayoutParams(dp(3), dp(32)));
+            LinearLayout labels = vertical(); labels.setPadding(dp(8), 0, dp(8), 0);
+            labels.addView(design.text("Replying", 11, 700, Ui.PRIMARY));
+            replySnippetLabel = design.text("", 12, 500, MUTED); replySnippetLabel.setMaxLines(1); replySnippetLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            labels.addView(replySnippetLabel);
+            strip.addView(labels, new LinearLayout.LayoutParams(0, -2, 1));
+            strip.addView(icon(R.drawable.ic_x, "Cancel reply", () -> { pendingReplyTo = null; pendingReplySnippet = null; updateReplyStrip(); }), new LinearLayout.LayoutParams(dp(32), dp(32)));
+            replyStrip = strip;
+            LinearLayout.LayoutParams stripParams = new LinearLayout.LayoutParams(-1, -2); stripParams.setMargins(0, 0, 0, dp(6));
+            composeArea.addView(strip, stripParams);
+        }
         LinearLayout input = horizontal();
         input.setGravity(Gravity.BOTTOM);
         attachmentControl=icon(R.drawable.ic_plus, "Attach", this::attachmentDialog); attachmentControl.setBackground(design.background(Ui.CANVAS,22,Ui.LINE));
@@ -1379,7 +1405,8 @@ public final class MainActivity extends AppCompatActivity {
         ImageButton send = icon(R.drawable.ic_arrow_up, "Send", () -> {
             String text = composer.getText().toString();
             if (text.trim().isEmpty()) return;
-            if (enqueueSend(peer, text, null, expiry)) composer.setText("");
+            ChatEnvelope.Reference reference = pendingReplyTo == null ? null : new ChatEnvelope.Reference(pendingReplyTo.id(), pendingReplySnippet);
+            if (enqueueSend(peer, text, null, expiry, reference)) { composer.setText(""); pendingReplyTo = null; pendingReplySnippet = null; updateReplyStrip(); }
         });
         send.setBackground(design.feedback(Ui.PRIMARY, 24)); send.setColorFilter(Color.WHITE);
         LinearLayout.LayoutParams sendParams = new LinearLayout.LayoutParams(dp(44), dp(44)); sendParams.setMarginStart(dp(8)); send.setLayoutParams(sendParams);
@@ -1457,12 +1484,16 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private boolean enqueueSend(ChatEngine.Peer peer, String text, byte[] image, ChatEnvelope.Expiry selectedExpiry) {
+        return enqueueSend(peer, text, image, selectedExpiry, null);
+    }
+
+    private boolean enqueueSend(ChatEngine.Peer peer, String text, byte[] image, ChatEnvelope.Expiry selectedExpiry, ChatEnvelope.Reference reference) {
         if (!resumed || engine == null || busy) return false;
         if (image != null && !allowed(RemoteSettings.Flag.IMAGES)) return false;
         GroupChat.Conversation group = shownConversationGroup;
         if (group != null && (sendControl == null || !sendControl.isEnabled())) { problem("Group membership is being verified."); return false; }
         if (pendingSends.size() >= 8) { problem("Wait for a pending message before sending more."); return false; }
-        PendingSend pending = new PendingSend(peer, text, image == null ? null : image.clone(), selectedExpiry);
+        PendingSend pending = new PendingSend(peer, text, image == null ? null : image.clone(), selectedExpiry, group == null ? reference : null);
         pending.group=group!=null;
         if (messages != null && peer.userId().equals(selectedPeer) && shownEntries.isEmpty()
                 && pendingSends.stream().noneMatch(value -> value.peer.userId().equals(selectedPeer))) messages.removeAllViews();
@@ -1513,7 +1544,8 @@ public final class MainActivity extends AppCompatActivity {
                             visible.add(durable);
                             visible.sort(Comparator.comparingLong(entry -> entry.expiresAt() - entry.expiry().milliseconds));
                             Map<UUID, String> text = new HashMap<>(); text.put(durable.id(), preparedText);
-                            applyMessages(pending.peer, visible, text, Map.of());
+                            applyMessages(pending.peer, visible, text, Map.of(),
+                                    pending.reference == null ? Map.of() : Map.of(durable.id(), pending.reference));
                             refreshMessages(pending.peer);
                         }
                     });
@@ -1522,7 +1554,7 @@ public final class MainActivity extends AppCompatActivity {
                     if (current.groups().get(pending.peer.userId())==null) throw new SecurityException("Group access ended");
                     current.groups().send(pending.peer.userId(),pending.text,image,pending.expiry,pending.id,pending.createdAt,stored);
                 }
-                else current.send(pending.peer,pending.text,image,pending.expiry,pending.id,pending.createdAt,stored);
+                else current.send(pending.peer,pending.text,image,pending.expiry,pending.reference,pending.id,pending.createdAt,stored);
                 ui.post(() -> {
                     if (!resumed || generation != screenGeneration || engine != current) return;
                     if (connection != null) connection.setText(statusText());
@@ -1785,6 +1817,7 @@ public final class MainActivity extends AppCompatActivity {
     // so presence and avatar reads are never held up by a long history.
     private void loadStage(MessageLoad load) {
         Map<UUID, String> text = new HashMap<>();
+        Map<UUID, ChatEnvelope.Reference> references = new HashMap<>();
         try {
             int size = load.first ? FIRST_BATCH : NEXT_BATCH;
             load.first = false;
@@ -1792,7 +1825,11 @@ public final class MainActivity extends AppCompatActivity {
             for (int taken = 0; taken < size && !load.waiting.isEmpty(); taken++) {
                 ChatEngine.Entry entry = load.waiting.poll();
                 if (!conversationCurrent(load.engine, load.generation)) { text.clear(); return; }
-                try { text.put(entry.id(), load.engine.content(entry, false, false).envelope().text()); }
+                try {
+                    ChatEnvelope envelope = load.engine.content(entry, false, false).envelope();
+                    text.put(entry.id(), envelope.text());
+                    if (envelope.reference() != null) references.put(entry.id(), envelope.reference());
+                }
                 catch (Exception failure) {
                     // Cleared, forgotten, blocked or expired meanwhile: nothing left to show, so it is not a failure.
                     if (entry.expiresAt() <= System.currentTimeMillis() || vanished(load.engine, load.generation, entry.id())) {
@@ -1819,7 +1856,7 @@ public final class MainActivity extends AppCompatActivity {
                 try {
                     if (!conversationCurrent(load.engine, load.generation)) return;
                     if (last) messageRefreshQueued = false;
-                    applyMessages(load.peer, visible, text, load.senders);
+                    applyMessages(load.peer, visible, text, load.senders, references);
                     historyMore = load.hidden > 0;
                     if (last && messageRefreshRequested) refreshMessages(load.peer);
                     // Someone already at the top when the page finishes gets the next one without having to scroll again. It is
@@ -1875,10 +1912,11 @@ public final class MainActivity extends AppCompatActivity {
         for (MessageRow row : messageRows.values()) row.clear();
         messageRows.clear(); messageDates.clear(); messageEmpty = null;
         shownConversationPeer = null; shownConversationGroup = null; shownPresence = null; checkedPresence = null;
+        pendingReplyTo = null; pendingReplySnippet = null; replyStrip = null; replySnippetLabel = null;
     }
 
     private void applyMessages(ChatEngine.Peer peer, java.util.List<ChatEngine.Entry> loaded,
-                               Map<UUID, String> text, Map<UUID, String> senders) {
+                               Map<UUID, String> text, Map<UUID, String> senders, Map<UUID, ChatEnvelope.Reference> references) {
         java.util.List<ChatEngine.Entry> entries = loaded.stream().filter(entry -> entry.expiresAt() > System.currentTimeMillis()).toList();
         boolean atEnd = bottomScrollsPending > 0 || messageScroll == null
                 || messages.getHeight() - messageScroll.getScrollY() - messageScroll.getHeight() < dp(100);
@@ -1926,7 +1964,7 @@ public final class MainActivity extends AppCompatActivity {
             MessageRow existing = messageRows.get(entry.id());
             if (!sameMessage(entry, existing == null ? null : existing.entry)) {
                 if (existing != null) existing.clear();
-                existing = messageRow(peer, entry, text.get(entry.id()), senders.get(entry.id()));
+                existing = messageRow(peer, entry, text.get(entry.id()), senders.get(entry.id()), references.get(entry.id()));
                 messageRows.put(entry.id(), existing);
             }
             updateReceipt(existing, entry);
@@ -1981,7 +2019,7 @@ public final class MainActivity extends AppCompatActivity {
         if (row.groupReceipt != null) row.groupReceipt.setText(entry.state());
     }
 
-    private MessageRow messageRow(ChatEngine.Peer peer, ChatEngine.Entry entry, String text, String senderName) {
+    private MessageRow messageRow(ChatEngine.Peer peer, ChatEngine.Entry entry, String text, String senderName, ChatEnvelope.Reference reference) {
             long created = entry.expiresAt() - entry.expiry().milliseconds;
             LinearLayout alignment = horizontal(); alignment.setGravity(entry.outgoing() ? Gravity.END : Gravity.START); alignment.setTag(entry.expiresAt());
             LinearLayout row = vertical();
@@ -1991,6 +2029,14 @@ public final class MainActivity extends AppCompatActivity {
             if (entry.groupEpoch()!=null && !entry.outgoing()) {
                 sender=design.text(senderName,12,700,Ui.BLUE);
                 sender.setMaxWidth(Math.max(dp(120),root.getWidth()-root.getPaddingLeft()-root.getPaddingRight()-dp(80))); row.addView(sender);
+            }
+            if (reference != null) {
+                TextView quoted = design.text(reference.snippet(), 11, 500, MUTED);
+                quoted.setMaxLines(2); quoted.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                quoted.setBackground(design.background(Ui.CANVAS, 5, Ui.LINE)); quoted.setPadding(dp(8), dp(5), dp(8), dp(5));
+                quoted.setMaxWidth(Math.max(dp(120), root.getWidth() - root.getPaddingLeft() - root.getPaddingRight() - dp(80)));
+                LinearLayout.LayoutParams quotedParams = new LinearLayout.LayoutParams(-2, -2); quotedParams.bottomMargin = dp(5);
+                row.addView(quoted, quotedParams);
             }
             TextView body;
             if (entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE) {
@@ -2007,9 +2053,14 @@ public final class MainActivity extends AppCompatActivity {
             body.setMaxWidth(Math.max(dp(120), root.getWidth() - root.getPaddingLeft() - root.getPaddingRight() - dp(80)));
             if (entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE) { body.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_eye, 0, 0, 0); body.setCompoundDrawablePadding(dp(8)); }
             row.addView(body);
+            if (entry.reactionMine() != null || entry.reactionTheirs() != null) {
+                String chips = java.util.stream.Stream.of(entry.reactionMine(), entry.reactionTheirs())
+                    .filter(Objects::nonNull).distinct().reduce("", (joined, emoji) -> joined.isEmpty() ? emoji : joined + " " + emoji);
+                TextView reactions = design.text(chips, 13, 500, INK); reactions.setPadding(0, dp(3), 0, 0); row.addView(reactions);
+            }
             LinearLayout metadata = horizontal(); metadata.setGravity(Gravity.END);
             String time = java.time.format.DateTimeFormatter.ofPattern("HH:mm", Locale.getDefault()).format(java.time.Instant.ofEpochMilli(created).atZone(java.time.ZoneId.systemDefault()));
-            TextView timestamp = design.text(time + "  /  " + expiryName(entry.expiry()), 9, 500, MUTED); timestamp.setPadding(0, dp(5), dp(5), 0); metadata.addView(timestamp);
+            TextView timestamp = design.text(time + (entry.edited() ? "  /  edited  /  " : "  /  ") + expiryName(entry.expiry()), 9, 500, MUTED); timestamp.setPadding(0, dp(5), dp(5), 0); metadata.addView(timestamp);
             ImageView status = null;
             if (entry.outgoing() && entry.groupEpoch()==null) {
                 status = design.symbol(R.drawable.ic_clock_3, 15, MUTED);
@@ -2022,11 +2073,27 @@ public final class MainActivity extends AppCompatActivity {
                 groupStatus.setPadding(0,dp(4),0,0); groupStatus.setMaxWidth(Math.max(dp(120),root.getWidth()-root.getPaddingLeft()-root.getPaddingRight()-dp(80))); row.addView(groupStatus);
             }
             row.setOnLongClickListener(view -> {
-                SecureSheet.Builder actions = new SecureSheet.Builder(this).setTitle("Message actions").setNegativeButton("Cancel", null)
-                    .setPositiveButton("Delete", (dialog, which) -> submit(() -> engine.erase(entry, "delete"), () -> refreshMessages(peer)));
-                if (!entry.outgoing()) actions.setNeutralButton("Report", (dialog, which) ->
-                    reportUserDialog(entry.groupEpoch() == null ? entry.peerId() : entry.senderId(), entry));
-                showDialog(actions.create());
+                boolean oneToOne = entry.groupEpoch() == null;
+                boolean alive = entry.expiresAt() > System.currentTimeMillis();
+                LinearLayout actions = vertical();
+                ScrollView scroll = new ScrollView(this); scroll.addView(actions);
+                SecureSheet dialog = new SecureSheet.Builder(this).setTitle("Message actions").setView(scroll).setNegativeButton("Cancel", null).create();
+                if (oneToOne) actions.addView(profileAction("Reply", R.drawable.ic_arrow_left, () -> {
+                    dialog.dismiss();
+                    pendingReplyTo = entry;
+                    pendingReplySnippet = entry.image() ? "Photo" : entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE ? "View-once message" : text;
+                    updateReplyStrip();
+                    if (composer != null) composer.requestFocus();
+                }));
+                if (oneToOne) actions.addView(profileAction(entry.reactionMine() == null ? "React" : "Change reaction", 0, () -> { dialog.dismiss(); reactDialog(peer, entry); }));
+                if (oneToOne && entry.outgoing() && !entry.image() && entry.expiry() != ChatEnvelope.Expiry.VIEW_ONCE && alive)
+                    actions.addView(profileAction("Edit", R.drawable.ic_square_pen, () -> { dialog.dismiss(); editDialog(peer, entry, text); }));
+                if (oneToOne && entry.outgoing() && alive) actions.addView(profileAction("Delete for everyone", R.drawable.ic_trash_2,
+                    () -> { dialog.dismiss(); submit(() -> engine.deleteForEveryone(entry), () -> refreshMessages(peer)); }));
+                actions.addView(profileAction("Delete for me", R.drawable.ic_trash_2, () -> { dialog.dismiss(); submit(() -> engine.erase(entry, "delete"), () -> refreshMessages(peer)); }));
+                if (!entry.outgoing()) actions.addView(profileAction("Report", 0,
+                    () -> { dialog.dismiss(); reportUserDialog(entry.groupEpoch() == null ? entry.peerId() : entry.senderId(), entry); }));
+                showDialog(dialog);
                 return true;
             });
             alignment.addView(row, new LinearLayout.LayoutParams(-2, -2));
@@ -2034,6 +2101,37 @@ public final class MainActivity extends AppCompatActivity {
             MessageRow result = new MessageRow(null, alignment, body, sender, status, groupStatus);
             updateReceipt(result, entry);
             return result;
+    }
+
+    private void reactDialog(ChatEngine.Peer peer, ChatEngine.Entry entry) {
+        LinearLayout row = horizontal(); row.setGravity(Gravity.CENTER); row.setPadding(dp(8), dp(16), dp(8), dp(4));
+        LinearLayout content = vertical(); content.addView(row);
+        SecureSheet dialog = new SecureSheet.Builder(this).setTitle("React").setView(content).setNegativeButton("Cancel", null).create();
+        for (String emoji : ChatEnvelope.REACTIONS) {
+            TextView button = design.text(emoji, 22, 500, INK); button.setGravity(Gravity.CENTER);
+            button.setPadding(dp(6), dp(6), dp(6), dp(6)); button.setBackground(design.feedback(Color.TRANSPARENT, 20));
+            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(dp(40), dp(40)); row.addView(button, size);
+            button.setOnClickListener(view -> { dialog.dismiss(); submit(() -> engine.react(entry, emoji), () -> refreshMessages(peer)); });
+        }
+        if (entry.reactionMine() != null) content.addView(profileAction("Remove reaction", R.drawable.ic_x,
+            () -> { dialog.dismiss(); submit(() -> engine.react(entry, null), () -> refreshMessages(peer)); }));
+        showDialog(dialog);
+    }
+
+    private void editDialog(ChatEngine.Peer peer, ChatEngine.Entry entry, String currentText) {
+        Ui.Field field = design.field("Message", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        field.input().setText(currentText); field.input().setMaxLines(6);
+        field.input().setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(4096)});
+        LinearLayout fields = vertical(); fields.setPadding(dp(20), 0, dp(20), 0); fields.addView(field.view());
+        SecureSheet dialog = new SecureSheet.Builder(this).setTitle("Edit message").setView(fields).setNegativeButton("Cancel", null)
+            .setPositiveButton("Save", null).create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+            String updated = field.input().getText().toString();
+            if (updated.trim().isEmpty()) { field.layout().setError("Message cannot be empty"); return; }
+            dialog.dismiss();
+            submit(() -> engine.editMessage(entry, updated), () -> refreshMessages(peer));
+        }));
+        showDialog(dialog);
     }
 
     private void addContactDialog() { addContactDialog(""); }
@@ -3042,7 +3140,8 @@ public final class MainActivity extends AppCompatActivity {
         ChatEnvelope.Expiry selectedExpiry = expiry;
         openDialog = new SecureSheet.Builder(this).setTitle("Send photo").setView(view).setNegativeButton("Cancel", null)
                 .setPositiveButton("Send", (dialog, which) -> {
-                    enqueueSend(peer, null, image, selectedExpiry);
+                    ChatEnvelope.Reference reference = pendingReplyTo == null ? null : new ChatEnvelope.Reference(pendingReplyTo.id(), pendingReplySnippet);
+                    if (enqueueSend(peer, null, image, selectedExpiry, reference)) { pendingReplyTo = null; pendingReplySnippet = null; updateReplyStrip(); }
                 }).create();
         openDialog.setOnDismissListener(dialog -> { view.setImageDrawable(null); Arrays.fill(image, (byte) 0); clearBitmap(); });
         showDialog(openDialog);

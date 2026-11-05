@@ -1,6 +1,6 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-11-02 UTC. This is a development foundation,
+Evidence refreshed on Windows, 2026-11-05 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
 ## Release 0.6.3 / The official admin changes phone
@@ -270,6 +270,49 @@ relay change, no production phone used):
 - **Not verified**: two real phones, a live relay, or the exact "stuck" report reproduced as it happened (this was
   diagnosed from the code and reproduced with a synthetic request, not from the reporter's own devices). No new app
   version has been cut for this fix; it is in the source tree only.
+
+**Follow-up, 2026-11-05 (continued): message reply, reactions, edit and delete for everyone.** Added on request,
+towards feature parity with mainstream messengers, while keeping the trust model 0.6.3 hardened: 1:1 conversations
+only, no relay change, no tombstones. See [THREAT-MODEL.md](THREAT-MODEL.md#message-reply-reactions-edit-and-delete-for-everyone-unreleased)
+for the design.
+
+- **JVM**: a new `ChatEnvelopeTest` (10 tests) covers the wire-format rules directly — both envelope shapes, the
+  fixed six-emoji palette, the 160-byte reference snippet bound, the 16,384-byte edit-text bound, and that an
+  ordinary message and a control message each reject the other's fields.
+- **Emulator** (`ScreenFlowTest`, a new "message replies, reactions, edits and delete-for-everyone" section, 9
+  tests, all passing): a reaction is applied locally at once and can be removed; only the sender can edit or
+  delete their own sent message for everyone (both the local-call guard and, separately, that an incoming claim
+  for a message this phone sent is refused); an edit replaces the text sent to the peer, keeps the original
+  deadline and marks the message edited; a delete-for-everyone removes the message locally and tells the peer;
+  a reply carries the quoted message's id and a frozen snippet over the wire and into the stored content, and
+  never marks the quoted message itself; an incoming reaction/edit/delete only applies to an entry really sent
+  by that exact peer (an id that is not one of their entries changes nothing); an incoming reply is received and
+  its reference is retrievable like any other stored content. The whole 28-test 0.6.3 section, run again
+  alongside these, still passes unchanged.
+- **Full gate** (`verify.ps1 -Android`): passes — client-core 29/29 (including the new `ChatEnvelopeTest`), relay
+  101/2 skipped with 0 failures (one run hit transient `Redis command timed out` / 503 errors under heavy
+  unrelated load on this shared machine; a clean rerun with nothing else competing for CPU passed outright, and
+  no relay code was touched by this change), Android `lintDebug` 0 errors / 19 warnings (unchanged).
+- **Full emulator regression** (`ScreenFlowTest`, the entire suite, 225 tests): first run surfaced two real
+  problems, both now fixed, before passing outright:
+  - Two test helpers reflectively invoked `MainActivity.applyMessages` and constructed `MainActivity$PendingSend`
+    by exact parameter types; both signatures gained a parameter for this feature (the references map and the
+    reply reference) and the helpers were stale, so every test that went through them failed with
+    `NoSuchMethodException`. Fixed by updating the two reflective type lists; unrelated to the feature's own
+    behavior.
+  - One failure, `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`, remained after that fix. Bisected
+    with the actual APK (not just the source) by building and running it, unchanged, against the 0.6.3 release
+    commit and against the commit before the remote-photo fix: it fails identically on both, so it predates this
+    whole pass and is not something this change (or the remote-photo fix) caused. Left as is; not investigated
+    further here.
+  - With both of those accounted for, the suite is clean: 224/225, the one exception being the pre-existing,
+    unrelated failure above.
+- **Not verified**: two real phones or a live relay between them. The quoted snippet, reaction chips and
+  "edited" label are checked as stored, retrievable engine state (what `MainActivity` reads to render them), not
+  by inspecting an actual rendered screen. Voice messages and multi-device support were considered in the same
+  pass and are not built; multi-device remains on hold pending an explicit decision, since it conflicts with the
+  one-device-per-identity pin model this same release line hardened. No new app version has been cut for this
+  batch; it is in the source tree only.
 
 ## Release 0.6.2 / Signed settings and Google Play sign-in
 
