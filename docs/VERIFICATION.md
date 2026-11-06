@@ -7,7 +7,7 @@ not a production security assessment or independent audit.
 
 Release 0.6.5 / code 46 is a client-only change: no relay change, no relay deployment, no Azure write. Design and limits:
 [THREAT-MODEL.md](THREAT-MODEL.md#a-contacts-changed-identity-the-expiry-choices-and-the-swipe-gestures-065). The build,
-stage, publication and public checks of the release are recorded at the end of this entry once they have been done.
+stage, publication and public checks of the release are recorded under "Release steps" at the end of this entry.
 
 - **The report and its cause.** On the admin's phone, the owner met "Introduced identity changed; the saved identity was not
   replaced". The text is raised only by `AdminOnboarding.store`, for an ordinary saved contact whose introduced identity
@@ -97,6 +97,53 @@ stage, publication and public checks of the release are recorded at the end of t
   message as "24 hours", sent 12 hours earlier than it was, until it updates. The refusal to accept a blocked or removed
   contact rests on the existing eligibility check and has no test of its own. The review of a changed identity exists only on the
   admin's phone; an ordinary user whose own contact reinstalls is not changed by this release.
+
+### Release steps (2026-11-06)
+
+- **Relay.** No relay main file changed since the undeployed V14 commit `60ac901` (`git diff 60ac901 HEAD -- relay/src/main`
+  is empty; only two relay tests were added), and the deadline policy that accepts a 12-hour deadline under the 24-hour kind
+  (`RelayPolicy`, `RelayTypes`, `enqueue.lua`) was last changed in the 0.5.7 release, which is deployed. So no relay
+  deployment and no Azure write ran, and V14 is still not deployed. Not tried: a 12-hour message sent through the production
+  relay with a real account (the live-relay tests are opt-in and use synthetic accounts); that rests on the unchanged policy code
+  and the relay integration test above.
+- **Build and stage.** Built from commit `6a990ee` after the version bump (`prepare-download.ps1 -PrepareNoticesOnly`, then
+  `package-apk.ps1`): signed APK **44,536,068 bytes**, SHA-256 `6a4417c7f6f412b3e385fb58ddab5cd7adcd9767add2df73bc7bf35986ff8b60`,
+  version 0.6.5 / code 46, min API 28, target API 36, the same 15 permissions as 0.6.4 (compared), the same certificate as every
+  release since 0.6.0 (SHA-256 `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`; `apksigner` reports the v2
+  scheme only, as before), release lint passed. `.tools\vercel-download-0.6.5` holds 33 files / 60,106,924 bytes (limit
+  99,000,000), recorded in `.tools\distribution-audit-0.6.5.json`; the staged feed matches the staged APK. The content audit
+  searched the source ZIP (479 entries, of which 261 source files are byte-identical to the commit and none differ; 218 are
+  dependency sources), the stage's text files and the stored APK bytes for nine private values by value (the signing password, the
+  Google API key, service-account ids, the deployment e-mail, and the settings and admin signing keys and passwords) and for
+  fourteen secret patterns, over 363 text entries: **no findings**. For the Vercel link only `.vercel\project.json` was copied from
+  the 0.6.4 stage (project and team IDs checked, no `.env*` file in the stage).
+- **Vercel.** Deployment `dpl_3393Df5h8ckMU69YDMcSiDq2YCfm` (production, READY) was uploaded from that stage; the live feed
+  served 0.6.4 / code 45, so code 46 is no downgrade. The CLI aliased only the team URL, so the canonical alias
+  `vanishr-download.vercel.app` was moved to the new deployment explicitly.
+- **Public verification** (`.tools\public-release-verification-0.6.5.json`). The canonical feed reports 0.6.5 / 46 with
+  `no-store`; all 32 audited files were fetched anonymously from the canonical origin and are byte-identical (HTTP 200); the
+  public APK is byte-identical to the staged one and verifies with the original certificate; 22 private or missing paths (including
+  `/.secrets/`, `/.git/config`, `/.vercel/project.json`, the scripts and `google-services.json`) return 404; the security headers
+  pass. The signed settings file and the admin identity certificate are both live and byte-identical to the committed files
+  (sequence 1 each, checked by the tools with `-Live -RequireIdentical`; **the settings file still expires on 2026-12-01 and
+  needs renewing before then**).
+- **In-place upgrade.** On the dedicated test emulator: the 0.6.4 release APK (hash equal to the recorded published one) was
+  installed and run, then the 0.6.5 APK downloaded from the public site installed over it with `adb install -r`, no uninstall:
+  version code 45 to 46, `firstInstallTime` unchanged, the same signing certificate, the app running afterwards, an empty crash
+  buffer and no fatal exception. This confirms the install is a compatible update; it does not cover the in-app "Check for
+  updates" banner or the browser download, or the app's local state (a release build cannot be inspected). The release package
+  was uninstalled afterwards.
+- **Google Play bundle** (`.tools\play-store-0.6.5\vanishr-0.6.5.aab`, not uploaded anywhere and not part of the Vercel stage).
+  **45,850,919 bytes**, SHA-256 `1c548369d9e6aca93dd45cead00ce2ec9e67f78d9bd2b692275a0fbbd80d6725`. The official bundletool
+  1.18.3 `validate` passed; the manifest shows package `app.vanishr.android`, version 0.6.5 / code 46, min API 28, target API 36,
+  and the same 14 permissions as the 0.6.4 bundle (compared; none added). The 64-bit native libraries are 16 KiB aligned, the
+  bundled notices match the source, no external updater is present, the Firebase client configuration is present and matches the
+  validated one, and the JAR signature verifies with the same signer as the APK. An exhaustive by-value scan of the decompressed
+  bundle (885 entries, 127 MB, eight private values) found nothing, and its one key file is the committed public settings
+  keys file.
+- **What this does not show.** A physical phone, an install from Google Play, or whether Google Play accepts the bundle; the
+  new behavior against the production relay with two real phones (the emulator tests use a synthetic transport); the in-app
+  update-prompt and browser-download walkthrough (see "In-place upgrade" above for the narrower check done instead).
 
 ## Several devices per account (relay only, unreleased, not deployed, 2026-11-05)
 
