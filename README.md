@@ -12,6 +12,19 @@ license notices at **https://vanishr-download.vercel.app**.
 The public [update feed](https://vanishr-download.vercel.app/updates.json), not
 the latest Git version, determines which release users can download and discover.
 
+Release **0.6.5/code 46** fixes the contact list on the official admin's phone and tidies the chat screen. When a contact
+reinstalled Vanishr or changed phone, the admin's phone showed "Introduced identity changed; the saved identity was not
+replaced", stopped introducing the other new accounts on the list and skipped that person's messages. A saved identity is
+still never replaced silently, but now only that one contact is marked ("Identity changed. Tap to review"): its new
+safety number is shown, and it is used only after you accept it. Messages are sent as **View once, 12 hours or 24 hours**
+(one hour and six hours are gone; the default is 12 hours). Swipe a message to the right to reply, swipe a chat in the
+list to the left to remove the contact (it asks first), and tap the name or picture at the top of a chat for the profile;
+the "Account enrolled" row under the message field is gone (a shield after the name shows a verified contact). No relay
+change. A phone that has not updated shows a 12-hour message as "24 hours", dated 12 hours earlier than it was sent.
+Evidence is from an emulator only: no physical phone and no Google Play install was tested. See the
+[threat model](docs/THREAT-MODEL.md#a-contacts-changed-identity-the-expiry-choices-and-the-swipe-gestures-065) and
+[verification](docs/VERIFICATION.md#release-065--a-changed-contact-identity-is-reviewed-three-expiry-choices-swipes).
+
 Release **0.6.3/code 44** fixes the red warning "Official admin identity changed, a revised app update
 is required" that accounts saw after the official admin signed in on a new phone: every app pinned the old
 phone's identity, so every app refused the new one, the owner's included. The new phone's identity is built

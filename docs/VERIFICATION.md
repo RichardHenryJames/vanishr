@@ -3,11 +3,11 @@
 Evidence refreshed on Windows, 2026-11-06 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
-## Release 0.6.5 candidate / A changed contact identity is reviewed, three expiry choices, swipes (unreleased, 2026-11-06)
+## Release 0.6.5 / A changed contact identity is reviewed, three expiry choices, swipes
 
-A client-only change: no relay change, no relay deployment, no Azure write, no APK or AAB built yet (the app is still
-0.6.4 / code 45 in `build.gradle`). Design and limits:
-[THREAT-MODEL.md](THREAT-MODEL.md#a-contacts-changed-identity-the-expiry-choices-and-the-swipe-gestures-065).
+Release 0.6.5 / code 46 is a client-only change: no relay change, no relay deployment, no Azure write. Design and limits:
+[THREAT-MODEL.md](THREAT-MODEL.md#a-contacts-changed-identity-the-expiry-choices-and-the-swipe-gestures-065). The build,
+stage, publication and public checks of the release are recorded at the end of this entry once they have been done.
 
 - **The report and its cause.** On the admin's phone, the owner met "Introduced identity changed; the saved identity was not
   replaced". The text is raised only by `AdminOnboarding.store`, for an ordinary saved contact whose introduced identity
