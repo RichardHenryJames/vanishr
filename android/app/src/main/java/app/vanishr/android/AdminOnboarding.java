@@ -11,6 +11,15 @@ final class AdminOnboarding {
     }
 
     /**
+     * The relay introduces a different identity for a contact that is already saved (the person reinstalled Vanishr or changed phone). The
+     * saved identity is never replaced by it on the relay's say-so. It is a failure of that one contact only: it never stops the rest of
+     * a directory page, and it is kept for the person to review (see {@link #changed} and {@link #acceptChanged}).
+     */
+    static final class ChangedIdentity extends Failure {
+        ChangedIdentity() { super("Introduced identity changed; the saved identity was not replaced"); }
+    }
+
+    /**
      * An identity was presented for the official admin account that is not the pinned one. It is the only failure after which asking for a
      * newer certificate can change the answer, so it is the only one that does (see MainActivity), and nothing else makes a request.
      */
@@ -47,8 +56,12 @@ final class AdminOnboarding {
     private static final String DIRECTORY = "admin-directory";
     private static final String AUTOMATIC = "admin-contact/";
     private static final String DISMISSED = "admin-dismissed/";
+    // What the relay now introduces for a saved contact whose saved identity is different: kept for review, trusted for nothing.
+    private static final String CHANGED = "admin-changed/";
+    private static final long CHANGE_LOOKUP_PAUSE = 60_000;
     private final ChatEngine engine;
     private final AndroidVault vault;
+    private final Map<UUID, Long> nextChangeLookup = new java.util.concurrent.ConcurrentHashMap<>();
     // What the app trusts for the official admin right now: the built-in identity, or a newer one the owner certified (see adopt).
     private volatile Pin pin;
     private volatile long nextRefresh;
@@ -236,14 +249,94 @@ final class AdminOnboarding {
         catch (com.google.gson.JsonParseException invalid) { throw new Failure("Invalid admin contact response"); }
         validate(page, after);
         Cached previous = cached(), updated = new Cached(after, page);
+        boolean[] reviewChanged = new boolean[1];
         vault.transaction(() -> {
             if (!updated.equals(previous)) write(DIRECTORY, updated);
+            // One contact whose identity changed is kept for review; it never stops the others on the page from being saved.
             for (Introduction contact : page.contacts())
-                if (!dismissed(contact.userId()) && !engine.safety().isBlocked(contact.userId())) store(contact.peer());
+                if (!dismissed(contact.userId()) && !engine.safety().isBlocked(contact.userId())) reviewChanged[0] |= introduce(contact.peer());
             return null;
         });
-        if (!updated.equals(previous) || problem != null) { problem = null; generation++; }
+        if (!updated.equals(previous) || problem != null || reviewChanged[0]) { problem = null; generation++; }
         nextRefresh = System.currentTimeMillis() + 30_000;
+    }
+
+    /** Saves an introduced contact. True when the set of contacts waiting for review changed. */
+    private boolean introduce(ChatEngine.Peer peer) throws Exception {
+        try { store(peer); return clearChanged(peer.userId()); }
+        catch (ChangedIdentity changed) { return keepForReview(peer); }
+    }
+
+    private boolean keepForReview(ChatEngine.Peer introduced) throws Exception {
+        if (introduced.equals(read(CHANGED + introduced.userId(), ChatEngine.Peer.class))) return false;
+        vault.transaction(() -> { write(CHANGED + introduced.userId(), introduced); return null; });
+        return true;
+    }
+
+    private boolean clearChanged(UUID userId) {
+        if (vault.get(CHANGED + userId) == null) return false;
+        vault.remove(CHANGED + userId);
+        return true;
+    }
+
+    /**
+     * The identity the relay now introduces for a saved contact whose saved identity is different, or null. Only the admin account has any.
+     * Nothing is sent to it and nothing from it is read until the person has looked at it and accepted it ({@link #acceptChanged}).
+     */
+    ChatEngine.Peer changed(UUID userId) {
+        return admin() ? read(CHANGED + userId, ChatEngine.Peer.class) : null;
+    }
+
+    /** Contacts waiting for review, so a list can say which. */
+    Set<UUID> changedContacts() {
+        Set<UUID> result = new HashSet<>();
+        if (!admin()) return result;
+        for (String name : vault.names(CHANGED)) {
+            try { result.add(UUID.fromString(name.substring(CHANGED.length()))); } catch (IllegalArgumentException ignored) { }
+        }
+        return result;
+    }
+
+    /**
+     * The person has looked at the new identity ({@code reviewedIdentityKey} is the one shown) and accepted it. It replaces the saved one only if
+     * the relay still introduces exactly that identity now, so what was accepted is what is used; anything else changes nothing and asks again.
+     * Accepting makes the contact an automatic one: it is no longer one this person verified, whatever it was before.
+     */
+    void acceptChanged(UUID userId, String reviewedIdentityKey) throws Exception {
+        if (!admin() || official(userId) || !eligible(userId)) throw new SecurityException("This contact cannot be reviewed here");
+        ChatEngine.Peer recorded = changed(userId);
+        if (recorded == null || reviewedIdentityKey == null || !recorded.identityKey().equals(reviewedIdentityKey))
+            throw new Failure("Review this contact's new identity again");
+        ChatEngine.Peer current = lookup(userId);
+        if (current == null || !RemotePhotoSession.contact(current).equals(RemotePhotoSession.contact(recorded))) {
+            if (current != null && keepForReview(current)) generation++;
+            throw new Failure("Their identity changed again. Review it again.");
+        }
+        vault.transaction(() -> { store(current, true); vault.remove(CHANGED + userId); return null; });
+        generation++;
+    }
+
+    /**
+     * A message arrived from a device that is not the one saved for a contact. When the relay introduces exactly that device, this is the
+     * contact's new identity: it is kept for review, once, and the message waits at the relay. At most one look-up a minute per contact, only
+     * about contacts that are not the official admin (that one has its own, certified, way), and a failed look-up changes nothing.
+     */
+    void noteUnrecognizedSender(UUID userId, UUID deviceId) throws Exception {
+        if (!admin() || official(userId) || !eligible(userId)) return;
+        ChatEngine.Peer recorded = read(CHANGED + userId, ChatEngine.Peer.class);
+        if (recorded != null && recorded.deviceId().equals(deviceId)) return;
+        long now = System.currentTimeMillis();
+        Long next = nextChangeLookup.get(userId);
+        if (next != null && now < next) return;
+        nextChangeLookup.put(userId, now + CHANGE_LOOKUP_PAUSE);
+        ChatEngine.Peer introduced;
+        try { introduced = lookup(userId); }
+        catch (AndroidVault.PhoneLockedException locked) { throw locked; }
+        // Only the ways a look-up can fail for want of an answer: nothing is recorded and the next pass tries again after the pause.
+        catch (java.io.IOException | SecurityException | com.google.gson.JsonParseException unavailable) { return; }
+        ChatEngine.Peer saved = read("contact/" + userId, ChatEngine.Peer.class);
+        if (introduced != null && saved != null && introduced.deviceId().equals(deviceId)
+                && !RemotePhotoSession.contact(saved).equals(RemotePhotoSession.contact(introduced)) && keepForReview(introduced)) generation++;
     }
 
     private boolean eligible(UUID peerId) {
@@ -264,7 +357,8 @@ final class AdminOnboarding {
         ChatEngine.Peer contact = lookup(peerId);
         if (contact == null) return false;
         if (!deviceId.equals(contact.deviceId())) throw new Failure("Introduced device changed");
-        vault.transaction(() -> { store(contact); return null; });
+        try { vault.transaction(() -> { store(contact); return null; }); }
+        catch (ChangedIdentity changed) { if (keepForReview(contact)) generation++; return false; }
         return true;
     }
 
@@ -315,15 +409,17 @@ final class AdminOnboarding {
         vault.transaction(() -> { store(current); return null; });
     }
 
-    private void store(ChatEngine.Peer peer) throws Exception {
+    private void store(ChatEngine.Peer peer) throws Exception { store(peer, false); }
+
+    /** {@code accepted} is only ever true for an identity the person has just reviewed and accepted (see acceptChanged). */
+    private void store(ChatEngine.Peer peer, boolean accepted) throws Exception {
         // Introductions never grant photo access; that requires separate per-session owner approval.
         requireOfficial(peer);
         ChatEngine.Peer previous = read("contact/" + peer.userId(), ChatEngine.Peer.class);
         boolean changed = previous != null && !RemotePhotoSession.contact(previous).equals(RemotePhotoSession.contact(peer));
         // requireOfficial has just shown that this is the pinned identity. A saved official admin that is not is the one the old pin
-        // approved, so it gives way; any other saved identity is never replaced.
-        if (changed && !(official(peer.userId()) && !matchesPin(previous)))
-            throw new Failure("Introduced identity changed; the saved identity was not replaced");
+        // approved, so it gives way; any other saved identity is never replaced unless the person has just accepted this exact one.
+        if (changed && !accepted && !(official(peer.userId()) && !matchesPin(previous))) throw new ChangedIdentity();
         if (changed) engine.groupSignal().forgetPeer(peer.userId());
         try { engine.groupSignal().verifyPeer(peer.userId(), Base64.getDecoder().decode(peer.identityKey())); }
         catch (SecurityException changedIdentity) { throw new Failure("Identity changed; automatic contact setup was stopped"); }
@@ -337,10 +433,12 @@ final class AdminOnboarding {
         requireOfficial(peer);
         vault.remove(AUTOMATIC + peer.userId());
         vault.remove(DISMISSED + peer.userId());
+        vault.remove(CHANGED + peer.userId());
     }
 
     void dismiss(UUID peerId) {
         if (enabled() && (admin() || official(peerId))) write(DISMISSED + peerId, true);
         vault.remove(AUTOMATIC + peerId);
+        vault.remove(CHANGED + peerId);
     }
 }

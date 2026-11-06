@@ -375,6 +375,81 @@ Not demonstrated: any physical phone, a Google Play install, a real relay presen
 changed admin, a phone change made with this tooling end to end, and the behavior of phones older than 0.6.3, which
 keep refusing the admin until they update.
 
+## A contact's changed identity, the expiry choices and the swipe gestures (0.6.5)
+
+**The error the owner met.** "Introduced identity changed; the saved identity was not replaced" is raised on the admin's
+phone when the relay introduces, for an ordinary contact the phone has already saved, an identity that is not the saved
+one. The usual cause is that person reinstalling Vanishr or changing phone: a new install makes a new identity key. The
+refusal is the pin doing its job: a saved identity is never replaced because the relay says so, which is exactly how a
+compromised relay would swap in a key of its own. What was wrong was how far it reached. The directory page was saved in
+one encrypted transaction, so one such contact rolled the whole page back, the list showed a red line across it and the
+status "Identity verification required", the other new accounts on that page were not introduced, and a message from that
+person was skipped with no way to see why or to move on.
+
+- **Per contact, not per page.** `AdminOnboarding.load` now saves each introduced contact on its own inside the page
+  transaction. A contact whose introduced identity differs from the saved one is **not replaced**: the identity the relay
+  now introduces is written to a review record (`admin-changed/<id>`) and the rest of the page is saved as before. There
+  is no directory-wide error for it. The record is cleared when the relay introduces the saved identity again, when the
+  contact is removed, and when it is accepted.
+- **Nothing reaches the new identity until the person accepts it.** The contact's row says "Identity changed. Tap to
+  review" and opens a dialog instead of the chat. The dialog shows the new identity's safety number (the number under
+  Profile > Verify identity on that person's phone) with Accept, Remove contact and Not now. Nothing is sent to the new
+  identity and nothing from it is read: its messages stay at the relay, unconsumed and under their own deadlines, and the
+  chat is not opened. For a contact the person had verified by hand, the dialog says that accepting makes it an
+  automatic contact, not a verified one: the earlier verification was of an identity that is gone.
+- **Accepting is bound to what was shown.** `AdminOnboarding.acceptChanged(userId, shownIdentityKey)` requires that key to
+  be the recorded one, asks the relay again and requires it to introduce exactly the recorded device and identity (if it
+  does not, it records the newer one and refuses: "Their identity changed again. Review it again."), and then, in one
+  encrypted transaction, deletes the old Signal sessions, pins the new identity, saves the contact as automatic and
+  removes the review record. It is the only path through `store` that may replace an ordinary contact's identity. Only the
+  admin's phone has introductions, so on every other phone the review is empty and `acceptChanged` throws; the official
+  admin keeps its own pin and certificate path (see [the admin changes phone](#the-admin-changes-phone-063)); blocked,
+  dismissed and removed contacts cannot be accepted.
+- **Accepting is trust in the relay unless the person compares.** The relay already chooses what to introduce for an
+  account, so someone who accepts without comparing trusts it as much as they did when that contact was first introduced.
+  The dialog says to compare the number with the one on the contact's own phone. Accepting was deliberately **not**
+  made automatic: that would make the pin meaningless and let a compromised relay substitute a contact's key unnoticed.
+- **Finding a change.** The directory refreshes only its newest 64 contacts, so an older contact's reinstall is found when
+  its message arrives from a device other than the saved one. `ChatEngine.receive` then calls
+  `AdminOnboarding.noteUnrecognizedSender`, which (admin's phone only, eligible ordinary contacts only) asks the relay about
+  that one account at most once a minute per contact (the relay's own limit of 30 a minute also applies) and records the
+  change only if the relay introduces exactly the sending device. A look-up that fails records nothing and is tried again
+  after the pause; a device the relay does not introduce for that contact is not recorded and is skipped as before.
+- **Unchanged.** A different identity for a saved ordinary contact is never silently replaced, on any phone; the official
+  admin's identity, blocks and dismissals, and groups behave as before.
+
+**Expiry choices.** The composer now offers View once, 12 hours and 24 hours (one hour and six hours are no longer
+offered, and the default is 12 hours). The relay's expiry kinds did not change, because an app that does not know a kind
+throws when it meets one and its sync loop has no per-message guard, so one unknown value would stop that app's whole
+sync pass. A 12-hour message therefore **travels as the 24-hour kind with a deadline 12 hours after it was sent**
+(`ChatEnvelope.Expiry.wire`): the relay accepts any deadline up to the kind's lifetime and keeps the message for exactly
+that long (its Redis keys expire at the deadline), `ChatEnvelope.verify` checks the same fields as always, and the
+receiving 0.6.5 app shows "12 hours" when the 24-hour kind arrives with exactly a 12-hour life
+(`ChatEnvelope.Expiry.received`). The sender's own copy keeps its choice. Nothing about who can read a message or for how
+long is weaker: the deadline is the field it always was, inside the signed envelope and enforced at the relay and on both
+phones. **What an older app does with a 12-hour message:** it shows it as "24 hours", works the send time out from the
+deadline (so it shows 12 hours earlier than it was sent, and sorts that far back), and still expires it on time. Received
+one-hour and six-hour messages from older apps are still accepted, and the one-hour control messages (reactions, edits,
+deletes) are unchanged.
+
+**Gestures and the header.** None of these carry data or add a permission. Swiping a message to the right starts a reply
+(1:1 chats only, as the Reply action is); swiping a chat in the list to the left asks "Remove contact?" with the same
+confirmation as pressing and holding, so nothing is erased by the swipe itself. A sideways drag the wrong way is swallowed,
+so it cannot open a view-once or photo message it started on, open a chat or end as a long press. Pressing and holding, and
+the menu actions, still work. Tapping the contact's name or picture in a chat header opens their profile (a group's, its
+info). The line under the composer that said "Account enrolled" is gone; the same trust information is a shield after the
+name in the header ("verified" for a contact the person verified, "official admin") and a line in the contact profile
+("Verified by you", "Official admin", "Account enrolled, not verified by you").
+
+**Verified, and not.** Engine, screen and gesture behavior has emulator tests (synthetic accounts, a relay stand-in), the
+12-hour mapping has JVM tests and relay tests (a 12-hour deadline under the 24-hour kind is accepted and kept for 12 hours,
+a longer one is refused), and mutations of the identity rules, the expiry mapping and the gesture rules were each caught
+(see [VERIFICATION.md](VERIFICATION.md)). Not demonstrated: any physical phone, a Google Play install, a real relay
+presenting a changed identity for a real reinstalled contact, an older app receiving a 12-hour message (reasoned from the
+unchanged verification code, not run), or the feel of the swipes with a real finger (they were driven by an injected touch
+and drag on an emulator). The refusal to accept a blocked or removed contact rests on the existing eligibility check and has
+no test of its own.
+
 ## Account erasure, blocks and safety reports
 
 Account erasure requires a fresh account-only password/Google sign-in, never a

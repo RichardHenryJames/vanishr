@@ -457,12 +457,12 @@ final class GroupChat {
         long deadline=Math.addExact(createdAt,expiry.milliseconds);
         UUID mediaId=image==null ? null : UUID.randomUUID();
         ImageCipher.EncryptedImage encrypted=image==null ? null : ImageCipher.encrypt(mediaId,image);
-        ChatEnvelope content=new ChatEnvelope(1,id,user(),engine.account().deviceId(),groupId,current.epoch(),createdAt,deadline,expiry,text,
+        ChatEnvelope content=new ChatEnvelope(1,id,user(),engine.account().deviceId(),groupId,current.epoch(),createdAt,deadline,expiry.wire(),text,
                 encrypted==null ? null : new ChatEnvelope.Attachment(mediaId,encrypted.key(),encrypted.nonce(),"image/jpeg"));
         GroupEnvelope envelope=new GroupEnvelope(1,groupId,current.epoch(),current.revision(),content);
         ChatEngine.Entry entry=new ChatEngine.Entry(id,groupId,deadline,expiry,true,image!=null,"PENDING",user(),current.epoch(),current.revision(),user());
         try {
-            envelope.verify(groupId,current.epoch(),current.revision(),id,user(),engine.account().deviceId(),expiry,deadline,mediaId,Instant.now());
+            envelope.verify(groupId,current.epoch(),current.revision(),id,user(),engine.account().deviceId(),expiry.wire(),deadline,mediaId,Instant.now());
             vault.transaction(() -> {
                 engine.safety().requireNotDeleting();
                 SignalGroup cipher=cipher(groupId,current.epoch());
@@ -470,7 +470,7 @@ final class GroupChat {
                 byte[] plaintext=JSON.toJson(envelope).getBytes(StandardCharsets.UTF_8);
                 byte[] ciphertext;
                 try { ciphertext=cipher.encrypt(plaintext); } finally { Arrays.fill(plaintext,(byte)0); }
-                write("group-out/"+id,new Outbox(groupId,new Send(id,current.epoch(),current.revision(),expiry,deadline,ciphertext,mediaId,encrypted==null ? null : encrypted.ciphertext())));
+                write("group-out/"+id,new Outbox(groupId,new Send(id,current.epoch(),current.revision(),expiry.wire(),deadline,ciphertext,mediaId,encrypted==null ? null : encrypted.ciphertext())));
                 engine.storeContent(entry,new ChatEngine.Content(content,image)); write("entry/"+id,entry);
                 return null;
             });
@@ -541,7 +541,8 @@ final class GroupChat {
                         return null;
                     }
                     byte[] image=imageCiphertext==null ? null : ImageCipher.decrypt(message.mediaId(),imageCiphertext,envelope.content().image().key(),envelope.content().image().nonce());
-                    ChatEngine.Entry entry=new ChatEngine.Entry(message.id(),message.groupId(),message.expiresAt(),message.expiry(),false,image!=null,"DELIVERED",user(),message.epoch(),message.revision(),sender.userId());
+                    ChatEngine.Entry entry=new ChatEngine.Entry(message.id(),message.groupId(),message.expiresAt(),
+                            ChatEnvelope.Expiry.received(message.expiry(),envelope.content().sentAt(),envelope.content().expiresAt()),false,image!=null,"DELIVERED",user(),message.epoch(),message.revision(),sender.userId());
                     try { engine.storeContent(entry,new ChatEngine.Content(envelope.content(),image)); } finally { if (image!=null) Arrays.fill(image,(byte)0); }
                     write("entry/"+entry.id(),entry); acknowledge(entry,"delivered");
                     vault.put("seen/"+entry.id(),Long.toString(entry.expiresAt()).getBytes(StandardCharsets.US_ASCII));

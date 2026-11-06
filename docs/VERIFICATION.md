@@ -1,7 +1,102 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-11-05 UTC. This is a development foundation,
+Evidence refreshed on Windows, 2026-11-06 UTC. This is a development foundation,
 not a production security assessment or independent audit.
+
+## Release 0.6.5 candidate / A changed contact identity is reviewed, three expiry choices, swipes (unreleased, 2026-11-06)
+
+A client-only change: no relay change, no relay deployment, no Azure write, no APK or AAB built yet (the app is still
+0.6.4 / code 45 in `build.gradle`). Design and limits:
+[THREAT-MODEL.md](THREAT-MODEL.md#a-contacts-changed-identity-the-expiry-choices-and-the-swipe-gestures-065).
+
+- **The report and its cause.** On the admin's phone, the owner met "Introduced identity changed; the saved identity was not
+  replaced". The text is raised only by `AdminOnboarding.store`, for an ordinary saved contact whose introduced identity
+  differs from the saved one (a person who reinstalled or changed phone), and only on the admin's phone. Before this change
+  `load()` saved a whole directory page in one transaction, so that one contact rolled the page back, set a page-wide error
+  ("Identity verification required", a red line on the list), kept the other new accounts from being introduced and skipped
+  the person's messages. This is a diagnosis from the code, reproduced with a fixture (a saved contact, then the relay
+  introducing another identity for it next to a brand-new account); the owner's phone and data were not inspected, so which
+  contact changed identity there is not known.
+- **Changed.** `AdminOnboarding` (per-contact `introduce`, review records, `changed`, `changedContacts`, `acceptChanged`,
+  `noteUnrecognizedSender`, `store(peer, accepted)`), `ChatEngine` (the look-up call in the skip branch of `receive`, the 12-hour
+  mapping on send and receive), `GroupChat` (the same mapping), `ChatEnvelope` (`HOURS_12`, `wire()`, `received()`),
+  `MainActivity` (three expiry choices, the chip inside the message field, shield and tappable header, reply swipe, list-row swipe
+  and the review dialog), the new `HorizontalSwipe`, and the `ic_reply` icon.
+- **Emulator tests (18 new, all passing on the final build).** Identity (8): a changed contact is kept for review and neither
+  stops the other accounts on the page nor raises a directory-wide error, and the Signal store still pins the old identity;
+  accepting needs the identity that was shown and the relay still introducing it, and replaces the saved identity only then
+  (the contact becomes automatic, not verified); a message from a new device of a saved contact is found with one look-up and
+  stays at the relay; a sender the relay does not introduce is not offered and is asked about once a minute, not on every
+  sync; a device other than the one the relay introduces is not offered; the review is dropped when the relay introduces the
+  saved identity again; removing a contact clears its review and it stays removed; a phone that is not the admin has no
+  reviews and cannot accept one, even for a record written by hand. Expiry (3): a 12-hour message goes to the relay as the
+  24-hour kind with a 12-hour deadline and keeps its choice on the phone (every other choice goes as itself); a received
+  24-hour message with exactly a 12-hour life shows as 12 hours and every older kind still arrives as itself; the same for a
+  group message. Screens and gestures (7): the list marks a contact waiting for review, opens its review instead of the chat
+  and accepting makes the chat openable; the reply swipe (short pull, wrong way and vertical drag do nothing; held, the
+  message follows the finger; a real swipe starts the reply; a photo replies without opening; a slow wrong-way drag across
+  a photo does not open it or end as a long press; the long press still works); the list swipe (short, wrong-way and
+  vertical do nothing, a wrong-way drag does not open the chat, held it shows the strip, a real pull asks "Remove
+  contact?" naming the person, cancelling keeps them, confirming removes them); the header name and picture open the
+  profile; the composer has only the chip inside the field and three choices; a 12-hour message is labelled with its real
+  sending time; the reply arrow is drawn behind a held message and nothing is drawn there at rest.
+  **Six existing tests were changed**: four because the words under the chat gave way to the shield (three header checks
+  and the expiry dialog, now three choices) and two because a changed ordinary contact no longer makes the directory call
+  throw (`adminOnboardingAcceptsAnEnrolledFirstMessage…` now asserts that the message does not accept it, that it waits for
+  review and that the old identity is still the one pinned; `aContactThatIsNotTheOfficialAdminIsNeverReplacedByAPinChange`
+  asserts the same through a pin change). The rule they protect (a saved identity is never silently replaced) is unchanged.
+- **JVM and relay tests.** `ChatEnvelopeTest` has 3 new tests (the mapping, the boundaries of `received`, and that a
+  12-hour message sent as the 24-hour kind passes the checks an earlier app makes). The relay has 2 new tests, with no relay
+  code changed: a deadline sooner than the kind allows is accepted and no shorter kind could carry 12 hours
+  (`RelayPolicyTest`), and a 12-hour deadline under the 24-hour kind is kept in Redis for 12 hours (`m:` and `r:` keys) while a
+  longer one is refused with 400 (`RelayIntegrationTest`).
+- **Mutation checks: 17 mutations, all caught, each by a test that names it.** Identity rules (10): silent replacement in
+  `store` (5 tests fail, including both changed ones); no look-up pause, no "the writing device must be the introduced one",
+  and the review readable on a non-admin phone (three at once, each caught by its own test); accepting without the identity
+  that was shown, removal not clearing the review, and a re-introduced saved identity not clearing it (three at once); accepting
+  whatever the relay introduces at tap time, and `acceptIncoming` throwing again (two at once); and `introduce` rethrowing,
+  which brings back exactly the message the owner reported. Expiry (3): `wire()` not mapping and `received()` not mapping
+  (3 of 13 JVM tests and all 3 engine tests fail), and the boundary `<=` for `==` (JVM). Gestures (4): the direction flipped,
+  the sideways-ratio check removed, the trigger distance removed, and the wrong-way swallow removed. Each mutated file was
+  restored and checked byte for byte against its SHA-256 afterwards. **Four of these were first missed, or caught only by an
+  accident of ordering, which showed gaps in my own tests that were then closed:** removing the look-up pause survived (the
+  "already recorded" early return hid it), dropping the introduced-device check survived (the relay introduced the saved
+  identity, so nothing differed), removing the sideways-ratio check survived (the vertical drag was shorter than the
+  trigger), and the wrong-way check for a photo ran before the photo (decrypted off the main thread) could open, so it was
+  caught only through a later side effect; the list test could not tell that a chat had opened. The claim that a
+  re-introduced saved identity clears the review had no test until the same pass.
+- **Problems found while building and checking, and fixed.** (1) The first emulator run of the engine tests exposed review
+  records written outside a vault transaction (an `IllegalStateException` that a broad catch in the new look-up swallowed, so
+  nothing was ever recorded); writes are transactional now and only the expected failures of a look-up (I/O, security, parse)
+  are absorbed. (2) The 12-hour mapping follows from reading how the sync loop treats an unknown kind: it has no
+  per-message guard, so a fifth wire value would have stopped an older app's whole sync. (3) A slow rightward drag on a list row
+  ended as a long press and opened "Remove contact?", and a sideways drag across a photo opened it (shown by the mutation that
+  removes the fix; a view-once message has the same tap handler but was not tried): a clearly sideways drag the wrong way is
+  now swallowed. (4) In the screenshots the verified shield sat far from the name, next to the menu button (the name was as
+  wide as its column), the reply arrow was missing (a layout that draws nothing leaves its overlay out of a software capture;
+  the app blocks real screenshots, so what a device showed before was not observed; the layout now draws its own overlay with
+  `setWillNotDraw(false)` and a test counts the pixels of a software draw), and the "R" of "Remove" was clipped.
+- **Screens looked at** (emulator, 1080 x 2400): the composer with the chip inside the field, the header with the shield,
+  the held reply arrow, the held remove strip, the list with "Identity changed. Tap to review" (and no page-wide error), the
+  review dialog with the new safety number, and the two profile lines.
+- **The full emulator suite on the final code: 296 tests, 1 failure, 2 skipped.** The failure is
+  `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`, a UiAutomator wait for a pop-up menu entry that fails the same
+  way on the 0.6.3 commit (bisected earlier) and is not touched by this work. The two skips are tests that need a device
+  with no screen lock and an explicit opt-in for the live relay. (The same suite before the two older tests were updated:
+  294 tests, 3 failures.) Two source files gained a lint annotation after that run and the 20 tests of this release were
+  run again on the final build.
+- **The gate.** `verify.ps1 -Android` passed: client-core **32** tests (was 29); relay **113** tests, 0 failures, 2 skipped
+  (the opt-in live-relay tests; was 111), with `RelayIntegrationTest` at 96 and `RelayPolicyTest` at 3; the relay artifact
+  still holds no client-only crypto dependency; the app's unit tests, debug build, the debug instrumentation APK and the
+  PowerShell suites. **Lint: 0 errors, 19 warnings, the same as before** (two `ClickableViewAccessibility` warnings from the
+  new touch listeners were silenced with an annotation and a reason: a swipe is not a click, and the same actions are
+  offered to screen readers as accessibility actions).
+- **Not verified.** Any physical phone, the feel of the swipes under a real finger (they were driven by injected touches and
+  `UiDevice` drags), a Google Play install, a real relay presenting a changed identity for a real reinstalled contact, and an
+  older app receiving a 12-hour message (reasoned from the unchanged `ChatEnvelope.verify`, not run). An older app shows such a
+  message as "24 hours", sent 12 hours earlier than it was, until it updates. The refusal to accept a blocked or removed
+  contact rests on the existing eligibility check and has no test of its own. The review of a changed identity exists only on the
+  admin's phone; an ordinary user whose own contact reinstalls is not changed by this release.
 
 ## Several devices per account (relay only, unreleased, not deployed, 2026-11-05)
 

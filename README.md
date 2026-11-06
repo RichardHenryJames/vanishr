@@ -374,9 +374,15 @@ no Azure resources or paid add-ons were changed for this website.
 - Username contact lookup followed by independent safety-number verification.
 - Official Signal libsignal sessions with mandatory independent peer verification.
 - Text and encrypted image messages; per-image keys remain inside Signal envelopes.
-- View once, one hour, six hours or 24 hours; delivery/read status and hard Redis TTLs.
+- View once, 12 hours or 24 hours (a 12-hour message travels as the 24-hour kind with an earlier deadline); delivery/read
+  status and hard Redis TTLs.
 - Reply-with-quote, a fixed six-emoji reaction and delete-for-everyone (no placeholder left behind) for a
-  1:1 message, and edit for a sent 1:1 text message; none of these apply to group messages.
+  1:1 message, and edit for a sent 1:1 text message; none of these apply to group messages. Swipe a message to the
+  right to reply; swipe a chat in the list to the left to remove the contact (it asks first); tap a contact's name or
+  picture in a chat to open their profile.
+- On the admin's phone, a contact that reinstalls Vanishr or changes phone is kept for review ("Identity changed. Tap to
+  review") instead of failing the whole contact list; the new identity is used only after its safety number is shown and
+  accepted.
 - Foreground HTTPS polling / WSS, bounded offline ciphertext queues, optional generic FCM.
 - Phone-unlocked Android Keystore vault without a separate app lock, per-message content keys, screenshot flags,
   no-backup storage and background expiry cleanup.
@@ -453,7 +459,7 @@ and do not replace independent verification.
 Add a contact by username, then compare their safety number with their
 Profile > Verify identity over an independent trusted channel. Lookup alone
 does not establish trust. The app rechecks the identity before pinning it.
-The input expiry selector controls the next message. Opening view-once content
+The input expiry selector (inside the message field: View once, 12 hours or 24 hours) controls the next message. Opening view-once content
 consumes its local content key before display. Long-press removes local/relay
 content; it cannot erase content already retained by the other device.
 

@@ -16,9 +16,22 @@ public record ChatEnvelope(int version, UUID id, UUID senderId, UUID senderDevic
     }
 
     public enum Expiry {
-        VIEW_ONCE(24), HOUR_1(1), HOURS_6(6), HOURS_24(24);
+        VIEW_ONCE(24), HOUR_1(1), HOURS_6(6), HOURS_12(12), HOURS_24(24);
         public final long milliseconds;
         Expiry(int hours) { milliseconds = hours * 3_600_000L; }
+
+        /**
+         * What goes to the relay and into the encrypted envelope. {@link #HOURS_12} is a choice made on this phone only: the relay and
+         * every earlier app know the other four values, and one that meets a fifth cannot read the message at all (and its whole sync
+         * stops at it), so a twelve-hour message travels as a 24-hour one whose deadline is simply earlier. Both still accept that:
+         * a deadline may be sooner than the class allows, never later.
+         */
+        public Expiry wire() { return this == HOURS_12 ? HOURS_24 : this; }
+
+        /** The choice a received message stands for: a 24-hour message that was sent with a twelve-hour life is a twelve-hour one. */
+        public static Expiry received(Expiry wire, long sentAt, long expiresAt) {
+            return wire == HOURS_24 && expiresAt - sentAt == HOURS_12.milliseconds ? HOURS_12 : wire;
+        }
     }
 
     public record Attachment(UUID id, byte[] key, byte[] nonce, String mimeType) { }

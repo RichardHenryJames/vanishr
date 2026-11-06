@@ -1,6 +1,7 @@
 package app.vanishr.relay;
 
 import org.junit.jupiter.api.Test;
+import java.time.Duration;
 import java.time.Instant;
 import static app.vanishr.relay.RelayTypes.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -14,6 +15,14 @@ class RelayPolicyTest {
             assertThrows(ApiException.class, () -> RelayPolicy.deadline(expiry, now.toEpochMilli(), now));
             assertThrows(ApiException.class, () -> RelayPolicy.deadline(expiry, now.plus(expiry.lifetime).plusMillis(1).toEpochMilli(), now));
         }
+    }
+
+    @Test void aDeadlineEarlierThanTheKindAllowsIsAcceptedWhichIsHowTwelveHoursTravels() {
+        long twelveHours = Duration.ofHours(12).toMillis();
+        assertDoesNotThrow(() -> RelayPolicy.deadline(Expiry.HOURS_24, now.toEpochMilli() + twelveHours, now));
+        // No shorter kind can carry it, so the app sends it as the 24-hour kind with the earlier deadline.
+        assertThrows(ApiException.class, () -> RelayPolicy.deadline(Expiry.HOURS_6, now.toEpochMilli() + twelveHours, now));
+        assertThrows(ApiException.class, () -> RelayPolicy.deadline(Expiry.HOUR_1, now.toEpochMilli() + twelveHours, now));
     }
 
     @Test void rejectsRedisPersistenceAndReplication() {

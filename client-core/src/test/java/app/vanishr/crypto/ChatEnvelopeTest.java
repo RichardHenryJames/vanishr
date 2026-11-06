@@ -111,4 +111,37 @@ class ChatEnvelopeTest {
         assertThrows(SecurityException.class, () -> envelope.verify(id, sender, senderDevice, recipient, recipientDevice,
             ChatEnvelope.Expiry.HOUR_1, deadline, null, now.plusSeconds(3600)));
     }
+
+    @Test void aTwelveHourChoiceTravelsAsA24HourMessageAndEveryOtherChoiceTravelsAsItself() {
+        assertEquals(ChatEnvelope.Expiry.HOURS_24, ChatEnvelope.Expiry.HOURS_12.wire());
+        for (ChatEnvelope.Expiry other : ChatEnvelope.Expiry.values())
+            if (other != ChatEnvelope.Expiry.HOURS_12) assertEquals(other, other.wire());
+        // The four values every earlier app and the relay know are still all there, under the names they use.
+        for (String name : new String[]{"VIEW_ONCE", "HOUR_1", "HOURS_6", "HOURS_24"}) assertDoesNotThrow(() -> ChatEnvelope.Expiry.valueOf(name));
+        assertEquals(12 * 3_600_000L, ChatEnvelope.Expiry.HOURS_12.milliseconds);
+    }
+
+    @Test void aReceivedMessageIsATwelveHourOneOnlyWhenItIsA24HourMessageWithExactlyATwelveHourLife() {
+        long sent = now.toEpochMilli(), twelve = ChatEnvelope.Expiry.HOURS_12.milliseconds;
+        assertEquals(ChatEnvelope.Expiry.HOURS_12, ChatEnvelope.Expiry.received(ChatEnvelope.Expiry.HOURS_24, sent, sent + twelve));
+        assertEquals(ChatEnvelope.Expiry.HOURS_24, ChatEnvelope.Expiry.received(ChatEnvelope.Expiry.HOURS_24, sent, sent + 24 * 3_600_000L));
+        assertEquals(ChatEnvelope.Expiry.HOURS_24, ChatEnvelope.Expiry.received(ChatEnvelope.Expiry.HOURS_24, sent, sent + twelve - 1));
+        assertEquals(ChatEnvelope.Expiry.HOURS_24, ChatEnvelope.Expiry.received(ChatEnvelope.Expiry.HOURS_24, sent, sent + twelve + 1));
+        // Another class with a twelve-hour life is not a twelve-hour message (view-once keeps its own rules).
+        assertEquals(ChatEnvelope.Expiry.VIEW_ONCE, ChatEnvelope.Expiry.received(ChatEnvelope.Expiry.VIEW_ONCE, sent, sent + twelve));
+        assertEquals(ChatEnvelope.Expiry.HOURS_6, ChatEnvelope.Expiry.received(ChatEnvelope.Expiry.HOURS_6, sent, sent + twelve));
+    }
+
+    @Test void aTwelveHourMessageSentAsA24HourOneStillPassesTheSameChecksAnEarlierAppMakes() {
+        long sent = now.toEpochMilli(), life = ChatEnvelope.Expiry.HOURS_12.milliseconds, end = sent + life;
+        ChatEnvelope envelope = new ChatEnvelope(1, id, sender, senderDevice, recipient, recipientDevice, sent, end,
+            ChatEnvelope.Expiry.HOURS_12.wire(), "hello", null);
+        assertDoesNotThrow(() -> envelope.verify(id, sender, senderDevice, recipient, recipientDevice,
+            ChatEnvelope.Expiry.HOURS_24, end, null, now));
+        // The deadline may be sooner than the class allows but never later.
+        ChatEnvelope tooLong = new ChatEnvelope(1, id, sender, senderDevice, recipient, recipientDevice, sent, sent + 25 * 3_600_000L,
+            ChatEnvelope.Expiry.HOURS_24, "hello", null);
+        assertThrows(SecurityException.class, () -> tooLong.verify(id, sender, senderDevice, recipient, recipientDevice,
+            ChatEnvelope.Expiry.HOURS_24, sent + 25 * 3_600_000L, null, now));
+    }
 }

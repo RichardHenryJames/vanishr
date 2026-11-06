@@ -622,8 +622,8 @@ final class ChatEngine implements AutoCloseable {
         ImageCipher.EncryptedImage encryptedImage = image == null ? null : ImageCipher.encrypt(mediaId, image);
         ChatEnvelope.Attachment attachment = encryptedImage == null ? null : new ChatEnvelope.Attachment(mediaId, encryptedImage.key(), encryptedImage.nonce(), "image/jpeg");
         ChatEnvelope envelope = new ChatEnvelope(1, id, account.userId(), account.deviceId(), peer.userId(), peer.deviceId(),
-            createdAt, expiresAt, expiry, image == null ? text : null, attachment, null, reference, null);
-        envelope.verify(id, account.userId(), account.deviceId(), peer.userId(), peer.deviceId(), expiry, expiresAt, mediaId, now);
+            createdAt, expiresAt, expiry.wire(), image == null ? text : null, attachment, null, reference, null);
+        envelope.verify(id, account.userId(), account.deviceId(), peer.userId(), peer.deviceId(), expiry.wire(), expiresAt, mediaId, now);
         Entry entry = new Entry(id, peer.userId(), expiresAt, expiry, true, image != null, "PENDING", account.userId());
         try {
             // Only once the send is certain to be stored, so a send that fails earlier never costs anyone an old message.
@@ -631,7 +631,7 @@ final class ChatEngine implements AutoCloseable {
             vault.transaction(() -> {
                 safety.requireAllowed(peer.userId());
                 SignalClient.Packet encrypted = signal.encrypt(peer.userId(), bytes(envelope), now);
-                Send request = new Send(id, peer.userId(), peer.deviceId(), expiry, expiresAt, encrypted.type(), encrypted.ciphertext(), mediaId);
+                Send request = new Send(id, peer.userId(), peer.deviceId(), expiry.wire(), expiresAt, encrypted.type(), encrypted.ciphertext(), mediaId);
                 write("outbox/" + id, new Outbox(request, encryptedImage == null ? null : encryptedImage.ciphertext()));
                 write("entry/" + id, entry);
                 storeContent(entry, new Content(envelope, image));
@@ -1061,7 +1061,11 @@ final class ChatEngine implements AutoCloseable {
             onboarding.acceptIncoming(message.senderId(), message.senderDeviceId());
         onboarding.requireSaved(message.senderId());
         Peer sender = read("contact/" + message.senderId(), Peer.class);
-        if (!signal.isVerified(message.senderId()) || sender == null || !sender.deviceId().equals(message.senderDeviceId())) { unverifiedIncoming = true; return; }
+        if (!signal.isVerified(message.senderId()) || sender == null || !sender.deviceId().equals(message.senderDeviceId())) {
+            // A saved contact writing from a device other than the saved one is usually a reinstall or a new phone: keep it for review.
+            if (sender != null) onboarding.noteUnrecognizedSender(message.senderId(), message.senderDeviceId());
+            unverifiedIncoming = true; return;
+        }
         if (vault.get("seen/" + message.id()) != null) return;
         if (!makeRoom(0)) return;
         byte[] imageCiphertext = message.mediaId() == null ? null : api.download(message.mediaId());
@@ -1077,7 +1081,8 @@ final class ChatEngine implements AutoCloseable {
                     if (envelope.kind() != null) { receiveControl(message, envelope); return null; }
                     byte[] image = imageCiphertext == null ? null : ImageCipher.decrypt(message.mediaId(), imageCiphertext,
                             envelope.image().key(), envelope.image().nonce());
-                    Entry entry = new Entry(message.id(), message.senderId(), message.expiresAt(), message.expiry(), false, image != null, "DELIVERED", account.userId());
+                    Entry entry = new Entry(message.id(), message.senderId(), message.expiresAt(),
+                            ChatEnvelope.Expiry.received(message.expiry(), envelope.sentAt(), envelope.expiresAt()), false, image != null, "DELIVERED", account.userId());
                     try { storeContent(entry, new Content(envelope, image)); }
                     finally { if (image != null) Arrays.fill(image, (byte) 0); }
                     write("entry/" + message.id(), entry);

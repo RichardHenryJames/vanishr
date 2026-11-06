@@ -132,7 +132,10 @@ public final class MainActivity extends AppCompatActivity {
         NotificationOpen(String reference, long deadline) { this.reference = reference; this.deadline = deadline; }
     }
     private UUID composerPeer;
-    private ChatEnvelope.Expiry expiry = ChatEnvelope.Expiry.HOUR_1;
+    // What a message can be told to live for. 1 and 6 hours still exist on the wire (older apps send them, and a reaction, edit or delete
+    // is carried as a one-hour message), but are no longer offered.
+    private static final ChatEnvelope.Expiry[] EXPIRY_CHOICES = {ChatEnvelope.Expiry.VIEW_ONCE, ChatEnvelope.Expiry.HOURS_12, ChatEnvelope.Expiry.HOURS_24};
+    private ChatEnvelope.Expiry expiry = ChatEnvelope.Expiry.HOURS_12;
     private SecureSheet openDialog;
     private Bitmap displayedBitmap;
     private PhotoViewer photoViewer;
@@ -1251,6 +1254,7 @@ public final class MainActivity extends AppCompatActivity {
             row.setOnLongClickListener(view -> { groupInfo(group.id()); return true; });
             addChatRow(row);
         }
+        java.util.Set<UUID> reviewing = engine.onboarding().changedContacts();
         for (ChatEngine.Peer peer : peers) {
             if (!peer.name().toLowerCase(Locale.ROOT).contains(filter) && !peer.username().contains(filter)
                     && (peer.profileName() == null || !peer.profileName().toLowerCase(Locale.ROOT).contains(filter))) {
@@ -1265,12 +1269,16 @@ public final class MainActivity extends AppCompatActivity {
             row.addView(profileAvatar(peer.userId(), peer.name(), 46, design.avatarColor(peer.userId())));
             LinearLayout identity = vertical(); identity.setPadding(dp(12), 0, dp(8), 0);
             TextView title=design.text(peer.name(),14,700,INK); title.setSingleLine(true); title.setEllipsize(android.text.TextUtils.TruncateAt.END); identity.addView(title);
+            if (reviewing.contains(peer.userId())) {
+                TextView review = design.text("Identity changed. Tap to review", 11, 600, Ui.ERROR);
+                review.setSingleLine(true); review.setEllipsize(android.text.TextUtils.TruncateAt.END); review.setPadding(0, dp(3), 0, 0); identity.addView(review);
+            }
             row.addView(identity, new LinearLayout.LayoutParams(0, -2, 1));
             row.addView(unreadBadge(peer.userId(),unread));
             row.addView(design.symbol(R.drawable.ic_chevron_right, 16, MUTED));
             row.setOnClickListener(view -> openContact(peer));
             row.setOnLongClickListener(view -> { forgetDialog(peer); return true; });
-            addChatRow(row);
+            addChatRow(swipeToRemove(row, peer));
         }
         if (engine.onboarding().admin()) {
             ChatEngine current = engine;
@@ -1300,10 +1308,68 @@ public final class MainActivity extends AppCompatActivity {
     private void openContact(ChatEngine.Peer peer) {
         ChatEngine current = engine;
         if (current == null || !resumed) return;
+        // A contact the relay now introduces with a different identity is looked at first; the chat opens once it has been accepted.
+        if (current.onboarding().changed(peer.userId()) != null) { reviewIdentityDialog(peer); return; }
         try {
             if (current.independentlyVerified(peer.userId()) || current.prepareSavedConversation(peer)) { selectedPeer = peer.userId(); render(); return; }
         } catch (Exception failure) { showFailure(failure); return; }
         submit(() -> current.prepareConversation(peer), () -> { selectedPeer = peer.userId(); render(); });
+    }
+
+    // The relay introduces a different identity for this saved contact, usually because they reinstalled Vanishr or changed phone. Nothing is
+    // sent to it or read from it until the person has compared the new safety number with the one on the contact's own phone and accepted it.
+    private void reviewIdentityDialog(ChatEngine.Peer peer) {
+        ChatEngine current = engine;
+        if (current == null || !resumed) return;
+        ChatEngine.Peer reviewed = current.onboarding().changed(peer.userId());
+        if (reviewed == null) { render(); return; }
+        String number;
+        try { number = ChatEngine.safetyNumber(reviewed.userId(), reviewed.identityKey()); }
+        catch (Exception invalid) { showFailure(invalid); return; }
+        boolean verifiedByHand = current.independentlyVerified(peer.userId());
+        LinearLayout panel = vertical(); panel.setPadding(dp(24), dp(8), dp(24), dp(8));
+        panel.addView(design.text(peer.name() + " is using a new identity. This usually means they reinstalled Vanishr or changed phone. "
+                + "Nothing is sent to or read from the new identity until you accept it.", 13, 500, INK));
+        panel.addView(design.spacer(14));
+        panel.addView(design.text("Their new safety number", 11, 700, MUTED));
+        TextView code = design.text(number, 15, 700, INK); code.setPadding(0, dp(4), 0, 0); code.setContentDescription("New safety number " + number);
+        panel.addView(code);
+        panel.addView(design.spacer(14));
+        panel.addView(design.text("Compare it with the number on their phone (Profile, Verify identity) before you accept."
+                + (verifiedByHand ? " You verified their old identity yourself; once accepted, this contact is no longer marked as verified." : ""), 12, 500, MUTED));
+        ScrollView scroll = new ScrollView(this); scroll.addView(panel);
+        showDialog(new SecureSheet.Builder(this).setTitle("Identity changed").setView(scroll)
+                .setNegativeButton("Not now", null)
+                .setNeutralButton("Remove contact", (dialog, which) -> forgetDialog(peer))
+                .setPositiveButton("Accept", (dialog, which) -> submit(
+                        () -> current.onboarding().acceptChanged(peer.userId(), reviewed.identityKey()),
+                        () -> { render(); queueSync(); },
+                        failure -> {
+                            if (failure instanceof AdminOnboarding.Failure) { problem(failure.getMessage()); render(); }
+                            else showFailure(failure);
+                        }))
+                .create());
+    }
+
+    // Swiping a chat to the left asks to remove the contact, with the confirmation the long press shows; the strip behind says what letting go does.
+    // A swipe is not a click, and screen-reader users get "Remove contact" as an accessibility action on the row.
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    private View swipeToRemove(LinearLayout row, ChatEngine.Peer peer) {
+        FrameLayout holder = new FrameLayout(this);
+        LinearLayout strip = horizontal(); strip.setGravity(Gravity.CENTER_VERTICAL | Gravity.END); strip.setBackgroundColor(Ui.ERROR);
+        strip.setPadding(0, 0, dp(12), 0); strip.setVisibility(View.INVISIBLE);
+        strip.addView(design.symbol(R.drawable.ic_trash_2, 18, Color.WHITE));
+        TextView label = design.text("Remove", 12, 700, Color.WHITE); label.setPadding(dp(8), 0, 0, 0); strip.addView(label);
+        holder.addView(strip, new FrameLayout.LayoutParams(-1, -1));
+        holder.addView(row, new FrameLayout.LayoutParams(-1, -2));
+        HorizontalSwipe swipe = new HorizontalSwipe(row, -1, dp(96), dp(120), fraction -> {
+            int exposed = Math.round(Math.abs(row.getTranslationX()));
+            strip.setVisibility(exposed == 0 ? View.INVISIBLE : View.VISIBLE);
+            strip.setClipBounds(new android.graphics.Rect(Math.max(0, strip.getWidth() - exposed), 0, strip.getWidth(), strip.getHeight()));
+        }, () -> forgetDialog(peer));
+        row.setOnTouchListener(swipe);
+        androidx.core.view.ViewCompat.addAccessibilityAction(row, "Remove contact", (view, arguments) -> { forgetDialog(peer); return true; });
+        return holder;
     }
 
     private TextView unreadBadge(UUID id, long count) {
@@ -1313,7 +1379,7 @@ public final class MainActivity extends AppCompatActivity {
         badge.setVisibility(count==0 ? View.GONE : View.VISIBLE); unreadLabels.put(id,badge); return badge;
     }
 
-    private void addChatRow(LinearLayout row) {
+    private void addChatRow(View row) {
         contactRows.addView(row,new LinearLayout.LayoutParams(-1,-2));
         LinearLayout.LayoutParams size=new LinearLayout.LayoutParams(-1,dp(1)); size.setMarginStart(dp(78)); size.setMarginEnd(dp(18)); contactRows.addView(design.divider(),size);
     }
@@ -1336,7 +1402,16 @@ public final class MainActivity extends AppCompatActivity {
         LinearLayout.LayoutParams avatarSize=new LinearLayout.LayoutParams(dp(36),dp(36)); avatarSize.setMarginStart(dp(8)); header.addView(avatar,avatarSize);
         LinearLayout identity = vertical(); identity.setPadding(dp(8), 0, dp(6), 0);
         conversationName = design.text(peer.name(), 14, 700, INK); conversationName.setSingleLine(true); conversationName.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        identity.addView(conversationName);
+        // What the bottom label used to say about trust, without taking a row: a shield after the name for a contact this person verified
+        // and for the official admin; the contact profile says it in words.
+        String trustMark = group != null ? null : engine.independentlyVerified(peer.userId()) ? "verified" : engine.onboarding().official(peer.userId()) ? "official admin" : null;
+        if (trustMark != null) {
+            android.graphics.drawable.Drawable shield = ContextCompat.getDrawable(this, R.drawable.ic_shield_check).mutate();
+            shield.setTint(GREEN); shield.setBounds(0, 0, dp(14), dp(14));
+            conversationName.setCompoundDrawablesRelative(null, null, shield, null); conversationName.setCompoundDrawablePadding(dp(6));
+            conversationName.setContentDescription(peer.name() + ", " + trustMark);
+        }
+        identity.addView(conversationName, new LinearLayout.LayoutParams(-2, -2));
         if (group == null) {
             contactStatus = design.text("", 11, 500, GREEN); contactStatus.setPadding(0, dp(2), 0, 0);
             contactStatus.setSingleLine(true); identity.addView(contactStatus); refreshContactStatus();
@@ -1345,6 +1420,10 @@ public final class MainActivity extends AppCompatActivity {
             conversationUsername.setPadding(0, dp(2), 0, 0); conversationUsername.setSingleLine(true); conversationUsername.setEllipsize(android.text.TextUtils.TruncateAt.END); identity.addView(conversationUsername);
         }
         header.addView(identity, new LinearLayout.LayoutParams(0, -2, 1));
+        // The name and the picture open the contact's profile (or the group's info), as well as the menu does.
+        View.OnClickListener openInfo = group == null ? view -> contactProfileDialog(peer) : view -> groupInfo(peer.userId());
+        identity.setBackground(design.feedback(Color.TRANSPARENT, 8)); identity.setOnClickListener(openInfo);
+        avatar.setOnClickListener(openInfo);
         header.addView(icon(R.drawable.ic_ellipsis_vertical, "Conversation options", () -> {
             if (group==null) conversationMenu(peer,header); else groupMenu(peer.userId(),header);
         }));
@@ -1355,26 +1434,19 @@ public final class MainActivity extends AppCompatActivity {
             if (y < oldY && y < dp(900)) loadOlderMessages(peer);
         });
         messages = vertical();
+        messages.setClipChildren(false);
         messages.setPadding(dp(18), dp(24), dp(18), dp(24));
         messageScroll.addView(messages, new ScrollView.LayoutParams(-1, -2));
         root.addView(messageScroll, new LinearLayout.LayoutParams(-1, 0, 1));
         refreshMessages(peer);
         root.addView(design.divider());
-        LinearLayout composeArea=vertical(); composeArea.setBackgroundColor(Ui.SURFACE); composeArea.setPadding(dp(12),dp(7),dp(12),dp(12));
-        LinearLayout settings = horizontal(); settings.setMinimumHeight(dp(38)); settings.setPadding(dp(5),0,dp(5),0);
-        settings.addView(design.symbol(R.drawable.ic_shield_check, 14, GREEN));
-        String trust = group != null ? "Private group" : engine.independentlyVerified(peer.userId()) ? "Verified"
-                : engine.onboarding().official(peer.userId()) ? "Official admin" : "Account enrolled";
-        TextView verified = design.text(trust, 10, 500, MUTED); verified.setPadding(dp(5), 0, 0, 0);
-        settings.addView(verified, new LinearLayout.LayoutParams(0, -2, 1));
-        expiryLabel = design.text(expiryName(expiry), 10, 700, GREEN);
-        android.graphics.drawable.Drawable clock=ContextCompat.getDrawable(this,R.drawable.ic_clock_3).mutate(); clock.setTint(GREEN); clock.setBounds(0,0,dp(13),dp(13));
-        expiryLabel.setCompoundDrawablesRelative(clock, null, null, null);
-        expiryLabel.setCompoundDrawablePadding(dp(5)); expiryLabel.setPadding(dp(5), dp(8), dp(5), dp(8)); expiryLabel.setMinHeight(dp(38)); expiryLabel.setGravity(Gravity.CENTER_VERTICAL);
-        expiryLabel.setContentDescription("Message expiry: " + expiryName(expiry));
-        expiryLabel.setBackground(design.feedback(Color.TRANSPARENT, 8));
-        expiryLabel.setOnClickListener(view -> expiryDialog()); settings.addView(expiryLabel);
-        composeArea.addView(settings);
+        LinearLayout composeArea=vertical(); composeArea.setBackgroundColor(Ui.SURFACE); composeArea.setPadding(dp(12),dp(8),dp(12),dp(12));
+        // The one setting, how long the next message lives, sits inside the message field instead of taking a row of its own.
+        expiryLabel = design.text("", 10, 700, GREEN);
+        expiryLabel.setCompoundDrawablePadding(dp(4)); expiryLabel.setPadding(dp(8), 0, dp(10), 0); expiryLabel.setGravity(Gravity.CENTER_VERTICAL);
+        expiryLabel.setBackground(design.feedback(Color.TRANSPARENT, 7));
+        expiryLabel.setOnClickListener(view -> expiryDialog());
+        showExpiry();
         replyStrip = null; replySnippetLabel = null;
         if (group == null) {
             pendingReplyTo = null; pendingReplySnippet = null;
@@ -1398,10 +1470,13 @@ public final class MainActivity extends AppCompatActivity {
         composer = field("Message", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         composer.setMaxLines(4);
         composer.setTextSize(13); composer.setMinHeight(dp(45));
-        composer.setPadding(dp(13), dp(10), dp(13), dp(10));
+        composer.setPadding(dp(13), dp(10), dp(58), dp(10));
         composer.setBackground(design.background(Ui.CANVAS, 7, Ui.LINE));
         composer.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(4096)});
-        input.addView(composer, new LinearLayout.LayoutParams(0, -2, 1));
+        FrameLayout typing = new FrameLayout(this);
+        typing.addView(composer, new FrameLayout.LayoutParams(-1, -2));
+        typing.addView(expiryLabel, new FrameLayout.LayoutParams(-2, dp(45), Gravity.END | Gravity.BOTTOM));
+        input.addView(typing, new LinearLayout.LayoutParams(0, -2, 1));
         ImageButton send = icon(R.drawable.ic_arrow_up, "Send", () -> {
             String text = composer.getText().toString();
             if (text.trim().isEmpty()) return;
@@ -1606,14 +1681,30 @@ public final class MainActivity extends AppCompatActivity {
         nextRowExpiry = Math.min(nextRowExpiry, pending.expiresAt());
     }
 
-    private String expiryName(ChatEnvelope.Expiry value) { return switch (value) { case VIEW_ONCE -> "View once"; case HOUR_1 -> "1 hour"; case HOURS_6 -> "6 hours"; case HOURS_24 -> "24 hours"; }; }
+    private String expiryName(ChatEnvelope.Expiry value) {
+        return switch (value) { case VIEW_ONCE -> "View once"; case HOUR_1 -> "1 hour"; case HOURS_6 -> "6 hours"; case HOURS_12 -> "12 hours"; case HOURS_24 -> "24 hours"; };
+    }
+
+    private String expiryShortName(ChatEnvelope.Expiry value) {
+        return switch (value) { case VIEW_ONCE -> "Once"; case HOUR_1 -> "1h"; case HOURS_6 -> "6h"; case HOURS_12 -> "12h"; case HOURS_24 -> "24h"; };
+    }
+
+    private void showExpiry() {
+        if (expiryLabel == null) return;
+        expiryLabel.setText(expiryShortName(expiry));
+        expiryLabel.setContentDescription("Message expiry: " + expiryName(expiry));
+        android.graphics.drawable.Drawable symbol = ContextCompat.getDrawable(this, expiry == ChatEnvelope.Expiry.VIEW_ONCE ? R.drawable.ic_eye : R.drawable.ic_clock_3).mutate();
+        symbol.setTint(GREEN); symbol.setBounds(0, 0, dp(13), dp(13));
+        expiryLabel.setCompoundDrawablesRelative(symbol, null, null, null);
+    }
 
     private void expiryDialog() {
-        String[] modes = {"View once", "1 hour", "6 hours", "24 hours"};
+        String[] modes = new String[EXPIRY_CHOICES.length];
+        for (int index = 0; index < modes.length; index++) modes[index] = expiryName(EXPIRY_CHOICES[index]);
         showDialog(new SecureSheet.Builder(this).setTitle("Disappearing messages")
-                .setSingleChoiceItems(modes, expiry.ordinal(), (dialog, which) -> {
-                    expiry = ChatEnvelope.Expiry.values()[which];
-                    if (expiryLabel != null) { expiryLabel.setText(expiryName(expiry)); expiryLabel.setContentDescription("Message expiry: " + expiryName(expiry)); }
+                .setSingleChoiceItems(modes, java.util.Arrays.asList(EXPIRY_CHOICES).indexOf(expiry), (dialog, which) -> {
+                    expiry = EXPIRY_CHOICES[which];
+                    showExpiry();
                     dialog.dismiss();
                 }).setNegativeButton("Cancel", null).create());
     }
@@ -2078,13 +2169,7 @@ public final class MainActivity extends AppCompatActivity {
                 LinearLayout actions = vertical();
                 ScrollView scroll = new ScrollView(this); scroll.addView(actions);
                 SecureSheet dialog = new SecureSheet.Builder(this).setTitle("Message actions").setView(scroll).setNegativeButton("Cancel", null).create();
-                if (oneToOne) actions.addView(profileAction("Reply", R.drawable.ic_arrow_left, () -> {
-                    dialog.dismiss();
-                    pendingReplyTo = entry;
-                    pendingReplySnippet = entry.image() ? "Photo" : entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE ? "View-once message" : text;
-                    updateReplyStrip();
-                    if (composer != null) composer.requestFocus();
-                }));
+                if (oneToOne) actions.addView(profileAction("Reply", R.drawable.ic_reply, () -> { dialog.dismiss(); replyTo(entry, text); }));
                 if (oneToOne) actions.addView(profileAction(entry.reactionMine() == null ? "React" : "Change reaction", 0, () -> { dialog.dismiss(); reactDialog(peer, entry); }));
                 if (oneToOne && entry.outgoing() && !entry.image() && entry.expiry() != ChatEnvelope.Expiry.VIEW_ONCE && alive)
                     actions.addView(profileAction("Edit", R.drawable.ic_square_pen, () -> { dialog.dismiss(); editDialog(peer, entry, text); }));
@@ -2096,11 +2181,39 @@ public final class MainActivity extends AppCompatActivity {
                 showDialog(dialog);
                 return true;
             });
+            alignment.setClipChildren(false);
             alignment.addView(row, new LinearLayout.LayoutParams(-2, -2));
+            if (entry.groupEpoch() == null) swipeToReply(entry, text, alignment, row, body);
             LinearLayout.LayoutParams placement = new LinearLayout.LayoutParams(-1, -2); placement.setMargins(0, 0, 0, dp(14)); alignment.setLayoutParams(placement);
             MessageRow result = new MessageRow(null, alignment, body, sender, status, groupStatus);
             updateReceipt(result, entry);
             return result;
+    }
+
+    private void replyTo(ChatEngine.Entry entry, String text) {
+        pendingReplyTo = entry;
+        pendingReplySnippet = entry.image() ? "Photo" : entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE ? "View-once message" : text;
+        updateReplyStrip();
+        if (composer != null) composer.requestFocus();
+    }
+
+    // Swiping a message to the right starts a reply to it, as the long-press action does; the arrow shows through as the message moves.
+    private void swipeToReply(ChatEngine.Entry entry, String text, LinearLayout alignment, View bubble, View body) {
+        android.graphics.drawable.Drawable cue = ContextCompat.getDrawable(this, R.drawable.ic_reply).mutate();
+        cue.setTint(MUTED); cue.setAlpha(0);
+        // A layout with nothing of its own to draw leaves its overlay out when it is drawn into a software canvas (a screenshot).
+        alignment.setWillNotDraw(false);
+        alignment.getOverlay().add(cue);
+        int full = dp(22);
+        HorizontalSwipe swipe = new HorizontalSwipe(bubble, 1, dp(56), dp(76), fraction -> {
+            int size = Math.round(full * (0.6f + 0.4f * fraction)), top = Math.max(0, (alignment.getHeight() - size) / 2);
+            cue.setBounds(dp(8), top, dp(8) + size, top + size);
+            cue.setAlpha(Math.round(255 * fraction));
+        }, () -> replyTo(entry, text));
+        bubble.setOnTouchListener(swipe);
+        // A photo or a view-once message is itself something to tap, so the touch starts on it, not on the bubble around it.
+        if (body.hasOnClickListeners()) body.setOnTouchListener(swipe);
+        androidx.core.view.ViewCompat.addAccessibilityAction(bubble, "Reply", (view, arguments) -> { replyTo(entry, text); return true; });
     }
 
     private void reactDialog(ChatEngine.Peer peer, ChatEngine.Entry entry) {
@@ -2327,6 +2440,11 @@ public final class MainActivity extends AppCompatActivity {
         TextView username = design.text("@" + saved.username(), 12, 500, MUTED); username.setPadding(0,dp(6),0,0);
         username.setContentDescription("Contact username");
         details.addView(username);
+        // What the label under the chat used to say, in words: how this contact came to be trusted.
+        boolean trusted = current.independentlyVerified(saved.userId()) || current.onboarding().official(saved.userId());
+        TextView trust = design.text(current.independentlyVerified(saved.userId()) ? "Verified by you"
+                : current.onboarding().official(saved.userId()) ? "Official admin" : "Account enrolled, not verified by you", 11, 600, trusted ? GREEN : MUTED);
+        trust.setPadding(0, dp(6), 0, 0); details.addView(trust);
         profile.addView(details, new LinearLayout.LayoutParams(0, -2, 1)); panel.addView(profile);
         panel.addView(design.spacer(20));
         Ui.Field displayName = design.field("Display name", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
@@ -2364,8 +2482,8 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void forgetDialog(ChatEngine.Peer peer) {
-        showDialog(new SecureSheet.Builder(this).setTitle("Remove verified contact?")
-                .setMessage("Local content and the pinned identity will be erased.")
+        showDialog(new SecureSheet.Builder(this).setTitle("Remove contact?")
+                .setMessage("Remove " + peer.name() + "? Their messages on this phone and the saved identity will be erased.")
             .setNegativeButton("Cancel", null).setPositiveButton("Remove", (dialog, which) -> submit(() -> engine.forget(peer), this::render)).create());
     }
 

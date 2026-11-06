@@ -680,6 +680,22 @@ class RelayIntegrationTest {
         assertFalse(Boolean.TRUE.equals(redis.hasKey("r:" + encrypted.id())));
     }
 
+    @Test void aTwelveHourDeadlineSentAsTheTwentyFourHourKindIsKeptTwelveHoursAndALongerOneIsRefused() throws Exception {
+        Device alice = device("alice");
+        Device bob = device("bob");
+        verifyAndEstablish(alice, bob);
+        long twelveHours = Duration.ofHours(12).toMillis();
+        SendRequest twelve = encrypted(alice, bob, "hello".getBytes(StandardCharsets.UTF_8), Expiry.HOURS_24, System.currentTimeMillis() + twelveHours, null);
+        request(body(post("/messages"), twelve), alice).andExpect(status().isCreated());
+        for (String key : List.of("m:", "r:")) {
+            long remaining = redis.getExpire(key + twelve.id(), java.util.concurrent.TimeUnit.MILLISECONDS);
+            assertTrue(remaining > twelveHours - 120_000 && remaining <= twelveHours, key + " lives about twelve hours, not twenty-four: " + remaining);
+        }
+        SendRequest tooLong = encrypted(alice, bob, "hello".getBytes(StandardCharsets.UTF_8), Expiry.HOURS_24, System.currentTimeMillis() + 2 * twelveHours + 60_000, null);
+        request(body(post("/messages"), tooLong), alice).andExpect(status().isBadRequest());
+        assertFalse(Boolean.TRUE.equals(redis.hasKey("m:" + tooLong.id())));
+    }
+
         @Test void notificationReferencesAreRecipientBoundExpiringAndNeverPublicChatIdentifiers() throws Exception {
         Device sender = device("notification_sender");
         Device recipient = device("notification_recipient");

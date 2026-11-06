@@ -231,7 +231,7 @@ public class ScreenFlowTest {
                     view instanceof TextView label && "Official admin".contentEquals(label.getText())));
                 setField(activity, "selectedPeer", peerId); invoke(activity, "render");
                 assertNull(dialog(activity));
-                assertNotNull(text(root(activity), "Official admin"));
+                assertOfficialAdminHeader(activity);
                 assertNotNull(readField(activity, "composer"));
             });
             snapshot(scenario, "81-official-admin-conversation");
@@ -461,7 +461,7 @@ public class ScreenFlowTest {
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             scenario.onActivity(activity -> {
                 setField(activity, "selectedPeer", peerId); inject(activity);
-                assertNotNull(text(root(activity), "Official admin"));
+                assertOfficialAdminHeader(activity);
                 assertEquals(View.GONE, ((TextView) readField(activity, "contactStatus")).getVisibility());
                 setField(engine, "realtimeReady", true);
             });
@@ -478,7 +478,7 @@ public class ScreenFlowTest {
             }
             scenario.onActivity(activity -> {
                 assertEquals(View.VISIBLE, ((TextView) readField(activity, "contactStatus")).getVisibility());
-                assertNotNull(text(root(activity), "Official admin"));
+                assertOfficialAdminHeader(activity);
             });
             snapshot(scenario, "82-official-admin-last-seen");
         }
@@ -510,9 +510,13 @@ public class ScreenFlowTest {
         assertTrue(engine.entries(peerId).stream().anyMatch(entry -> entry.id().equals(id)));
         assertTrue(engine.onboarding().automatic(peerId)); assertFalse(engine.independentlyVerified(peerId));
         SignalClient changed = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
-        directory.set(new AdminOnboarding.Page(userId, official, List.of(introduction(peerId, peerDevice, changed, "newcomer")), null));
-        assertThrows(SecurityException.class, () -> engine.onboarding().acceptIncoming(peerId, peerDevice));
+        var changedIntroduction = introduction(peerId, peerDevice, changed, "newcomer");
+        directory.set(new AdminOnboarding.Page(userId, official, List.of(changedIntroduction), null));
+        assertFalse("A changed identity is not accepted from a message", engine.onboarding().acceptIncoming(peerId, peerDevice));
+        assertEquals("It waits for the person to review it instead", changedIntroduction.peer(), engine.onboarding().changed(peerId));
         assertEquals(introduced.peer(), engine.peers().get(0));
+        assertThrows("The identity that was saved is still the one pinned", SecurityException.class,
+            () -> engine.groupSignal().verifyPeer(peerId, changed.publicIdentity()));
     }
 
     @Test public void adminOnboardingDirectMessagesUseOfficialSignalWithoutGrantingOtherSendersTrust() throws Exception {
@@ -691,6 +695,15 @@ public class ScreenFlowTest {
 
     private View root(MainActivity activity) { return (View) readField(activity, "root"); }
     private SecureSheet dialog(MainActivity activity) { return (SecureSheet) readField(activity, "openDialog"); }
+
+    /** What the open dialog says, for a failure message that names it. */
+    private String shownText(MainActivity activity) {
+        SecureSheet open = dialog(activity);
+        if (open == null) return "(no dialog)";
+        StringBuilder text = new StringBuilder(open.isShowing() ? "showing: " : "not showing: ");
+        for (View view : descendants(open.getWindow().getDecorView())) if (view instanceof TextView label && label.getText().length() > 0) text.append('[').append(label.getText()).append(']');
+        return text.toString();
+    }
 
     private static List<View> descendants(View view) {
         List<View> result = new ArrayList<>(); result.add(view);
@@ -4682,8 +4695,10 @@ public class ScreenFlowTest {
             });
             snapshot(scenario, "11-expiry-modes");
             scenario.onActivity(activity -> {
-                SecureSheet choices = dialog(activity); choices.getListView().performItemClick(choices.getListView().getChildAt(2), 2, 2);
-                assertEquals(ChatEnvelope.Expiry.HOURS_6, readField(activity, "expiry"));
+                SecureSheet choices = dialog(activity);
+                assertEquals("Only view once, 12 hours and 24 hours are offered", 3, choices.getListView().getCount());
+                choices.getListView().performItemClick(choices.getListView().getChildAt(2), 2, 2);
+                assertEquals(ChatEnvelope.Expiry.HOURS_24, readField(activity, "expiry"));
                 invoke(activity, "attachmentDialog");
             });
             snapshot(scenario, "12-attachments");
@@ -6756,12 +6771,16 @@ public class ScreenFlowTest {
         // On the admin's own phone a new account that comes back with another identity is exactly what a pin change must not touch.
         var changed = introduction(peerId, peerDevice, second, "newcomer");
         directory.set(new AdminOnboarding.Page(userId, official, List.of(changed), null));
-        assertThrows(SecurityException.class, () -> engine.onboarding().first());
+        // It is kept for review, never saved over the identity that is pinned, and no longer fails the whole directory.
+        engine.onboarding().first();
+        assertEquals(changed.peer(), engine.onboarding().changed(peerId));
+        assertEquals(introduced.peer(), engine.peer(peerId));
         assertThrows(SecurityException.class, () -> engine.onboarding().prepare(changed.peer()));
         assertFalse(engine.onboarding().rotationPending(peerId));
         engine.onboarding().adopt(certificate(userId, deviceId, own, 7));
-        assertThrows("A new pin does not make anyone else's changed identity acceptable", SecurityException.class, () -> engine.onboarding().first());
-        assertEquals(introduced.peer(), engine.peer(peerId));
+        engine.onboarding().first();
+        assertEquals("A new pin does not make anyone else's changed identity acceptable", introduced.peer(), engine.peer(peerId));
+        assertEquals(changed.peer(), engine.onboarding().changed(peerId));
         assertThrows(SecurityException.class, () -> engine.groupSignal().verifyPeer(peerId, second.publicIdentity()));
     }
 
@@ -8423,6 +8442,633 @@ public class ScreenFlowTest {
             scenario.onActivity(activity -> { invoke(activity, "hideContent"); });
             meter.stop();
         }
+    }
+
+    // ==== 0.6.5: changed identities, three expiry choices, swipes and a tidier composer ====
+
+    private void assertOfficialAdminHeader(MainActivity activity) {
+        TextView name = (TextView) readField(activity, "conversationName");
+        assertEquals("The shield after the name says what the row under the chat used to",
+            "Vanishr, official admin", String.valueOf(name.getContentDescription()));
+        assertTrue("The row that carried the words is gone", descendants(root(activity)).stream()
+            .noneMatch(view -> view instanceof TextView label && "Official admin".contentEquals(label.getText())));
+    }
+
+    private boolean hasText(View root, String value) {
+        return descendants(root).stream().anyMatch(view -> view instanceof TextView label && label.getText().toString().equals(value));
+    }
+
+    /** The admin's own phone, with one contact saved under the identity it first had and a relay that can introduce a new one for it. */
+    private final class AdminWithAReinstalledContact {
+        final SignalClient before = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        final SignalClient after = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        final UUID newcomerId = UUID.randomUUID();
+        final SignalClient newcomer = new SignalClient(newcomerId, new DeviceSecurityTest.MemoryVault());
+        final AdminOnboarding.Introduction saved = introduction(peerId, peerDevice, before, "reinstaller");
+        final AdminOnboarding.Introduction changed = introduction(peerId, UUID.randomUUID(), after, "reinstaller");
+        final AdminOnboarding.Introduction fresh = introduction(newcomerId, UUID.randomUUID(), newcomer, "brand_new");
+        final ChatEngine.Contact official;
+        final java.util.concurrent.atomic.AtomicReference<AdminOnboarding.Page> directory;
+        final List<ChatEngine.Incoming> incoming = new ArrayList<>();
+
+        AdminWithAReinstalledContact() throws Exception {
+            SignalClient own = new SignalClient(userId, vault);
+            signedInFixture(adminPin(userId, deviceId, own));
+            official = new ChatEngine.Contact(userId, deviceId, Base64.getEncoder().encodeToString(own.publicIdentity()));
+            directory = new java.util.concurrent.atomic.AtomicReference<>(new AdminOnboarding.Page(userId, official, List.of(saved), null));
+            adminTransport(directory, incoming, new ArrayList<>(), null);
+            engine.onboarding().refresh();
+        }
+
+        /** The relay now introduces the new identity, and a brand-new account on the same page, as after a reinstall. */
+        void reinstall() throws Exception {
+            directory.set(new AdminOnboarding.Page(userId, official, List.of(changed, fresh), null));
+            engine.onboarding().first();
+        }
+
+        ChatEngine.Incoming fromTheNewDevice() {
+            long now = System.currentTimeMillis();
+            return new ChatEngine.Incoming(UUID.randomUUID(), peerId, changed.deviceId(), userId, deviceId, ChatEnvelope.Expiry.HOUR_1,
+                now, now + 3_600_000, 3, new byte[64], null);
+        }
+    }
+
+    @Test public void aContactWhoseIdentityChangedIsKeptForReviewAndNeitherStopsTheOtherContactsNorShowsADirectoryWideError() throws Exception {
+        var scene = new AdminWithAReinstalledContact();
+        assertEquals(scene.saved.peer(), engine.peer(peerId));
+        // This used to throw, roll the whole page back (the other account too) and leave a red line on the list.
+        scene.reinstall();
+        assertNull("No directory-wide error for one contact", engine.onboarding().problem());
+        assertTrue("The other account on the same page was still saved", engine.peers().contains(scene.fresh.peer()));
+        assertEquals("The saved identity is untouched", scene.saved.peer(), engine.peer(peerId));
+        assertEquals(scene.changed.peer(), engine.onboarding().changed(peerId));
+        assertEquals(Set.of(peerId), engine.onboarding().changedContacts());
+        assertNull(engine.onboarding().changed(scene.newcomerId));
+        // Nothing about the new identity is trusted: the Signal store still pins the old one.
+        assertThrows(SecurityException.class, () -> engine.groupSignal().verifyPeer(peerId, scene.after.publicIdentity()));
+        engine.groupSignal().verifyPeer(peerId, scene.before.publicIdentity());
+        // The same answer again changes nothing and raises nothing.
+        long generation = engine.onboarding().generation();
+        engine.onboarding().first();
+        assertEquals(generation, engine.onboarding().generation());
+        assertEquals(Set.of(peerId), engine.onboarding().changedContacts());
+    }
+
+    @Test public void acceptingAChangedIdentityNeedsTheOneThatWasShownAndIsStillIntroducedAndReplacesTheSavedOneOnlyThen() throws Exception {
+        var scene = new AdminWithAReinstalledContact();
+        scene.reinstall();
+        String shown = scene.changed.peer().identityKey();
+        // Not what was shown, nothing shown, or nothing waiting for review: refused, and nothing changes.
+        assertThrows(AdminOnboarding.Failure.class, () -> engine.onboarding().acceptChanged(peerId, scene.saved.peer().identityKey()));
+        assertThrows(AdminOnboarding.Failure.class, () -> engine.onboarding().acceptChanged(peerId, null));
+        assertThrows(SecurityException.class, () -> engine.onboarding().acceptChanged(scene.newcomerId, scene.fresh.peer().identityKey()));
+        assertEquals(scene.saved.peer(), engine.peer(peerId));
+        // The relay introduces yet another identity between the review and the tap: nothing is replaced, and the newer one is the one to review.
+        SignalClient third = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        var newest = introduction(peerId, UUID.randomUUID(), third, "reinstaller");
+        scene.directory.set(new AdminOnboarding.Page(userId, scene.official, List.of(newest), null));
+        assertThrows(AdminOnboarding.Failure.class, () -> engine.onboarding().acceptChanged(peerId, shown));
+        assertEquals(scene.saved.peer(), engine.peer(peerId));
+        assertEquals(newest.peer(), engine.onboarding().changed(peerId));
+        // The one that was shown and is still introduced is accepted.
+        engine.onboarding().acceptChanged(peerId, newest.peer().identityKey());
+        assertEquals(newest.peer(), engine.peer(peerId));
+        assertNull(engine.onboarding().changed(peerId)); assertTrue(engine.onboarding().changedContacts().isEmpty());
+        engine.groupSignal().verifyPeer(peerId, third.publicIdentity());
+        assertThrows(SecurityException.class, () -> engine.groupSignal().verifyPeer(peerId, scene.before.publicIdentity()));
+        assertFalse("Accepting is not verifying: the contact is no longer one this person verified", engine.independentlyVerified(peerId));
+        assertTrue(engine.onboarding().automatic(peerId));
+    }
+
+    @Test public void aMessageFromANewDeviceOfASavedContactKeepsItsNewIdentityForReviewOnceAndStaysAtTheRelay() throws Exception {
+        var scene = new AdminWithAReinstalledContact();
+        // An older contact is not on the first page, so the page does not find the change; a look-up for that contact does.
+        scene.directory.set(new AdminOnboarding.Page(userId, scene.official, List.of(scene.changed), null));
+        var lookups = countLookups(peerId);
+        deletedMessages.clear();
+        for (int pass = 0; pass < 3; pass++) { scene.incoming.add(scene.fromTheNewDevice()); engine.sync(); }
+        assertEquals("One look-up, then the recorded change is enough", 1, lookups.get());
+        assertEquals(scene.changed.peer(), engine.onboarding().changed(peerId));
+        assertTrue(engine.unverifiedIncoming);
+        assertTrue("The messages are neither read nor deleted at the relay", deletedMessages.isEmpty() && engine.entries(peerId).isEmpty());
+        assertEquals(scene.saved.peer(), engine.peer(peerId));
+        assertNull(engine.onboarding().problem());
+    }
+
+    @Test public void aDeviceTheRelayDoesNotIntroduceForTheContactIsNotKeptForReview() throws Exception {
+        var scene = new AdminWithAReinstalledContact();
+        scene.directory.set(new AdminOnboarding.Page(userId, scene.official, List.of(scene.saved), null));
+        var lookups = countLookups(peerId);
+        for (int pass = 0; pass < 3; pass++) { scene.incoming.add(scene.fromTheNewDevice()); engine.sync(); }
+        assertNull("A sender the relay does not stand behind is not offered for review", engine.onboarding().changed(peerId));
+        assertTrue(engine.unverifiedIncoming);
+        assertEquals(scene.saved.peer(), engine.peer(peerId));
+        assertEquals("Such a sender is asked about once a minute, not on every sync", 1, lookups.get());
+    }
+
+    @Test public void aDeviceOtherThanTheOneTheRelayIntroducesIsNotKeptForReview() throws Exception {
+        var scene = new AdminWithAReinstalledContact();
+        // The relay stands behind some other new device of this contact, not the one that wrote.
+        var elsewhere = introduction(peerId, UUID.randomUUID(), new SignalClient(peerId, new DeviceSecurityTest.MemoryVault()), "reinstaller");
+        scene.directory.set(new AdminOnboarding.Page(userId, scene.official, List.of(elsewhere), null));
+        scene.incoming.add(scene.fromTheNewDevice());
+        engine.sync();
+        assertNull("The writing device is not the introduced one, so nothing is offered", engine.onboarding().changed(peerId));
+        assertTrue(engine.unverifiedIncoming);
+        assertEquals(scene.saved.peer(), engine.peer(peerId));
+    }
+
+    /** Counts the look-ups of one contact that the engine asks the relay for. */
+    private java.util.concurrent.atomic.AtomicInteger countLookups(UUID contact) {
+        var lookups = new java.util.concurrent.atomic.AtomicInteger();
+        var builder = ((okhttp3.OkHttpClient) readField(engine.groupApi(), "client")).newBuilder();
+        builder.interceptors().add(0, chain -> {
+            if (chain.request().url().encodedPath().equals("/account/admin-contacts/" + contact)) lookups.incrementAndGet();
+            return chain.proceed(chain.request());
+        });
+        setField(engine.groupApi(), "client", builder.build());
+        return lookups;
+    }
+
+    @Test public void removingAContactThatIsWaitingForReviewClearsTheReviewAndTheContactStaysRemoved() throws Exception {
+        var scene = new AdminWithAReinstalledContact();
+        scene.reinstall();
+        assertNotNull(engine.onboarding().changed(peerId));
+        engine.forget(scene.saved.peer());
+        assertNull(engine.onboarding().changed(peerId)); assertTrue(engine.onboarding().changedContacts().isEmpty());
+        scene.directory.set(new AdminOnboarding.Page(userId, scene.official, List.of(scene.changed, scene.fresh), null));
+        engine.onboarding().first();
+        assertNull("A removed contact is not offered for review again", engine.onboarding().changed(peerId));
+        assertTrue(engine.peers().stream().noneMatch(peer -> peer.userId().equals(peerId)));
+        assertTrue("The other account is still introduced", engine.peers().contains(scene.fresh.peer()));
+    }
+
+    @Test public void aReviewIsDroppedWhenTheRelayIntroducesTheSavedIdentityAgain() throws Exception {
+        var scene = new AdminWithAReinstalledContact();
+        scene.reinstall();
+        assertEquals(scene.changed.peer(), engine.onboarding().changed(peerId));
+        scene.directory.set(new AdminOnboarding.Page(userId, scene.official, List.of(scene.saved, scene.fresh), null));
+        long generation = engine.onboarding().generation();
+        engine.onboarding().first();
+        assertNull("Nothing is left to review once the relay stands behind the saved identity again", engine.onboarding().changed(peerId));
+        assertTrue(engine.onboarding().changedContacts().isEmpty());
+        assertTrue("The list is redrawn without the mark", engine.onboarding().generation() > generation);
+        assertEquals(scene.saved.peer(), engine.peer(peerId));
+    }
+
+    @Test public void aPhoneThatIsNotTheAdminHasNoIdentityReviewsAndCannotAcceptOne() throws Exception {
+        signedInFixture();
+        assertNull(engine.onboarding().changed(peerId)); assertTrue(engine.onboarding().changedContacts().isEmpty());
+        assertThrows(SecurityException.class, () -> engine.onboarding().acceptChanged(peerId, "A".repeat(44)));
+        vault.transaction(() -> { write("admin-changed/" + peerId, new ChatEngine.Peer(peerId, peerDevice, "A".repeat(44), "x")); return null; });
+        assertNull("A record written by hand is not honoured on such a phone", engine.onboarding().changed(peerId));
+        assertTrue(engine.onboarding().changedContacts().isEmpty());
+        assertThrows("Nor can it be accepted there", SecurityException.class, () -> engine.onboarding().acceptChanged(peerId, "A".repeat(44)));
+    }
+
+    private UUID deliverText(SignalClient remote, List<ChatEngine.Incoming> incoming, String text, ChatEnvelope.Expiry wire, long lifetime) throws Exception {
+        UUID id = UUID.randomUUID(); long now = System.currentTimeMillis(), deadline = now + lifetime;
+        ChatEnvelope envelope = new ChatEnvelope(1, id, peerId, peerDevice, userId, deviceId, now, deadline, wire, text, null);
+        SignalClient.Packet packet = remote.encrypt(userId, RelayApi.JSON.toJson(envelope).getBytes(StandardCharsets.UTF_8), Instant.now());
+        incoming.add(new ChatEngine.Incoming(id, peerId, peerDevice, userId, deviceId, wire, now, deadline, packet.type(), packet.ciphertext(), null));
+        return id;
+    }
+
+    @Test public void aTwelveHourMessageIsSentAsA24HourOneWithATwelveHourDeadlineAndKeepsItsChoiceOnThisPhone() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        List<ChatEngine.Incoming> incoming = new ArrayList<>(); List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(incoming, outgoing);
+        UUID id = UUID.randomUUID(); long created = System.currentTimeMillis(), twelve = ChatEnvelope.Expiry.HOURS_12.milliseconds;
+        engine.send(peer, "Twelve hours", null, ChatEnvelope.Expiry.HOURS_12, null, id, created, () -> { });
+        ChatEngine.Send sent = outgoing.get(0);
+        assertEquals("The relay and every earlier app only know four values", ChatEnvelope.Expiry.HOURS_24, sent.expiry());
+        assertEquals(created + twelve, sent.expiresAt());
+        ChatEnvelope wire = decryptControl(remote, sent);
+        assertEquals(ChatEnvelope.Expiry.HOURS_24, wire.expiry());
+        assertEquals(created + twelve, wire.expiresAt());
+        assertEquals("Twelve hours", wire.text());
+        assertEquals("This phone remembers what was chosen", ChatEnvelope.Expiry.HOURS_12, engine.entry(id).expiry());
+        assertEquals(created + twelve, engine.entry(id).expiresAt());
+        // Every other choice goes as itself.
+        for (ChatEnvelope.Expiry other : List.of(ChatEnvelope.Expiry.VIEW_ONCE, ChatEnvelope.Expiry.HOURS_24, ChatEnvelope.Expiry.HOURS_6, ChatEnvelope.Expiry.HOUR_1)) {
+            int before = outgoing.size();
+            engine.send(peer, "As itself", null, other, null, UUID.randomUUID(), System.currentTimeMillis(), () -> { });
+            assertEquals(other, outgoing.get(before).expiry());
+        }
+    }
+
+    @Test public void aMessageSentAsTwelveHoursIsShownAsTwelveHoursAndEveryOlderKindStillArrivesAsItself() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        List<ChatEngine.Incoming> incoming = new ArrayList<>(); List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(incoming, outgoing);
+        long hour = 3_600_000L;
+        Map<UUID, ChatEnvelope.Expiry> expected = new java.util.LinkedHashMap<>();
+        expected.put(deliverText(remote, incoming, "twelve", ChatEnvelope.Expiry.HOURS_24, 12 * hour), ChatEnvelope.Expiry.HOURS_12);
+        expected.put(deliverText(remote, incoming, "a day", ChatEnvelope.Expiry.HOURS_24, 24 * hour), ChatEnvelope.Expiry.HOURS_24);
+        expected.put(deliverText(remote, incoming, "six", ChatEnvelope.Expiry.HOURS_6, 6 * hour), ChatEnvelope.Expiry.HOURS_6);
+        expected.put(deliverText(remote, incoming, "one", ChatEnvelope.Expiry.HOUR_1, hour), ChatEnvelope.Expiry.HOUR_1);
+        engine.sync();
+        for (var item : expected.entrySet()) assertEquals(item.getValue(), engine.entry(item.getKey()).expiry());
+    }
+
+    @Test public void aGroupMessageSentAsTwelveHoursAlsoTravelsAsA24HourOneWithTheEarlierDeadline() throws Exception {
+        signedInFixture();
+        UUID groupId=UUID.randomUUID(); UUID epoch=UUID.randomUUID();
+        SignalClient recipient=new SignalClient(peerId,new DeviceSecurityTest.MemoryVault());
+        recipient.verifyPeer(userId,engine.groupSignal().publicIdentity());
+        engine.groupSignal().verifyPeer(peerId,recipient.publicIdentity());
+        peer=new ChatEngine.Peer(peerId,peerDevice,Base64.getEncoder().encodeToString(recipient.publicIdentity()),"friend","friend",null);
+        GroupChat.Snapshot snapshot=new GroupChat.Snapshot(groupId,userId,2,epoch,false,List.of(
+            new GroupChat.Member(userId,deviceId,Base64.getEncoder().encodeToString(engine.groupSignal().publicIdentity()),"alex",null,"ACTIVE",0),
+            new GroupChat.Member(peerId,peerDevice,peer.identityKey(),"friend",null,"ACTIVE",0)));
+        vault.transaction(() -> {
+            write("contact/"+peerId,peer); write("group/"+groupId,new GroupChat.Conversation(snapshot,"Private launch",null));
+            write("group-title/"+groupId,"Private launch"); write("group-allowed/"+groupId,snapshot.roster().members()); return null;
+        });
+        List<GroupChat.ControlSend> controls=new ArrayList<>(); List<GroupChat.Send> messages=new ArrayList<>();
+        ((RelayApi) readField(engine,"api")).close();
+        setField(engine,"api",syntheticApi(chain -> {
+            okhttp3.Request request=chain.request();
+            String path=request.url().encodedPath();
+            if (path.equals("/groups/"+groupId) && request.method().equals("GET")) return syntheticResponse(request,200,snapshot);
+            if (path.endsWith("/keys")) {
+                try { return syntheticResponse(request,200,List.of(new GroupChat.Claimed(peerId,recipient.generatePreKey(Instant.now())))); }
+                catch (Exception failure) { throw new IOException("Synthetic prekey fixture failed"); }
+            }
+            okio.Buffer buffer=new okio.Buffer(); request.body().writeTo(buffer); String body=buffer.readUtf8();
+            if (path.endsWith("/controls")) { controls.addAll(RelayApi.JSON.fromJson(body,GroupChat.Controls.class).packets()); return syntheticResponse(request,200,Map.of()); }
+            assertTrue(path.endsWith("/messages"));
+            GroupChat.Send message=RelayApi.JSON.fromJson(body,GroupChat.Send.class); messages.add(message);
+            return syntheticResponse(request,200,new GroupChat.Status(message.id(),message.expiresAt(),1,0,0,"QUEUED"));
+        }));
+        UUID messageId=UUID.randomUUID(); long created=System.currentTimeMillis(), twelve=ChatEnvelope.Expiry.HOURS_12.milliseconds;
+        createFixtureKey(AndroidVault.contentAlias(created+twelve,messageId,userId));
+        engine.groups().send(groupId,"Group, twelve hours",null,ChatEnvelope.Expiry.HOURS_12,messageId,created,() -> { });
+        assertEquals(1,messages.size());
+        assertEquals(ChatEnvelope.Expiry.HOURS_24,messages.get(0).expiry());
+        assertEquals(created+twelve,messages.get(0).expiresAt());
+        SignalGroup receiving=new SignalGroup(new DeviceSecurityTest.MemoryVault(),groupId,epoch,peerId);
+        for (GroupChat.ControlSend packet : controls) {
+            byte[] plaintext=recipient.decrypt(userId,new SignalClient.Packet(packet.type(),packet.ciphertext()));
+            try {
+                GroupChat.ControlBody body=RelayApi.JSON.fromJson(new String(plaintext,StandardCharsets.UTF_8),GroupChat.ControlBody.class);
+                if (body.kind().equals("KEY")) receiving.accept(userId,body.distribution());
+            } finally { Arrays.fill(plaintext,(byte)0); }
+        }
+        byte[] plaintext=receiving.decrypt(userId,messages.get(0).ciphertext());
+        try {
+            GroupEnvelope envelope=RelayApi.JSON.fromJson(new String(plaintext,StandardCharsets.UTF_8),GroupEnvelope.class);
+            envelope.verify(groupId,epoch,2,messageId,userId,deviceId,ChatEnvelope.Expiry.HOURS_24,created+twelve,null,Instant.now());
+            assertEquals(ChatEnvelope.Expiry.HOURS_24,envelope.content().expiry());
+            assertEquals(ChatEnvelope.Expiry.HOURS_12,ChatEnvelope.Expiry.received(messages.get(0).expiry(),envelope.content().sentAt(),envelope.content().expiresAt()));
+        } finally { Arrays.fill(plaintext,(byte)0); }
+        assertEquals(ChatEnvelope.Expiry.HOURS_12,engine.entries(groupId).get(0).expiry());
+    }
+
+    private long touchStart;
+
+    private void touch(int action, float x, float y) {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (action == android.view.MotionEvent.ACTION_DOWN) touchStart = now;
+        android.view.MotionEvent event = android.view.MotionEvent.obtain(touchStart, now, action, x, y, 0);
+        event.setSource(android.view.InputDevice.SOURCE_TOUCHSCREEN);
+        InstrumentationRegistry.getInstrumentation().sendPointerSync(event);
+        event.recycle();
+    }
+
+    /** Presses at ({@code fromX}, {@code fromY}), drags to ({@code toX}, {@code toY}) in small steps and leaves the finger down. */
+    private void dragAndHold(int fromX, int fromY, int toX, int toY) {
+        touch(android.view.MotionEvent.ACTION_DOWN, fromX, fromY);
+        for (int step = 1; step <= 12; step++) {
+            touch(android.view.MotionEvent.ACTION_MOVE, fromX + (toX - fromX) * step / 12f, fromY + (toY - fromY) * step / 12f);
+            android.os.SystemClock.sleep(16);
+        }
+    }
+
+    private void dragAndHold(int fromX, int toX, int y) { dragAndHold(fromX, y, toX, y); }
+
+    private void locateBubble(ActivityScenario<MainActivity> scenario, String message, int[] at, int[] size) {
+        scenario.onActivity(activity -> {
+            View bubble = (View) text(root(activity), message).getParent();
+            bubble.getLocationOnScreen(at); size[0] = bubble.getWidth(); size[1] = bubble.getHeight();
+        });
+    }
+
+    private void awaitDialog(ActivityScenario<MainActivity> scenario) throws Exception {
+        awaitMainCondition(scenario, activity -> dialog(activity) != null && dialog(activity).isShowing());
+    }
+
+    private void awaitNoDialog(ActivityScenario<MainActivity> scenario) throws Exception {
+        awaitMainCondition(scenario, activity -> dialog(activity) == null || !dialog(activity).isShowing());
+    }
+
+    @Test public void aContactWaitingForReviewIsMarkedOnTheListOpensItsReviewInsteadOfTheChatAndAcceptingMakesTheChatOpenable() throws Exception {
+        var scene = new AdminWithAReinstalledContact();
+        scene.reinstall();
+        String number = ChatEngine.safetyNumber(peerId, scene.changed.peer().identityKey());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            snapshot(scenario, "93-list-identity-changed");
+            scenario.onActivity(activity -> {
+                assertTrue("The list says which contact needs a look", hasText(root(activity), "Identity changed. Tap to review"));
+                assertFalse("There is no directory-wide error line", hasText(root(activity), "Introduced identity changed; the saved identity was not replaced"));
+                contactRow(activity, "reinstaller").performClick();
+            });
+            awaitDialog(scenario);
+            snapshot(scenario, "94-identity-review");
+            scenario.onActivity(activity -> {
+                assertNull("The chat did not open", readField(activity, "selectedPeer"));
+                View sheet = dialog(activity).getWindow().getDecorView();
+                assertTrue(hasText(sheet, "Identity changed"));
+                assertTrue("The new safety number is shown", hasText(sheet, number));
+                dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+            });
+            awaitNoDialog(scenario);
+            assertNotNull("Not now changes nothing", engine.onboarding().changed(peerId));
+            assertEquals(scene.saved.peer(), engine.peer(peerId));
+            scenario.onActivity(activity -> contactRow(activity, "reinstaller").performClick());
+            awaitDialog(scenario);
+            scenario.onActivity(activity -> dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+            awaitMainCondition(scenario, activity -> engine.onboarding().changed(peerId) == null && !hasText(root(activity), "Identity changed. Tap to review"));
+            assertEquals(scene.changed.peer(), engine.peer(peerId));
+            scenario.onActivity(activity -> contactRow(activity, "reinstaller").performClick());
+            awaitMainCondition(scenario, activity -> peerId.equals(readField(activity, "selectedPeer")));
+            scenario.onActivity(activity -> ((View) ((TextView) readField(activity, "conversationName")).getParent()).performClick());
+            awaitDialog(scenario);
+            snapshot(scenario, "95-profile-account-enrolled");
+            scenario.onActivity(activity -> {
+                View sheet = dialog(activity).getWindow().getDecorView();
+                assertTrue(hasText(sheet, "Contact profile"));
+                assertTrue("What the label under the chat used to say is in the profile", hasText(sheet, "Account enrolled, not verified by you"));
+                dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+            });
+        }
+    }
+
+    @Test public void swipingAMessageToTheRightStartsAReplyAndNothingElseDoes() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            int[] at = new int[2], size = new int[2];
+            locateBubble(scenario, "Coffee at 4?", at, size);
+            int y = at[1] + size[1] / 2, x = at[0] + dpPx(24);
+            // A short pull, a pull the wrong way and a mostly vertical drag do nothing.
+            assertTrue(device.swipe(x, y, x + dpPx(24), y, 12));
+            assertTrue(device.swipe(x + dpPx(120), y, x, y, 12));
+            assertTrue(device.swipe(x, y, x + dpPx(50), y - dpPx(150), 12));
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> assertNull(readField(activity, "pendingReplyTo")));
+            // Held, a mostly vertical drag does not move the message either, so the chat's own scrolling is left alone.
+            dragAndHold(x, y, x + dpPx(30), y - dpPx(120));
+            scenario.onActivity(activity -> assertEquals("A vertical drag leaves the message where it is", 0f,
+                ((View) text(root(activity), "Coffee at 4?").getParent()).getTranslationX(), 0.5f));
+            touch(android.view.MotionEvent.ACTION_UP, x + dpPx(30), y - dpPx(120));
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> assertNull(readField(activity, "pendingReplyTo")));
+            // Held short of the mark, the message follows the finger; letting go there does nothing.
+            locateBubble(scenario, "Coffee at 4?", at, size);
+            y = at[1] + size[1] / 2; x = at[0] + dpPx(24);
+            dragAndHold(x, x + dpPx(40), y);
+            scenario.onActivity(activity -> {
+                float moved = ((View) text(root(activity), "Coffee at 4?").getParent()).getTranslationX();
+                assertTrue("The message follows the finger: " + moved, moved > 0 && moved < dpPx(56));
+            });
+            snapshot(scenario, "91-swipe-reply-held");
+            touch(android.view.MotionEvent.ACTION_UP, x + dpPx(40), y);
+            awaitMainCondition(scenario, activity -> ((View) text(root(activity), "Coffee at 4?").getParent()).getTranslationX() == 0f);
+            scenario.onActivity(activity -> assertNull("Letting go short of the mark does nothing", readField(activity, "pendingReplyTo")));
+            // A real swipe starts the reply, and the message slides back.
+            locateBubble(scenario, "Coffee at 4?", at, size);
+            assertTrue(device.swipe(at[0] + dpPx(24), at[1] + size[1] / 2, at[0] + dpPx(24) + dpPx(150), at[1] + size[1] / 2, 20));
+            awaitMainCondition(scenario, activity -> readField(activity, "pendingReplyTo") != null);
+            scenario.onActivity(activity -> {
+                assertEquals("Coffee at 4?", readField(activity, "pendingReplySnippet"));
+                View strip = (View) readField(activity, "replyStrip");
+                assertEquals(View.VISIBLE, strip.getVisibility());
+                assertTrue(hasText(strip, "Coffee at 4?"));
+            });
+            awaitMainCondition(scenario, activity -> ((View) text(root(activity), "Coffee at 4?").getParent()).getTranslationX() == 0f);
+            // One of my own messages, and a photo (which is itself something to tap), reply too; the photo does not open.
+            locateBubble(scenario, "Sounds good. Same place?", at, size);
+            assertTrue(device.swipe(at[0] + dpPx(24), at[1] + size[1] / 2, at[0] + dpPx(24) + dpPx(150), at[1] + size[1] / 2, 20));
+            awaitMainCondition(scenario, activity -> "Sounds good. Same place?".equals(readField(activity, "pendingReplySnippet")));
+            locateBubble(scenario, "Photo", at, size);
+            assertTrue(device.swipe(at[0] + size[0] / 2, at[1] + size[1] / 2, at[0] + size[0] / 2 + dpPx(150), at[1] + size[1] / 2, 20));
+            awaitMainCondition(scenario, activity -> "Photo".equals(readField(activity, "pendingReplySnippet")));
+            scenario.onActivity(activity -> assertNull("Swiping a photo does not open it", readField(activity, "photoViewer")));
+            // A sideways drag the other way across the photo does not open it either, however slowly it is made.
+            locateBubble(scenario, "Photo", at, size);
+            assertTrue(device.swipe(at[0] + size[0] * 3 / 4, at[1] + size[1] / 2, at[0] + size[0] / 4, at[1] + size[1] / 2, 120));
+            // A photo opens after its bytes are decrypted off the main thread, so give it the time it would need.
+            android.os.SystemClock.sleep(1500);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> assertNull("A drag the wrong way across a photo does not open it", readField(activity, "photoViewer")));
+            scenario.onActivity(activity -> assertTrue("Nor does it end as a long press", dialog(activity) == null || !dialog(activity).isShowing()));
+            // The long press keeps working.
+            locateBubble(scenario, "Yes, see you there.", at, size);
+            assertTrue(device.swipe(at[0] + dpPx(24), at[1] + size[1] / 2, at[0] + dpPx(24), at[1] + size[1] / 2, 200));
+            awaitDialog(scenario);
+            scenario.onActivity(activity -> {
+                View sheet = dialog(activity).getWindow().getDecorView();
+                assertTrue(hasText(sheet, "Message actions")); assertTrue(hasText(sheet, "Reply"));
+                dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+            });
+        }
+    }
+
+    @Test public void swipingAChatToTheLeftAsksToRemoveTheContactAndCancellingKeepsIt() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            int[] at = new int[2], size = new int[2];
+            Runnable[] locate = new Runnable[1];
+            locate[0] = () -> scenario.onActivity(activity -> { View row = contactRow(activity, "Aarav Mehta"); row.getLocationOnScreen(at); size[0] = row.getWidth(); size[1] = row.getHeight(); });
+            locate[0].run();
+            int y = at[1] + size[1] / 2, right = at[0] + size[0] - dpPx(40);
+            // A short pull and a pull the wrong way do nothing.
+            scenario.onActivity(activity -> assertTrue("No dialog before any pull: " + shownText(activity), dialog(activity) == null || !dialog(activity).isShowing()));
+            assertTrue(device.swipe(right, y, right - dpPx(30), y, 10));
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> assertTrue("A short pull opened: " + shownText(activity), dialog(activity) == null || !dialog(activity).isShowing()));
+            assertTrue(device.swipe(at[0] + dpPx(60), y, at[0] + dpPx(220), y, 10));
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> assertTrue("A pull the wrong way opened: " + shownText(activity), dialog(activity) == null || !dialog(activity).isShowing()));
+            scenario.onActivity(activity -> assertNull("A pull the wrong way did not open the chat", readField(activity, "selectedPeer")));
+            // Held, a mostly vertical drag does not move the row, so the list can scroll.
+            dragAndHold(right, y, right - dpPx(30), y - dpPx(120));
+            scenario.onActivity(activity -> assertEquals("A vertical drag leaves the row where it is", 0f, contactRow(activity, "Aarav Mehta").getTranslationX(), 0.5f));
+            touch(android.view.MotionEvent.ACTION_UP, right - dpPx(30), y - dpPx(120));
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> assertTrue("And asks nothing", dialog(activity) == null || !dialog(activity).isShowing()));
+            // Held part of the way, the row follows the finger and shows what letting go would do.
+            dragAndHold(right, right - dpPx(70), y);
+            scenario.onActivity(activity -> {
+                float moved = contactRow(activity, "Aarav Mehta").getTranslationX();
+                assertTrue("The row follows the finger: " + moved, moved < 0 && moved > -dpPx(96));
+                assertTrue("The strip behind it is shown", hasText(root(activity), "Remove"));
+            });
+            snapshot(scenario, "96-swipe-remove-held");
+            touch(android.view.MotionEvent.ACTION_UP, right - dpPx(70), y);
+            awaitMainCondition(scenario, activity -> contactRow(activity, "Aarav Mehta").getTranslationX() == 0f);
+            scenario.onActivity(activity -> assertTrue("Letting go short of the mark does nothing", dialog(activity) == null || !dialog(activity).isShowing()));
+            // A real pull asks, with the contact's name; cancelling keeps the contact.
+            assertTrue(device.swipe(right, y, right - dpPx(200), y, 20));
+            awaitDialog(scenario);
+            scenario.onActivity(activity -> {
+                View sheet = dialog(activity).getWindow().getDecorView();
+                assertTrue(hasText(sheet, "Remove contact?"));
+                assertTrue(descendants(sheet).stream().anyMatch(view -> view instanceof TextView label && label.getText().toString().contains("Aarav Mehta")));
+                dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+            });
+            awaitNoDialog(scenario);
+            awaitMainCondition(scenario, activity -> contactRow(activity, "Aarav Mehta").getTranslationX() == 0f);
+            assertTrue("Cancelling keeps the contact", engine.peers().stream().anyMatch(value -> value.userId().equals(peerId)));
+            // The long press still asks; and confirming a swipe removes the contact.
+            locate[0].run();
+            y = at[1] + size[1] / 2; right = at[0] + size[0] - dpPx(40);
+            assertTrue(device.swipe(right, y, right - dpPx(200), y, 20));
+            awaitDialog(scenario);
+            scenario.onActivity(activity -> dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+            awaitMainCondition(scenario, activity -> engine.peers().stream().noneMatch(value -> value.userId().equals(peerId)));
+            scenario.onActivity(activity -> assertFalse(hasText(root(activity), "Aarav Mehta")));
+        }
+    }
+
+    @Test public void tappingTheNameOrThePictureInTheChatHeaderOpensTheContactProfile() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                TextView name = (TextView) readField(activity, "conversationName");
+                assertEquals("A contact this person verified is marked beside the name", "Aarav Mehta, verified", String.valueOf(name.getContentDescription()));
+                ((View) name.getParent()).performClick();
+            });
+            awaitDialog(scenario);
+            snapshot(scenario, "97-profile-verified");
+            scenario.onActivity(activity -> {
+                View sheet = dialog(activity).getWindow().getDecorView();
+                assertTrue(hasText(sheet, "Contact profile"));
+                assertTrue(hasText(sheet, "Verified by you"));
+                dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+            });
+            awaitNoDialog(scenario);
+            // The picture does the same.
+            scenario.onActivity(activity -> {
+                TextView name = (TextView) readField(activity, "conversationName");
+                ((ViewGroup) ((View) name.getParent()).getParent()).getChildAt(1).performClick();
+            });
+            awaitDialog(scenario);
+            scenario.onActivity(activity -> {
+                assertTrue(hasText(dialog(activity).getWindow().getDecorView(), "Contact profile"));
+                dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+            });
+            awaitNoDialog(scenario);
+            // The menu route is still there.
+            scenario.onActivity(activity -> assertTrue(descendants(root(activity)).stream().anyMatch(view -> "Conversation options".equals(view.getContentDescription()))));
+        }
+    }
+
+    @Test public void theComposerKeepsOnlyTheExpiryChoiceInsideTheMessageFieldAndOffersThreeChoices() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            snapshot(scenario, "90-composer-expiry-chip");
+            scenario.onActivity(activity -> {
+                View composer = (View) readField(activity, "composer");
+                TextView chip = (TextView) readField(activity, "expiryLabel");
+                assertSame("The expiry choice sits in the same frame as the message field", composer.getParent(), chip.getParent());
+                assertEquals("12h", chip.getText().toString());
+                assertEquals("Message expiry: 12 hours", String.valueOf(chip.getContentDescription()));
+                assertEquals(ChatEnvelope.Expiry.HOURS_12, readField(activity, "expiry"));
+                for (String gone : List.of("Account enrolled", "Verified", "Official admin", "Private group"))
+                    assertTrue(gone + " is no longer a row under the chat", descendants(root(activity)).stream().noneMatch(view -> view instanceof TextView label && gone.contentEquals(label.getText())));
+                View area = (View) ((View) composer.getParent()).getParent().getParent();
+                assertTrue("The area under the chat is the field and its padding only: " + area.getHeight(), area.getHeight() <= dpPx(85));
+                chip.performClick();
+            });
+            awaitDialog(scenario);
+            scenario.onActivity(activity -> {
+                SecureSheet choices = dialog(activity);
+                assertEquals(3, choices.getListView().getCount());
+                assertTrue(hasText(choices.getWindow().getDecorView(), "View once"));
+                assertTrue(hasText(choices.getWindow().getDecorView(), "12 hours"));
+                assertTrue(hasText(choices.getWindow().getDecorView(), "24 hours"));
+                assertFalse(hasText(choices.getWindow().getDecorView(), "1 hour"));
+                assertFalse(hasText(choices.getWindow().getDecorView(), "6 hours"));
+                choices.getListView().performItemClick(choices.getListView().getChildAt(0), 0, 0);
+            });
+            awaitNoDialog(scenario);
+            scenario.onActivity(activity -> {
+                TextView chip = (TextView) readField(activity, "expiryLabel");
+                assertEquals(ChatEnvelope.Expiry.VIEW_ONCE, readField(activity, "expiry"));
+                assertEquals("Once", chip.getText().toString());
+                assertEquals("Message expiry: View once", String.valueOf(chip.getContentDescription()));
+                invoke(activity, "expiryDialog");
+            });
+            awaitDialog(scenario);
+            scenario.onActivity(activity -> {
+                SecureSheet choices = dialog(activity);
+                choices.getListView().performItemClick(choices.getListView().getChildAt(2), 2, 2);
+            });
+            awaitNoDialog(scenario);
+            scenario.onActivity(activity -> {
+                assertEquals(ChatEnvelope.Expiry.HOURS_24, readField(activity, "expiry"));
+                assertEquals("24h", ((TextView) readField(activity, "expiryLabel")).getText().toString());
+            });
+        }
+    }
+
+    @Test public void aTwelveHourMessageIsLabelledTwelveHoursWithItsRealSendingTime() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry twelve = entry(true, "Twelve hour message", null, ChatEnvelope.Expiry.HOURS_12, "DELIVERED", -45_000);
+        String time = java.time.format.DateTimeFormatter.ofPattern("HH:mm", Locale.getDefault()).format(
+            java.time.Instant.ofEpochMilli(twelve.expiresAt() - ChatEnvelope.Expiry.HOURS_12.milliseconds).atZone(java.time.ZoneId.systemDefault()));
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> assertTrue("The label shows twelve hours and the time it was really sent",
+                hasText(root(activity), time + "  /  12 hours")));
+        }
+    }
+
+    @Test public void aMessageHeldPartWayShowsTheReplyArrowBehindItAndNothingIsDrawnThereAtRest() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> assertEquals("Nothing is drawn behind a message at rest", 0, markedPixelsBehind(activity, "Coffee at 4?")));
+            int[] at = new int[2], size = new int[2];
+            locateBubble(scenario, "Coffee at 4?", at, size);
+            int y = at[1] + size[1] / 2, x = at[0] + dpPx(24);
+            dragAndHold(x, x + dpPx(40), y);
+            int[] held = new int[1];
+            scenario.onActivity(activity -> held[0] = markedPixelsBehind(activity, "Coffee at 4?"));
+            assertTrue("The reply arrow shows behind a message held part of the way: " + held[0], held[0] > 40);
+            snapshot(scenario, "98-reply-arrow-held");
+            touch(android.view.MotionEvent.ACTION_UP, x + dpPx(40), y);
+            awaitMainCondition(scenario, activity -> markedPixelsBehind(activity, "Coffee at 4?") == 0);
+        }
+    }
+
+    /** How many pixels are drawn in the space the message has moved away from, where the reply arrow shows. */
+    private int markedPixelsBehind(MainActivity activity, String message) {
+        View bubble = (View) text(root(activity), message).getParent();
+        ViewGroup line = (ViewGroup) bubble.getParent();
+        Bitmap image = Bitmap.createBitmap(line.getWidth(), line.getHeight(), Bitmap.Config.ARGB_8888);
+        line.draw(new Canvas(image));
+        int shown = 0, edge = Math.max(0, Math.round(bubble.getLeft() + bubble.getTranslationX()));
+        for (int px = 0; px < edge; px++) for (int py = 0; py < image.getHeight(); py++) if (Color.alpha(image.getPixel(px, py)) != 0) shown++;
+        image.recycle();
+        return shown;
     }
 
 }
