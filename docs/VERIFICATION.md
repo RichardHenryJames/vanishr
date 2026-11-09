@@ -91,6 +91,23 @@ build, the publication and the public checks under "Release steps" at the end.
   then sign in with `vanishr` and the password; the phone keeps its device and keys), an install from Google Play or whether Play
   accepts the bundle, and the new relay with the multi-device schema under real use.
 
+### Admin identity certificate, sequence 2 (2026-11-09)
+
+After the 0.6.6 release the owner updated the direct-download app on the phone, signed in as `vanishr` with the password and got
+"Official admin identity changed. A revised app update is required." The relay's admin device row had become a **new device and
+identity** (safety number `06C95969 … 93472168`, which is what the phone showed; the owner gave its first and last group), while
+every app still pinned `7B0C4072 …`. So the sign-in itself worked; the phone registered a new device (it did not have the earlier keys
+to re-use), and the one-device admin account moved to it. Which step on the phone caused that was not observed and is not known. The documented
+procedure was followed: `sign-admin-identity.ps1 -PhoneSafetyNumber '<first group> <last group>'` read the relay's row (one read-only
+query), matched the number the owner typed to it before showing the relay's, and signed **sequence 2** (device
+`dfcb1fe6-9e4b-4e19-849e-a8465b59d687`); it was published with a website release built from the current 0.6.6 stage
+(`prepare-website.ps1`, deployment `dpl_2N8vSrLuWWUSxt5H2CBxVdM7jYYq`, alias moved explicitly). Only `ota/admin-identity.json` differs
+from the 0.6.6 release stage; the APK, feed and settings are byte-identical, the public APK hash was checked again, and
+`sign-admin-identity.ps1 -Check -Live -RequireIdentical` reports that the website serves exactly the committed certificate (sequence 2,
+`application/json`, `no-store`). **Not yet done:** the built-in pin (`AdminOnboarding.OFFICIAL`) and `BUILD_SEQUENCE_FLOOR` still name the
+old identity and sequence 1, which the next app version has to carry (`prepare-download.ps1` stops until it does). Apps of 0.6.3 or later
+follow the certificate on their own; that this phone and a user's phone then accept the admin was not observed when this was written.
+
 ## Release 0.6.5 / A changed contact identity is reviewed, three expiry choices, swipes
 
 Release 0.6.5 / code 46 is a client-only change: no relay change, no relay deployment, no Azure write. Design and limits:
