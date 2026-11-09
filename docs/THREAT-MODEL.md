@@ -1103,8 +1103,9 @@ described next, and no app uses it.
 
 The relay can now hold more than one device for an ordinary account (migration V14 drops the
 unique constraint that allowed exactly one). **Every released app is still one device per
-account and behaves exactly as before**: nothing asks for a second device yet, and this relay
-has not been deployed. What exists, and what does not:
+account and behaves exactly as before**: nothing asks for a second device yet. (This relay was
+deployed on 2026-11-09 with the relay publish for 0.6.6; the text was written before that, and the
+heading is kept so that links to it still work.) What exists, and what does not:
 
 - **Adding a device is an explicit request.** `POST /devices` adds a device only when the
   request says `addDevice`. An older app never sends that, so it is still answered

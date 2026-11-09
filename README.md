@@ -12,14 +12,15 @@ license notices at **https://vanishr-download.vercel.app**.
 The public [update feed](https://vanishr-download.vercel.app/updates.json), not
 the latest Git version, determines which release users can download and discover.
 
-Release **0.6.6/code 47** lowers the minimum password length from 16 to 12 characters (12 to 64), and lets the official
-admin's account sign in with a username and password instead of Google. The Google account is not needed for the admin any
-more, and no e-mail address of the admin is stored, shown or published anywhere (the relay only ever received Google's opaque
-account id). A phone that already holds the admin's keys signs out and back in with the password and keeps the same device and
-keys, so contacts see no identity change. This needs a relay update first (the relay enforces the length), which also brings the
-not-yet-deployed multi-device schema (V14) with it; an app older than 0.6.6 still asks for 16 characters. Emulator and relay tests
-only; no physical phone. See the
-[threat model](docs/THREAT-MODEL.md#password-length-of-12-and-the-admins-move-from-google-to-a-password-066).
+Release **0.6.6/code 47** lowers the minimum password length from 16 to 12 characters (12 to 64), and the official admin's
+account now signs in with a username and password instead of Google. The Google account is not needed for the admin any more,
+and no e-mail address of the admin is stored, shown or published anywhere (the relay only ever received Google's opaque account
+id). A phone that already holds the admin's keys signs out and back in with the password and keeps the same device and keys, so
+contacts see no identity change. The relay was updated first (it enforces the length), which also installed the multi-device
+schema (V14) that had been held back; no app uses it yet. An app older than 0.6.6 still asks for 16 characters. Emulator and relay
+tests only; no physical phone. See the
+[threat model](docs/THREAT-MODEL.md#password-length-of-12-and-the-admins-move-from-google-to-a-password-066) and
+[verification](docs/VERIFICATION.md#release-066--passwords-of-12-characters-and-the-admin-account-without-google-2026-11-09).
 
 Release **0.6.5/code 46** fixes the contact list on the official admin's phone and tidies the chat screen. When a contact
 reinstalled Vanishr or changed phone, the admin's phone showed "Introduced identity changed; the saved identity was not

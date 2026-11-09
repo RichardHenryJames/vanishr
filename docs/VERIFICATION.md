@@ -6,8 +6,8 @@ not a production security assessment or independent audit.
 ## Release 0.6.6 / Passwords of 12 characters, and the admin account without Google (2026-11-09)
 
 Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#password-length-of-12-and-the-admins-move-from-google-to-a-password-066).
-This entry records the code and its tests; the relay publication, the move of the admin account on the production database, the
-build, the publication and the public checks are recorded under "Release steps" at the end once they have been done.
+This entry records the code and its tests, then the relay publication, the move of the admin account on the production database, the
+build, the publication and the public checks under "Release steps" at the end.
 
 - **Changed.** The minimum password length is 12 (was 16): `AuthService.MIN_PASSWORD` (relay), `ChatEngine.MIN_PASSWORD` (app; the
   sign-in form, the delete-account form, `ChatEngine.login` and `AccountSafety.deleteWithPassword` use it), `docs/API.md`. And
@@ -42,6 +42,54 @@ build, the publication and the public checks are recorded under "Release steps" 
   It was left alone. The two skips need a device with no screen lock and an opt-in for the live relay.
 - **Not verified.** The move on the production database, a sign-in as the admin on a physical phone, and the strength of the
   chosen password (the owner shared it in a chat and it is 12 characters).
+
+### Release steps (2026-11-09)
+
+- **Relay published first** (`publish-azure.ps1 -Action Publish`, approved group `vanishr-dev-rg` only; no VM size, add-on or
+  spending change; the temporary storage account the script creates was removed). The JAR (48,666,490 bytes, SHA-256
+  `c5d124550bcb4ec3e79fb38ff0de2329c9921d27c081700b6cfc4ef7ef8112d4`) was built by the final gate from commit `c92398e`. Health is `up`
+  and Flyway shows **V14 applied** (`schema|14|true`, then 13 and 12): the multi-device schema that was held back since 2026-11-05
+  went out with it, because a publish installs the whole source. V14 only drops a unique constraint; no app uses it yet, an older
+  relay JAR no longer starts against this database, and there is no tested rollback. The live relay answers a 12-character password
+  with 401 (accepted as a length, wrong credentials), 11 and 65 characters with 400.
+- **The admin account moved from Google to a password** (one guarded `UPDATE` in a transaction, from the owner's explicit
+  instruction): the row of the permanent admin account (username `vanishr`, which it already had) now has a bcrypt cost-12 hash and no
+  Google id. The statement named the account id, the ADMIN type and the Google-only state, so anything else would have updated 0
+  rows; it updated exactly 1. Only the hash went to the database (the password was read from an environment variable, never
+  written to a file or to this repository, and the hash is not recorded here). Read back afterwards: `has_password=true`,
+  `has_google=false`, type ADMIN, ACTIVE, and 95 accounts in total as before. **Irreversible by design**: the old Google id was not
+  kept. Against the live relay: the right password signs in as the admin's account id (an enrollment token, no device yet), a wrong
+  one and a wrong-case one give 401. The device, the identity key and the pin were not touched.
+- **Build and stage** (from `c92398e`, tree clean): signed APK **44,536,068 bytes** (by coincidence the same size as 0.6.5's; it
+  differs, and a search of its dex shows the 12-character code and none of the old 16-character message), SHA-256
+  `36600e37db2d65982e499725aaef56a3f492011e077e5aa276350a5cd07bc2c5`, version 0.6.6 / code 47, min API 28, target API 36, the same 15
+  permissions as 0.6.5 (compared), the same certificate as every release since 0.6.0 (SHA-256
+  `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`, v2 scheme only), release lint passed.
+  `.tools\vercel-download-0.6.6`: 33 files / 60,112,398 bytes (limit 99,000,000), recorded in `.tools\distribution-audit-0.6.6.json`.
+  The content audit of the source ZIP (479 entries, 261 source files byte-identical to the commit and none different), the stage
+  and the stored APK bytes searched for nine private values by value and fourteen secret patterns: no findings. Only
+  `.vercel\project.json` was copied from the 0.6.5 stage (IDs checked, no `.env*` file).
+- **Vercel.** Deployment `dpl_H7rgSRwBnNUFdY2gXCEVDdNwvHZQ` (production, READY); the live feed served 0.6.5 / 46 before, so 47 is no
+  downgrade; the canonical alias `vanishr-download.vercel.app` was moved to it explicitly.
+- **Public verification** (`.tools\public-release-verification-0.6.6.json`). The canonical feed reports 0.6.6 / 47 with `no-store`;
+  all 32 audited files fetched anonymously are byte-identical (HTTP 200); the public APK is byte-identical to the staged one and has the
+  original certificate; 22 private or missing paths return 404; security headers pass; the signed settings file and the admin
+  identity certificate are live and identical to the committed files (the settings file still expires on **2026-12-01** and needs
+  renewing before then); no warnings or problems.
+- **In-place upgrade** on the dedicated test emulator: the public 0.6.5 APK installed and run, then the public 0.6.6 APK installed over
+  it with `adb install -r`, no uninstall: version code 46 to 47, `firstInstallTime` unchanged, same certificate, the app running
+  afterwards, an empty crash buffer and no fatal exception. It does not cover the in-app "Check for updates" banner, the browser
+  download, or signing in on a phone that holds the admin's keys (covered at engine level by the `ScreenFlowTest` above).
+- **Google Play bundle** (`.tools\play-store-0.6.6\vanishr-0.6.6.aab`, not uploaded anywhere): **45,850,871 bytes**, SHA-256
+  `ff17bf5cc91bd398d8f92c4f93802d18be284d94d96cd44fce4f3b307cb181c3`; bundletool 1.18.3 `validate` passed; 0.6.6 / code 47, min API 28,
+  target API 36; 14 permissions (the same count as 0.6.5's bundle); 64-bit native libraries 16 KiB aligned; bundled notices match the
+  source; no external updater; the Firebase client configuration present and matching; JAR signature verified with the same signer;
+  an exhaustive by-value scan of the decompressed bundle (885 entries, eight private values): no findings.
+- **The gate on the final code.** `verify.ps1 -Android` passed: client-core **32** tests, relay **114** tests, 0 failures, 2 skipped
+  (the opt-in live-relay tests), lint 0 errors / 19 warnings (the baseline), and the PowerShell suites.
+- **What this does not show.** A sign-in as the admin on a physical phone (the next step is the owner's: install 0.6.6, **Sign out**,
+  then sign in with `vanishr` and the password; the phone keeps its device and keys), an install from Google Play or whether Play
+  accepts the bundle, and the new relay with the multi-device schema under real use.
 
 ## Release 0.6.5 / A changed contact identity is reviewed, three expiry choices, swipes
 
@@ -143,7 +191,8 @@ stage, publication and public checks of the release are recorded under "Release 
 - **Relay.** No relay main file changed since the undeployed V14 commit `60ac901` (`git diff 60ac901 HEAD -- relay/src/main`
   is empty; only two relay tests were added), and the deadline policy that accepts a 12-hour deadline under the 24-hour kind
   (`RelayPolicy`, `RelayTypes`, `enqueue.lua`) was last changed in the 0.5.7 release, which is deployed. So no relay
-  deployment and no Azure write ran, and V14 is still not deployed. Not tried: a 12-hour message sent through the production
+  deployment and no Azure write ran (V14 was still undeployed then; it went out with the 0.6.6 relay publish, see that entry).
+  Not tried: a 12-hour message sent through the production
   relay with a real account (the live-relay tests are opt-in and use synthetic accounts); that rests on the unchanged policy code
   and the relay integration test above.
 - **Build and stage.** Built from commit `6a990ee` after the version bump (`prepare-download.ps1 -PrepareNoticesOnly`, then
@@ -186,6 +235,10 @@ stage, publication and public checks of the release are recorded under "Release 
   update-prompt and browser-download walkthrough (see "In-place upgrade" above for the narrower check done instead).
 
 ## Several devices per account (relay only, unreleased, not deployed, 2026-11-05)
+
+**Update 2026-11-09: this relay change was deployed** with the relay publish for release 0.6.6 (see
+[that entry](#release-066--passwords-of-12-characters-and-the-admin-account-without-google-2026-11-09)); still no app uses it. The text
+below is the record as it was written, before that.
 
 The relay can now hold up to five devices for an ordinary account **when an app asks it to**. No app asks yet, no
 released app changes behavior, and this relay has not been deployed (that needs approval, and a relay JAR from before
