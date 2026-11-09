@@ -298,6 +298,15 @@ public class AccountSafetyTest {
         vault.transaction(() -> { write("outbox/" + entry.id(), new ChatEngine.Outbox(message, null)); return null; });
     }
 
+    @Test public void aPasswordOfElevenCharactersIsRefusedBeforeAnyRequestAndOneOfTwelveIsSent() throws Exception {
+        assertThrows(IllegalArgumentException.class, () -> engine.safety().deleteWithPassword("a".repeat(ChatEngine.MIN_PASSWORD - 1)));
+        assertEquals(0, requests("/auth/login"));
+        assertEquals(12, ChatEngine.MIN_PASSWORD);
+        stored(userId, UUID.randomUUID(), false, null);
+        engine.safety().deleteWithPassword("Twelve-chars");
+        assertEquals(1, requests("/auth/login"));
+    }
+
     @Test public void deletionUsesFreshEnrollmentWithoutChangingSessionOrRegisteringDevice() throws Exception {
         String currentToken = engine.account().accessToken();
         SignalClient previousSignal = engine.groupSignal();

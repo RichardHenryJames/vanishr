@@ -19,8 +19,9 @@ import static app.vanishr.relay.RelayTypes.*;
 
 @Service
 public class AuthService {
+    static final int MIN_PASSWORD = 12;
     public record Login(@NotNull @Pattern(regexp = AccountDirectory.USERNAME_PATTERN) String handle,
-                        @NotNull @Size(min = 16, max = 64) String password, UUID deviceId) {
+                        @NotNull @Size(min = MIN_PASSWORD, max = 64) String password, UUID deviceId) {
         @Override public String toString() { return "Login[redacted]"; }
     }
     public record Token(UUID userId, UUID deviceId, String accessToken, long expiresAt, String refreshToken, long refreshExpiresAt) {

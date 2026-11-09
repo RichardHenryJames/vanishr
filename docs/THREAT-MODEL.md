@@ -450,6 +450,41 @@ unchanged verification code, not run), or the feel of the swipes with a real fin
 and drag on an emulator). The refusal to accept a blocked or removed contact rests on the existing eligibility check and has
 no test of its own.
 
+## Password length of 12 and the admin's move from Google to a password (0.6.6)
+
+**Password length.** Passwords are 12 to 64 characters (they were 16 to 64), at most 72 UTF-8 bytes, for registration and
+sign-in alike (`AuthService.MIN_PASSWORD` on the relay, `ChatEngine.MIN_PASSWORD` in the app, which every form and check uses).
+This lowers the floor for **every** account, not only the admin's. What still limits guessing: bcrypt at cost 12, the shared
+ten-attempts-a-minute budget per source address for `/auth/register`, `/auth/login` and `/auth/google`, and the generic
+"authentication failed" answer (an unknown account is checked against a dummy hash). Nothing else about passwords changed:
+the relay still never sees the account's keys or messages, and a password is not a key to them (the identity keys live on the
+phone). An app older than 0.6.6 still asks for 16 characters, so an account with a 12-character password cannot sign in from it.
+
+**The admin account's sign-in method.** The official admin is one account (`admin_identity`, permanent) that was created by Google
+sign-in. The relay never received that Google account's e-mail address (it gets only Google's opaque account id, and the
+username is not derived from it), and this app's source, the published site, the source ZIP and the APK contain no e-mail address of
+the admin. Moving the account to a username and password therefore does not add or remove any e-mail anywhere; it removes the Google
+link, so the account no longer depends on a Google account at all. The move is an operator step on the relay's database (one
+`UPDATE` of the admin's row inside the approved resource group: set a bcrypt hash and clear the Google id, which the table's
+check constraint requires to be exactly one of the two). It does not touch the account id, the device or the identity key, so the
+pinned official identity, every contact's saved admin and the certificate procedure are unaffected. The hash is the only new
+secret; it is a bcrypt hash and is not in this repository.
+Signing in as the admin on a **phone that already holds the admin's keys** (the one that was signed in with Google) needs the app to
+accept the change of method: signing out saves the account with a "Google" marker, and signing back in with the password used to be
+refused ("Saved account does not match the authenticated account"). That condition is gone from `ChatEngine.finishLogin`: the relay
+has just authenticated the same account id on the same origin, so the method is not part of what has to match, and the saved
+device and keys come back unchanged (a test shows the same device id and public identity are re-registered, nothing replaced). A
+**new** phone still registers a new device and identity and needs the replacement question and the certificate step
+([Changing the admin's phone](DEPLOYMENT-GUIDE.md#changing-the-admins-phone)), as before. After the move, "Continue with Google"
+for the old Google account no longer reaches the admin (it would create an ordinary new account), and an admin session that was
+opened with Google keeps working until its own expiry (up to 30 days) unless it is signed out.
+
+**Verified, and not.** The relay accepts 12 and refuses 11 and 65 characters (`RelayIntegrationTest`), the app refuses 11 and sends
+12 (`AccountSafetyTest`), and the switch from a Google-marked saved account to a password sign-in re-registers the same device and
+keys (`ScreenFlowTest`), each with a mutation that was caught. Not demonstrated: the move on the production database, a sign-in as
+the admin on a physical phone, and the password's strength (12 characters is what the relay now allows; the admin's was chosen by
+the owner, shared in a chat and should be treated as exposed).
+
 ## Account erasure, blocks and safety reports
 
 Account erasure requires a fresh account-only password/Google sign-in, never a

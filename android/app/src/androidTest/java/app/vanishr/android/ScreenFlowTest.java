@@ -3454,6 +3454,39 @@ public class ScreenFlowTest {
         }
     }
 
+    @Test public void anAccountWhoseSignInMovedFromGoogleToAPasswordComesBackWithItsSameDeviceAndKeys() throws Exception {
+        signedInFixture(); conversationsFixture();
+        vault.transaction(() -> { vault.put("google-account", new byte[]{1}); return null; });
+        String identity = engine.identityCode();
+        byte[] body = vault.get("body/" + once.id());
+        engine.logout();
+        vault.unlock(); engine = new ChatEngine(vault);
+        assertNull(engine.account());
+        var registrations = new java.util.concurrent.atomic.AtomicInteger();
+        setField(engine, "api", syntheticApi(chain -> {
+            okhttp3.Request request = chain.request();
+            if (request.url().encodedPath().equals("/devices")) {
+                okio.Buffer buffer = new okio.Buffer(); request.body().writeTo(buffer);
+                ChatEngine.DeviceRegistration registration = RelayApi.JSON.fromJson(buffer.readUtf8(), ChatEngine.DeviceRegistration.class);
+                assertEquals("The saved device, not a new one", deviceId, registration.deviceId());
+                assertFalse("Nothing is replaced", registration.replaceExisting());
+                assertEquals("The saved identity, not a new one", identity, userId + ":" + Base64.getEncoder().encodeToString(registration.identityKey()));
+                registrations.incrementAndGet();
+                return syntheticResponse(request, 200, new ChatEngine.Token(userId, deviceId, "password-session", System.currentTimeMillis() + 3_600_000));
+            }
+            assertEquals("/keys", request.url().encodedPath());
+            return syntheticResponse(request, 200, new ChatEngine.KeyCount(16));
+        }));
+        invoke(engine, "finishLogin", new Class<?>[]{ChatEngine.Token.class, String.class, UUID.class, boolean.class, boolean.class},
+            new ChatEngine.Token(userId, null, "password-enrollment", System.currentTimeMillis() + 300_000), "alex", null, false, false);
+        assertTrue(engine.authenticated()); assertFalse("It is a password account now", engine.usesGoogle());
+        assertEquals(identity, engine.identityCode()); assertEquals(deviceId, engine.activeDeviceId());
+        assertEquals(1, registrations.get()); assertEquals("password-session", engine.account().accessToken());
+        assertArrayEquals(body, vault.get("body/" + once.id()));
+        assertFalse(engine.peers().isEmpty());
+        Arrays.fill(body, (byte) 0);
+    }
+
     @Test public void signingOutPreservesEncryptedAccountStateAndKeysUntilExpiry() throws Exception {
         signedInFixture(); conversationsFixture();
         engine.applyProfile(new ChatEngine.Profile(userId, "alex", "Local test profile"));

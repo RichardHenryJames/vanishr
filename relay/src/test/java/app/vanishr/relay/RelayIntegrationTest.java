@@ -664,6 +664,15 @@ class RelayIntegrationTest {
         request(body(post("/messages"), conflicting), alice).andExpect(status().isConflict());
     }
 
+    @Test void passwordsAreTwelveToSixtyFourCharactersAndShorterOrLongerOnesAreRefused() throws Exception {
+        request(body(post("/auth/register"), Map.of("handle", "pw_eleven", "password", "a".repeat(11))), null).andExpect(status().isBadRequest());
+        request(body(post("/auth/register"), Map.of("handle", "pw_long", "password", "a".repeat(65))), null).andExpect(status().isBadRequest());
+        request(body(post("/auth/register"), Map.of("handle", "pw_twelve", "password", "Twelve-chars")), null).andExpect(status().isCreated());
+        request(body(post("/auth/login"), Map.of("handle", "pw_twelve", "password", "Twelve-chars")), null).andExpect(status().isOk());
+        request(body(post("/auth/login"), Map.of("handle", "pw_twelve", "password", "Twelve-chars!".substring(0, 11))), null).andExpect(status().isBadRequest());
+        request(body(post("/auth/login"), Map.of("handle", "pw_twelve", "password", "Twelve-wrong")), null).andExpect(status().isUnauthorized());
+    }
+
     @Test void offlineMessageAndImageExpireWithoutAnyRecipientAcknowledgement() throws Exception {
         Device alice = device("alice");
         Device bob = device("bob");

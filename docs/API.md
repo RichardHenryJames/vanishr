@@ -14,7 +14,7 @@ which cannot be used as an access bearer. Server stores SHA-256 token digests,
 never raw bearer or renewal tokens. Rotation atomically retires the previous
 access/renewal pair and creates both bounded replacements. Redis remains
 nonpersistent, so a Redis reset requires sign-in again.
-Passwords are 16-64 characters, at most 72 UTF-8 bytes, hashed using BCrypt cost
+Passwords are 12-64 characters, at most 72 UTF-8 bytes, hashed using BCrypt cost
 12. Passwords are authentication secrets carried by TLS, not E2EE content.
 
 Authentication attempts (`/auth/register`, `/auth/login`, `/auth/google`) share

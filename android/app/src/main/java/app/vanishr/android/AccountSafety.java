@@ -295,7 +295,7 @@ final class AccountSafety {
     void deleteWithPassword(String password) throws Exception {
         ChatEngine.Account owner = owner(false);
         if (engine.usesGoogle()) throw new SecurityException("Confirm deletion with Google");
-        if (password == null || password.length() < 16 || password.length() > 64
+        if (password == null || password.length() < ChatEngine.MIN_PASSWORD || password.length() > 64
                 || password.getBytes(StandardCharsets.UTF_8).length > 72)
             throw new IllegalArgumentException("Enter your account password");
         try (RelayApi temporary = temporaryApis.apply(owner.origin())) {

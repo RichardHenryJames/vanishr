@@ -1,7 +1,47 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-11-06 UTC. This is a development foundation,
+Evidence refreshed on Windows, 2026-11-09 UTC. This is a development foundation,
 not a production security assessment or independent audit.
+
+## Release 0.6.6 / Passwords of 12 characters, and the admin account without Google (2026-11-09)
+
+Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#password-length-of-12-and-the-admins-move-from-google-to-a-password-066).
+This entry records the code and its tests; the relay publication, the move of the admin account on the production database, the
+build, the publication and the public checks are recorded under "Release steps" at the end once they have been done.
+
+- **Changed.** The minimum password length is 12 (was 16): `AuthService.MIN_PASSWORD` (relay), `ChatEngine.MIN_PASSWORD` (app; the
+  sign-in form, the delete-account form, `ChatEngine.login` and `AccountSafety.deleteWithPassword` use it), `docs/API.md`. And
+  `ChatEngine.finishLogin` no longer requires that a saved account's sign-in method (Google or password) equals the method used to
+  sign back in: the relay has just authenticated the same account id on the same origin, which is what has to match.
+- **Why the second change.** The admin account was created with Google. Signing out saves its phone-side state marked "Google", and
+  signing back in with a password was refused with "Saved account does not match the authenticated account", which on the owner's
+  phone would have meant wiping the app and registering a new device and identity (the "Official admin identity changed"
+  situation again). Found by reading `finishLogin`, not by an observed failure on a phone.
+- **Tests (3 new, all passing).** `RelayIntegrationTest.passwordsAreTwelveToSixtyFourCharactersAndShorterOrLongerOnesAreRefused`
+  (11 and 65 characters refused with 400, 12 accepted to register and to sign in, a wrong 12-character password is 401);
+  `AccountSafetyTest.aPasswordOfElevenCharactersIsRefusedBeforeAnyRequestAndOneOfTwelveIsSent`;
+  `ScreenFlowTest.anAccountWhoseSignInMovedFromGoogleToAPasswordComesBackWithItsSameDeviceAndKeys` (a Google-marked account that
+  signed out signs in with a password: the same device id and the same public identity are re-registered, nothing is replaced, it is
+  a password account afterwards, its stored message is intact). **Mutations, both caught:** the relay constant back to 16 (the
+  12-character registration then gets 400), and the old "same method" condition put back in `finishLogin` (the test then fails with
+  exactly "Saved account does not match the authenticated account"). The app constant back to 16 is caught by
+  `aPasswordOfElevenCharacters…` only through its assertion on the constant itself. Each mutated file was restored and its diff
+  checked.
+- **A mistake of mine, caught.** Three of my build commands ran `pwsh -File build-android.ps1 -Tasks @(...)`, which PowerShell does
+  not pass as an array, so Gradle ran only `:help` and the next test run used a stale APK (an APK older than the source it was meant
+  to contain). It was found because a test I had just fixed still failed with the old message and the APK's timestamp had not
+  moved; the builds were redone in-process and the tests rerun. Results before that point that came from the in-process helper are
+  unaffected.
+- **The gate.** `verify.ps1 -Android` passed on the final code (see "Release steps" for the numbers).
+- **The full emulator suite (298 tests): 2 failures and 2 skips.** Failing: `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`
+  (fails the same way on the 0.6.3 commit, as recorded before) and `profileSessionRejectionReturnsToSignInInsteadOfStayingInTheDialog`.
+  The second passed in the 0.6.5 runs of 2026-11-06 and failed here, so it was investigated: it fails the same way, 4 runs out of 4,
+  on the **committed 0.6.5 code** on the same freshly booted emulator today (and 5 of 5 on this release's code), while it also passed on the
+  committed code earlier the same day. The test clicks "Save name" immediately after opening the dialog, and `saveProfileField`
+  does nothing when the app is busy, so it is a timing race in the test that depends on the machine, not a result of this change.
+  It was left alone. The two skips need a device with no screen lock and an opt-in for the live relay.
+- **Not verified.** The move on the production database, a sign-in as the admin on a physical phone, and the strength of the
+  chosen password (the owner shared it in a chat and it is 12 characters).
 
 ## Release 0.6.5 / A changed contact identity is reviewed, three expiry choices, swipes
 

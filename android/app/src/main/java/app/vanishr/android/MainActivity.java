@@ -966,8 +966,8 @@ public final class MainActivity extends AppCompatActivity {
             try { accountHandle = ChatEngine.validUsername(handle.getText().toString()); }
             catch (IllegalArgumentException failure) { username.layout().setError(ChatEngine.USERNAME_HINT); return; }
             String secret = password.getText().toString();
-            if (secret.length() < 16 || secret.length() > 64 || secret.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 72) {
-                secretField.layout().setError("Use 16-64 characters, up to 72 UTF-8 bytes"); return;
+            if (secret.length() < ChatEngine.MIN_PASSWORD || secret.length() > 64 || secret.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 72) {
+                secretField.layout().setError("Use " + ChatEngine.MIN_PASSWORD + "-64 characters, up to 72 UTF-8 bytes"); return;
             }
             boolean register = signingUp;
             boolean replaceExisting = replace.isChecked();
@@ -3022,7 +3022,7 @@ public final class MainActivity extends AppCompatActivity {
             if (busy || engine != current || current.account() == null || !deleting.equals(current.account().userId())) return;
             if (!"DELETE".contentEquals(confirmation.input().getText())) { confirmation.layout().setError("Type DELETE exactly"); return; }
             String secret = password.input().getText().toString();
-            if (!google && (secret.length() < 16 || secret.length() > 64)) { password.layout().setError("Enter your account password"); return; }
+            if (!google && (secret.length() < ChatEngine.MIN_PASSWORD || secret.length() > 64)) { password.layout().setError("Enter your account password"); return; }
             password.input().setText(""); sheet.dismiss();
             if (google) beginGoogleSignIn(current.account().origin(), false, deleting);
             else submit(() -> current.safety().deleteWithPassword(secret), this::deletedAccount, this::deletionFailed);

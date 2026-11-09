@@ -14,6 +14,7 @@ import static app.vanishr.android.RelayApi.JSON;
 final class ChatEngine implements AutoCloseable {
     static final String USERNAME_PATTERN = "[a-z0-9_-]{3,32}";
     static final String USERNAME_HINT = "Use 3-32 lowercase letters, numbers, underscores or hyphens";
+    static final int MIN_PASSWORD = 12;
     record Account(String origin, String handle, UUID userId, UUID deviceId, String accessToken, long expiresAt, boolean enrolled,
                    String refreshToken, long refreshExpiresAt) {
         Account(String origin, String handle, UUID userId, UUID deviceId, String accessToken, long expiresAt, boolean enrolled) {
@@ -335,8 +336,8 @@ final class ChatEngine implements AutoCloseable {
         if (account != null && !account.origin().equals(okhttp3.HttpUrl.get(origin).toString()))
             throw new SecurityException("Sign out before switching accounts");
         handle = validUsername(handle);
-        if (password.length() < 16 || password.length() > 64 || password.getBytes(StandardCharsets.UTF_8).length > 72)
-            throw new IllegalArgumentException("Use a valid handle and a 16-64 character password");
+        if (password.length() < MIN_PASSWORD || password.length() > 64 || password.getBytes(StandardCharsets.UTF_8).length > 72)
+            throw new IllegalArgumentException("Use a valid handle and a " + MIN_PASSWORD + "-64 character password");
         if (api != null) api.close();
         useApi(new RelayApi(origin, null));
         UUID existingDevice = account == null ? null : account.deviceId();
@@ -376,8 +377,9 @@ final class ChatEngine implements AutoCloseable {
         if (account == null) {
             Account saved = read(AndroidVault.savedAccountPrefix(token.userId()) + "account", Account.class);
             if (saved != null) {
-                if (!saved.userId().equals(token.userId()) || !saved.origin().equals(api.origin())
-                        || google != (vault.get(AndroidVault.savedAccountPrefix(token.userId()) + "google-account") != null))
+                // The relay has just authenticated this account id, so the sign-in method is not part of the match: an account whose method
+                // the relay changed (Google to password, by the operator) must come back with its own device and keys, not as a new identity.
+                if (!saved.userId().equals(token.userId()) || !saved.origin().equals(api.origin()))
                     throw new SecurityException("Saved account does not match the authenticated account");
                 vault.transaction(() -> {
                     vault.remove("google-account");
