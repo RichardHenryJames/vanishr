@@ -7110,7 +7110,7 @@ public class ScreenFlowTest {
         setField(engine, "nextProfileCheck", System.currentTimeMillis() + 300_000);
         java.security.KeyPair authority = adminAuthorityPair();
         java.util.concurrent.atomic.AtomicReference<byte[]> served = new java.util.concurrent.atomic.AtomicReference<>(
-                signedAdminIdentity(authority, "t1", 2, peerId, currentDevice, fingerprintOf(peerId, current)));
+                signedAdminIdentity(authority, "t1", AdminIdentity.BUILD_SEQUENCE_FLOOR + 1, peerId, currentDevice, fingerprintOf(peerId, current)));
         java.util.concurrent.atomic.AtomicInteger requests = new java.util.concurrent.atomic.AtomicInteger();
         okhttp3.OkHttpClient transport = certificateTransport(served, requests);
         AdminOnboarding.Pin retiredPin = engine.onboarding().pin();
