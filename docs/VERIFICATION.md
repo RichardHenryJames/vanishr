@@ -91,7 +91,28 @@ build, the publication and the public checks under "Release steps" at the end.
   then sign in with `vanishr` and the password; the phone keeps its device and keys), an install from Google Play or whether Play
   accepts the bundle, and the new relay with the multi-device schema under real use.
 
-### Admin identity certificate, sequence 2 (2026-11-09)
+### Release 0.6.7 / The built-in admin identity is the certified one (Play bundle only, 2026-11-10)
+
+Release 0.6.7 / code 48 changes one trust decision: `AdminOnboarding.OFFICIAL` names the device and fingerprint of certificate
+sequence 2 (the identity the admin's phone registered, see the entry above) and `AdminIdentity.BUILD_SEQUENCE_FLOOR` is 2, so a
+build carries exactly the published certificate and a fresh install trusts the admin without asking the website. No relay change, no
+Azure write. `sign-admin-identity.ps1 -Check -AppRelease` and `sign-ota-settings.ps1 -Check -AppRelease` pass.
+
+- **Tests.** One emulator test served a certificate with a hard-coded sequence 2, which is now the floor and so is rightly ignored; it
+  uses `BUILD_SEQUENCE_FLOOR + 1` like its neighbours (a fixture dependency, not a product fault; it was caught by running the suite).
+  Gate: client-core 32, relay 114 (2 skipped), lint 0 errors / 19 warnings. Emulator suite on the final code: **298 tests, 1 failure
+  (`remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`, unchanged since 0.6.3) and 2 skips**.
+- **Play bundle** (`.tools\play-store-0.6.7\vanishr-0.6.7.aab`, not uploaded anywhere): **45,850,904 bytes**, SHA-256
+  `f88914acfdb0190ae03630737736cf30e6176d0e55744225b57cd683be6254ba`; built from commit `8117f86` with a clean tree; bundletool 1.18.3
+  `validate` passed; 0.6.7 / code 48, min API 28, target API 36; the same 14 permissions as 0.6.6 (compared); 16 KiB aligned; notices match
+  the source; no external updater; Firebase client configuration present and matching; JAR signature verified with the same signer as every
+  release; an exhaustive by-value scan (885 entries, eight private values) found nothing. Its classes contain the new admin device id
+  and fingerprint once each and the old ones not at all.
+- **Not done.** The direct-download APK for 0.6.7 (`app-release.apk`, SHA-256 `be2a0faa89e7d90118f09d767fa9660390d8d266ec3396a7307f8277dfc90368`)
+  was built along the way but **not staged, audited or published**: the website still serves 0.6.6 with certificate sequence 2, which
+  0.6.3-or-later apps follow. Nothing was installed on a phone or uploaded to Google Play.
+
+## Admin identity certificate, sequence 2 (2026-11-09)
 
 After the 0.6.6 release the owner updated the direct-download app on the phone, signed in as `vanishr` with the password and got
 "Official admin identity changed. A revised app update is required." The relay's admin device row had become a **new device and
@@ -104,8 +125,7 @@ query), matched the number the owner typed to it before showing the relay's, and
 (`prepare-website.ps1`, deployment `dpl_2N8vSrLuWWUSxt5H2CBxVdM7jYYq`, alias moved explicitly). Only `ota/admin-identity.json` differs
 from the 0.6.6 release stage; the APK, feed and settings are byte-identical, the public APK hash was checked again, and
 `sign-admin-identity.ps1 -Check -Live -RequireIdentical` reports that the website serves exactly the committed certificate (sequence 2,
-`application/json`, `no-store`). **Not yet done:** the built-in pin (`AdminOnboarding.OFFICIAL`) and `BUILD_SEQUENCE_FLOOR` still name the
-old identity and sequence 1, which the next app version has to carry (`prepare-download.ps1` stops until it does). Apps of 0.6.3 or later
+`application/json`, `no-store`). **Done in 0.6.7 (Play bundle, see the entry above):** the built-in pin (`AdminOnboarding.OFFICIAL`) and `BUILD_SEQUENCE_FLOOR` now carry this identity and sequence; the 0.6.6 builds still name the old one and rely on this certificate. Apps of 0.6.3 or later
 follow the certificate on their own; that this phone and a user's phone then accept the admin was not observed when this was written.
 
 ## Release 0.6.5 / A changed contact identity is reviewed, three expiry choices, swipes
