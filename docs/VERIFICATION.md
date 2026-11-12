@@ -112,6 +112,23 @@ Azure write. `sign-admin-identity.ps1 -Check -AppRelease` and `sign-ota-settings
   was built along the way but **not staged, audited or published**: the website still serves 0.6.6 with certificate sequence 2, which
   0.6.3-or-later apps follow. Nothing was installed on a phone or uploaded to Google Play.
 
+## Admin identity certificate, sequence 3 (2026-11-12)
+
+The owner uninstalled the direct-download app (destroying the only copy of the sequence-2 identity's private key) and installed the
+Google Play build, signed in as `vanishr`, and the admin's relay row became another new device and identity again, so every app refused it
+once more. As the 0.6.7 notes said would happen: a fresh install makes new keys, and the admin account holds one device. Same procedure:
+`sign-admin-identity.ps1 -PhoneSafetyNumber '1C63CC4A 230630B1'` (the first and last group the owner read off the phone) read the relay's
+row, matched, and signed **sequence 3** (device `1f0b2f56-48c2-4406-98dd-db6c6a2eefa5`, safety number `1C63CC4A … 230630B1`); it was
+published with a website-only release (`prepare-website.ps1` on a fresh stage, the previous one kept aside as
+`.tools\vercel-website-0.6.6-seq2`; deployment `dpl_BdweEw5z64hCf4SxRPYpqPL2YUXw`, alias moved explicitly). Before deploying, the stage was
+compared file by file with the published 0.6.6 release stage: only `ota/admin-identity.json` differs, and the live feed and APK hash are
+unchanged. `sign-admin-identity.ps1 -Check -Live -RequireIdentical` reports that the website serves exactly the committed certificate
+(sequence 3, `application/json`, `no-store`). The sequence-2 identity is retired for good (its keys are gone).
+**Not done:** the built-in pin and `BUILD_SEQUENCE_FLOOR` in the source (and in the 0.6.7 bundle) still carry sequence 2, so until the next
+app version carries sequence 3 the committed certificate is newer than the build and `verify.ps1` /
+`sign-admin-identity.ps1 -Check -AppRelease` will stop (the unit test that ties the build to the published certificate fails on purpose).
+Apps of 0.6.3 or later follow the certificate by themselves. That the owner's phone then accepted the admin was not observed.
+
 ## Admin identity certificate, sequence 2 (2026-11-09)
 
 After the 0.6.6 release the owner updated the direct-download app on the phone, signed in as `vanishr` with the password and got
