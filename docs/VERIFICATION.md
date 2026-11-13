@@ -1,6 +1,6 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-11-09 UTC. This is a development foundation,
+Evidence refreshed on Windows, 2026-11-13 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
 ## Release 0.6.8 / The message menu, quoted replies, reactions on the message, swipes on own messages and a steadier header (2026-11-13)
@@ -61,7 +61,39 @@ This entry records the code, its tests and mutations, the visual review, and the
 - **Not verified.** A physical phone; a real finger; the keyboard open under the overlay; the overlay under a screen reader; Android before 13
   for the clipboard flag; an earlier app reading a reply that carries `ownMessage`; whether the chat feels as the owner expects.
 
-Release steps (0.6.8): TBD.
+**Release steps (0.6.8)**
+
+- **Build and stage** (from `cfe3351`, tree clean): signed APK **44,555,262 bytes**, SHA-256
+  `4170b45c56f265237acd90803d29bf150053238a2bd208c0afa1bd349bc8a6e6`, version 0.6.8 / code 49, target API 36, the same 15
+  permissions as 0.6.6's APK (compared), the same certificate as every release since 0.6.0 (SHA-256
+  `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`).
+  `.tools\vercel-download-0.6.8`: 33 files / 60,166,590 bytes (limit 99,000,000), recorded in `.tools\distribution-audit-0.6.8.json`.
+  The content audit of the source ZIP (487 entries, 218 of them dependency sources; 269 source files byte-identical to the commit and
+  none different), the stage and the stored APK bytes searched for nine private values by value and for the script's secret patterns:
+  no findings. Only `.vercel\project.json` was copied from the 0.6.6 stage (IDs checked, no `.env*` file).
+- **Vercel.** Deployment `dpl_2PJ7L2QyZLMFSshMH2vRYhUWrfiD` (production, READY); the live feed served 0.6.6 / 47 before, so 49 is no
+  downgrade; the canonical alias `vanishr-download.vercel.app` was moved to it explicitly.
+- **Public verification** (`.tools\public-release-verification-0.6.8.json`). The canonical feed reports 0.6.8 / 49 with `no-store`;
+  all 32 audited files fetched anonymously are byte-identical (HTTP 200); the public APK is byte-identical to the staged one and has the
+  original certificate; 22 private or missing paths return 404; security headers pass; the signed settings file (sequence 1) and the admin
+  identity certificate (sequence 3) are live and identical to the committed files (the settings file still expires on **2026-12-01**,
+  17.6 days away at the check, and needs renewing before then); no problems.
+- **In-place upgrade** on the dedicated test emulator: the 0.6.6 APK (its hash is the one the feed published) installed and started, then
+  the public 0.6.8 APK, downloaded from the site and hash-checked, installed over it with `adb install -r`, no uninstall: version code
+  47 to 49, `firstInstallTime` unchanged, same certificate, the app running afterwards, an empty crash buffer and no fatal exception. A
+  screenshot of the app is black because the app blocks capture, so its UI hierarchy was read instead: it shows the first screen (on an
+  emulator with no screen lock, the request to set one). The account was a fresh install, so this does not show that an account's stored
+  chats survive the update (only the earlier-shaped reply tests above speak to that), the in-app "Check for updates" banner, or a
+  browser download.
+- **Google Play bundle** (`.tools\play-store-0.6.8\vanishr-0.6.8.aab`, **not uploaded anywhere**): **45,876,092 bytes**, SHA-256
+  `6c92fb43583c3f1133ed44a5fbd60fe287a9363d85fe2f7cd5136932aa71cde3`; bundletool 1.18.3 `validate` passed; 0.6.8 / code 49, min API 28,
+  target API 36; 14 permissions, the same as 0.6.7's bundle (compared); 64-bit native libraries 16 KiB aligned; bundled notices match the
+  source; no external updater; the Firebase client configuration present and matching; the settings key file identical to the committed
+  one; JAR signature verified with the same signer; an exhaustive by-value scan of the decompressed bundle (889 entries, eight private
+  values): no findings.
+- **What this does not show.** Whether Google Play accepts the bundle, an install from Play, and the admin signing in on 0.6.8 on a
+  phone. The signed settings file carries data, not code, so none of this release's changes reach a Play install until the owner uploads
+  the bundle.
 
 ## Release 0.6.6 / Passwords of 12 characters, and the admin account without Google (2026-11-09)
 
