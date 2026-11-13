@@ -100,9 +100,14 @@ final class ContactPresence {
         } catch (java.io.IOException | SecurityException failure) { disconnected(); }
     }
 
-    void accept(Status[] response, List<ChatEngine.Contact> audience, long started, long now) {
+    private SecurityException rejected(String reason) {
         states = Map.of();
-        if (response == null || response.length > LIMIT || started < 0 || now < started) throw new SecurityException("Invalid presence response");
+        return new SecurityException(reason);
+    }
+
+    // The new answer replaces the old one in a single step, so a reader never sees an empty gap between two polls.
+    void accept(Status[] response, List<ChatEngine.Contact> audience, long started, long now) {
+        if (response == null || response.length > LIMIT || started < 0 || now < started) throw rejected("Invalid presence response");
         Map<UUID, Seen> received = new HashMap<>();
         Set<UUID> returned = new HashSet<>();
         for (Status status : response) {
@@ -112,7 +117,7 @@ final class ContactPresence {
                 || status.typingForMillis() > status.onlineForMillis() || !returned.add(status.peer().userId())
                 || (status.onlineForMillis() > 0 ? status.lastSeenAgoMillis() != null
                 : status.lastSeenAgoMillis() == null || status.lastSeenAgoMillis() < 0 || status.lastSeenAgoMillis() >= LAST_SEEN_LIFETIME))
-                throw new SecurityException("Invalid peer presence");
+                throw rejected("Invalid peer presence");
             Long lastSeenAt = status.lastSeenAgoMillis() == null ? null : started - status.lastSeenAgoMillis();
             long deadline = lastSeenAt == null ? started + status.onlineForMillis()
                 : Math.min(started + LIFETIME, lastSeenAt + LAST_SEEN_LIFETIME);
@@ -137,9 +142,12 @@ final class ContactPresence {
         return state;
     }
 
-    String labelSnapshot(Seen state, long now) {
-        if (state == null || !foreground || !engine.realtimeReady() || !engine.authenticated()
-                || states.get(state.peer().userId()) != state || state.expiresAt() <= now) return "";
+    // `verified` was checked against the saved contact earlier. A newer answer for the very same device and key is shown as it
+    // arrives; an empty, expired or different-identity answer shows nothing.
+    String labelSnapshot(Seen verified, long now) {
+        if (verified == null || !foreground || !engine.realtimeReady() || !engine.authenticated()) return "";
+        Seen state = states.get(verified.peer().userId());
+        if (state == null || !state.peer().equals(verified.peer()) || state.expiresAt() <= now) return "";
         if (state.lastSeenAt() == null) return state.typingUntil() > now ? "Typing" : "Online";
         long age = now - state.lastSeenAt();
         if (age < 60_000) return "Last seen just now";

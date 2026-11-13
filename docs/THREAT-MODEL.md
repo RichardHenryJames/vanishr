@@ -485,6 +485,69 @@ keys (`ScreenFlowTest`), each with a mutation that was caught. Not demonstrated:
 the admin on a physical phone, and the password's strength (12 characters is what the relay now allows; the admin's was chosen by
 the owner, shared in a chat and should be treated as exposed).
 
+## The message menu, quoted replies, reactions on the message and a steadier header (0.6.8)
+
+**No relay change, no new permission, no new network call.** Everything here is in the screen code on the phone and in one optional
+field of the end-to-end encrypted envelope.
+
+**Pressing and holding a message** (`MessageActions`, `SwipeRow`) dims the chat, keeps the message where it was, floats the six
+reactions above it and puts a card of actions below it, each piece lined up with the side the message is on and the whole group moved
+only as far as it must to stay on screen (a message taller than the screen is cut short in the copy). The overlay is a window of its
+own with `FLAG_SECURE` and, from Android 12, `setHideOverlayWindows`, like every sheet that shows message content, and it closes when
+the app is paused or locked or the message expires. The message in it is a copy that the app builds for the moment; nothing in the copy
+opens or sends anything. The press is detected by the row, so it also works on a photo or a view-once message, which a press used
+to miss. What the card offers depends on the message: Reply (1:1), Forward (never a view-once message), Copy (text only), Edit (my own
+live text, 1:1), Info, Delete and, for a message that came from somebody else, More… (Report). Reactions are the same fixed six as
+before, 1:1 only, and picking the one already given takes it back. **Not built, on purpose:** *Star*, because a message that outlives
+its deadline is what this app exists to avoid; and the "+" that opens every emoji, because an earlier app refuses an emoji outside the
+six and its whole sync stops at that message (the reason a 12-hour message travels as a 24-hour one, above).
+
+- **Copy leaves the vault.** The text goes to Android's clipboard, which the app in front and the keyboard can read. From Android 13
+  it is marked sensitive (`ClipDescription.EXTRA_IS_SENSITIVE`), which keeps it out of clipboard previews; before that it is not. The
+  app does not clear it later. A photo and a view-once message cannot be copied.
+- **Forward sends a new message.** It goes through `ChatEngine.send` or `GroupChat.send` like anything typed, so the checks that
+  apply to each conversation picked still run: a verified or automatic contact, a current identity, the relay's limits. It carries the
+  lifetime now chosen for new messages, not what was left of the original's, and no reference to the original. A conversation that
+  cannot be reached is counted and the others go on; a locked or closing store stops them all. A photo is decrypted into memory once and
+  wiped when the last send is done. The person it is forwarded to cannot tell that it was, and the app cannot stop anyone from forwarding
+  what they read: a message is as private as the least careful person who can read it, as before.
+- **Info and Delete add no data and no rule.** Info shows times the phone already holds (sent or received, its state, when it goes).
+  Delete for everyone is offered only for my own live message in a 1:1 chat, which is the engine's existing rule; Delete for me always is.
+- **A quoted reply says whose words they are, and the sender chooses.** `ChatEnvelope.Reference` has a new optional `ownMessage`: true
+  when the quoted message was written by whoever sends the reply. The reader turns it, with which side sent the reply, into "You" or the
+  contact's name. A reply from an earlier app carries none; while the quoted message is still on the phone (and in the same
+  conversation) its own record answers, and otherwise no name is shown. An earlier app ignores the field in a reply from this one (the
+  JSON library skips unknown fields and `verify` still checks only the id and the snippet). **The name and the snippet are both the
+  sender's claim.** The app does not check either against the original, which may be gone; that is the trust the snippet always had, and
+  it means a contact can make a quote say "You" over words that were never yours. It cannot make them appear as a message from you.
+- **A defect fixed on the way.** The quoted snippet was the whole text of the message replied to, but `ChatEnvelope.verify` accepts only
+  160 UTF-8 bytes, so replying to a longer message could not be sent (a generic failure). The snippet is now cut at a character boundary
+  with an ellipsis (`ChatEnvelope.Reference.excerpt`).
+- **Swiping to reply works on my own messages.** The old gesture listened on the bubble, and a bubble on the right of the screen leaves
+  a finger no room to travel. `SwipeRow` takes a mostly sideways drag to the right from anywhere on the row. A drag the other way is
+  still taken from the bubble, so it cannot open a photo it started on, a vertical drag is left to the list, and nothing is done until the
+  finger is lifted past the mark (48 dp). The swipe on a chat in the contact list is unchanged.
+- **Reactions are drawn as a pill on the message.** Display only: the two reactions the entry already held (mine, theirs), with the
+  count when there are two, half on the bubble and half below it on the side that faces the middle of the screen. Tapping it opens the actions.
+- **The header's Online / Last seen text no longer blinks.** The app asks the relay for presence every 3 seconds and every sync pass
+  re-checked the text, and each of them blanked it until a read of the vault had checked it again, so it vanished and came back. `ContactPresence.labelSnapshot`
+  now shows the newest answer for the **same device and identity key** as the one that was checked; an answer for any other identity, no
+  answer, an expired one (12 s) or a lost connection still shows nothing, and each new answer is still checked against the saved contact
+  on the reader lane as before. The only change is that for the few milliseconds of that check the text stays instead of disappearing. A new
+  answer is also swapped in whole; it used to be emptied first.
+
+**Verified, and not.** Emulator tests (synthetic accounts, a relay stand-in) cover the overlay's layout for a received, an own, a photo, a
+view-once, a bottom-of-the-screen and a taller-than-the-screen message; what each is offered; every action; reactions and the pill and its
+side; the quote's name and width in six cases including an earlier app's; the long-snippet send; forwarding text and a photo (the bytes that
+arrive are the bytes forwarded); a group message's actions (no reactions, no Reply, and a swipe starts nothing); the swipe on received and own messages, from the bubble and from the empty part of the row, and that a
+drag the wrong way across a photo taps nothing; and that the header text never changes or empties across eight new answers and eight sync
+passes (the old code gives `[Online, , Online, …]`). JVM tests cover the field in both directions and the cut. Mutations of the swipe
+direction, mark, vertical rule, empty-space rule and wrong-way rule, the quote author, the menu rules, the pill side, the picked reaction, the
+hidden original, the placement clamp, the snippet cut and the two header rules were each caught (see [VERIFICATION.md](VERIFICATION.md)).
+Not demonstrated: a physical phone; a real finger or keyboard; the overlay under a screen reader; Android before 13 for the clipboard flag
+(the emulator is API 36); and an earlier app receiving a reply that carries `ownMessage` (a JVM test reads it with a record of the earlier shape; no
+old APK was run).
+
 ## Account erasure, blocks and safety reports
 
 Account erasure requires a fresh account-only password/Google sign-in, never a

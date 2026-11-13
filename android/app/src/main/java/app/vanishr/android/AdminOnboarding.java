@@ -42,8 +42,8 @@ final class AdminOnboarding {
     static final Pin OFFICIAL = new Pin(
             "https://vanishr-dev-ec0d36067d.hhb5hebdbfagapbu.centralindia.sysgen.cloudapp.azure.com/",
             UUID.fromString("98ad3c75-0127-422d-9a08-540edb9d3301"),
-            UUID.fromString("dfcb1fe6-9e4b-4e19-849e-a8465b59d687"),
-            "06c95969c16fb7aab8ef6dc99abc8eb42f070e205ca1eb37b02362a193472168");
+            UUID.fromString("1f0b2f56-48c2-4406-98dd-db6c6a2eefa5"),
+            "1c63cc4a7706456248baf164c33ad516046eebe8568cbc561c0fddfb230630b1");
 
     record Introduction(UUID userId, UUID deviceId, String identityKey, String handle, String displayName) {
         ChatEngine.Peer peer() {

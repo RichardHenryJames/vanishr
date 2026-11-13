@@ -159,11 +159,17 @@ public final class MainActivity extends AppCompatActivity {
     private ChatEngine.Entry pendingReplyTo;
     private String pendingReplySnippet;
     private View replyStrip;
-    private TextView replySnippetLabel;
+    private QuoteBlock replyQuote;
+    // The long-press overlay of the message actions, kept apart from the sheets so that closing the screen closes it too.
+    private MessageActions messageOverlay;
     private void updateReplyStrip() {
         if (replyStrip == null) return;
         replyStrip.setVisibility(pendingReplyTo == null ? View.GONE : View.VISIBLE);
-        if (pendingReplyTo != null && replySnippetLabel != null) replySnippetLabel.setText(pendingReplySnippet);
+        if (pendingReplyTo != null && replyQuote != null) {
+            boolean mine = pendingReplyTo.outgoing();
+            ChatEngine.Peer peer = shownConversationPeer;
+            replyQuote.show(mine ? "You" : peer == null ? null : peer.name(), mine, pendingReplySnippet);
+        }
     }
     // Counts how often the expiry tick had to walk the rows, so a test can show that it does so only when a message is due.
     private int rowScans;
@@ -1435,6 +1441,8 @@ public final class MainActivity extends AppCompatActivity {
         });
         messages = vertical();
         messages.setClipChildren(false);
+        // A message that is pulled aside (to reply) may go into the margin of the list, and the reply cue is drawn there.
+        messages.setClipToPadding(false);
         messages.setPadding(dp(18), dp(24), dp(18), dp(24));
         messageScroll.addView(messages, new ScrollView.LayoutParams(-1, -2));
         root.addView(messageScroll, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -1447,18 +1455,13 @@ public final class MainActivity extends AppCompatActivity {
         expiryLabel.setBackground(design.feedback(Color.TRANSPARENT, 7));
         expiryLabel.setOnClickListener(view -> expiryDialog());
         showExpiry();
-        replyStrip = null; replySnippetLabel = null;
+        replyStrip = null; replyQuote = null;
         if (group == null) {
             pendingReplyTo = null; pendingReplySnippet = null;
-            LinearLayout strip = horizontal(); strip.setGravity(Gravity.CENTER_VERTICAL); strip.setPadding(dp(10), dp(6), dp(6), dp(6));
-            strip.setBackground(design.background(Ui.CANVAS, 6, Ui.LINE)); strip.setVisibility(View.GONE);
-            View accent = new View(this); accent.setBackgroundColor(Ui.PRIMARY); strip.addView(accent, new LinearLayout.LayoutParams(dp(3), dp(32)));
-            LinearLayout labels = vertical(); labels.setPadding(dp(8), 0, dp(8), 0);
-            labels.addView(design.text("Replying", 11, 700, Ui.PRIMARY));
-            replySnippetLabel = design.text("", 12, 500, MUTED); replySnippetLabel.setMaxLines(1); replySnippetLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            labels.addView(replySnippetLabel);
-            strip.addView(labels, new LinearLayout.LayoutParams(0, -2, 1));
-            strip.addView(icon(R.drawable.ic_x, "Cancel reply", () -> { pendingReplyTo = null; pendingReplySnippet = null; updateReplyStrip(); }), new LinearLayout.LayoutParams(dp(32), dp(32)));
+            LinearLayout strip = horizontal(); strip.setGravity(Gravity.CENTER_VERTICAL); strip.setVisibility(View.GONE);
+            replyQuote = new QuoteBlock(this, design, QuoteBlock.ON_SURFACE, 2, Math.max(dp(120), getResources().getDisplayMetrics().widthPixels - dp(140)));
+            strip.addView(replyQuote, new LinearLayout.LayoutParams(0, -2, 1));
+            strip.addView(icon(R.drawable.ic_x, "Cancel reply", () -> { pendingReplyTo = null; pendingReplySnippet = null; updateReplyStrip(); }), new LinearLayout.LayoutParams(dp(40), dp(40)));
             replyStrip = strip;
             LinearLayout.LayoutParams stripParams = new LinearLayout.LayoutParams(-1, -2); stripParams.setMargins(0, 0, 0, dp(6));
             composeArea.addView(strip, stripParams);
@@ -1480,7 +1483,7 @@ public final class MainActivity extends AppCompatActivity {
         ImageButton send = icon(R.drawable.ic_arrow_up, "Send", () -> {
             String text = composer.getText().toString();
             if (text.trim().isEmpty()) return;
-            ChatEnvelope.Reference reference = pendingReplyTo == null ? null : new ChatEnvelope.Reference(pendingReplyTo.id(), pendingReplySnippet);
+            ChatEnvelope.Reference reference = pendingReplyTo == null ? null : new ChatEnvelope.Reference(pendingReplyTo.id(), pendingReplySnippet, pendingReplyTo.outgoing());
             if (enqueueSend(peer, text, null, expiry, reference)) { composer.setText(""); pendingReplyTo = null; pendingReplySnippet = null; updateReplyStrip(); }
         });
         send.setBackground(design.feedback(Ui.PRIMARY, 24)); send.setColorFilter(Color.WHITE);
@@ -1503,7 +1506,7 @@ public final class MainActivity extends AppCompatActivity {
     private void refreshContactStatus() {
         if (contactStatus == null || engine == null || !resumed) return;
         ChatEngine current = engine;
-        String value = !busy && engine.authenticated() && engine.realtimeReady()
+        String value = engine.authenticated() && engine.realtimeReady()
                 ? current.presence().labelSnapshot(shownPresence, SystemClock.elapsedRealtime()) : "";
         if (!value.contentEquals(contactStatus.getText())) contactStatus.setText(value);
         contactStatus.setVisibility(value.isEmpty() ? View.GONE : View.VISIBLE);
@@ -1652,8 +1655,14 @@ public final class MainActivity extends AppCompatActivity {
     private void appendPending(PendingSend pending) {
         if (messages == null || !pending.peer.userId().equals(selectedPeer) || pending.cancelled) return;
         LinearLayout alignment = horizontal(); alignment.setGravity(Gravity.END); alignment.setTag(pending.expiresAt());
-        LinearLayout bubble = vertical(); bubble.setPadding(dp(14), dp(10), dp(14), dp(8));
+        LinearLayout bubble = vertical(); bubble.setPadding(dp(14), pending.reference == null ? dp(10) : dp(12), dp(14), dp(8));
+        bubble.setClipToPadding(false); bubble.setClipChildren(false);
         bubble.setBackground(design.background(Ui.TINT, 8, 0));
+        if (pending.reference != null) {
+            Boolean own = pending.reference.ownMessage();
+            bubble.addView(new QuoteBlock(this, design, QuoteBlock.ON_TINT, 3, Math.max(dp(120), root.getWidth() - root.getPaddingLeft() - root.getPaddingRight() - dp(80)))
+                .show(own == null ? null : own ? "You" : pending.peer.name(), own != null && own, pending.reference.snippet()), quoteParams(true));
+        }
         TextView body = design.text(pending.expiry == ChatEnvelope.Expiry.VIEW_ONCE ? "View-once message" : pending.image == null ? pending.text : "Photo", 13, 500, INK);
         body.setMaxWidth(Math.max(dp(120), root.getWidth() - root.getPaddingLeft() - root.getPaddingRight() - dp(80)));
         bubble.addView(body);
@@ -1919,7 +1928,7 @@ public final class MainActivity extends AppCompatActivity {
                 try {
                     ChatEnvelope envelope = load.engine.content(entry, false, false).envelope();
                     text.put(entry.id(), envelope.text());
-                    if (envelope.reference() != null) references.put(entry.id(), envelope.reference());
+                    if (envelope.reference() != null) references.put(entry.id(), quotedAuthor(load.engine, entry, envelope.reference()));
                 }
                 catch (Exception failure) {
                     // Cleared, forgotten, blocked or expired meanwhile: nothing left to show, so it is not a failure.
@@ -1960,6 +1969,15 @@ public final class MainActivity extends AppCompatActivity {
             });
             if (!last) onReader(() -> loadStage(load));
         } catch (Exception failure) { text.clear(); messagesFailed(load, failure); }
+    }
+
+    // A reply from an earlier app does not say who wrote what it quotes. While the quoted message is still here, its own record does:
+    // it was written by the same side as the reply if both are mine, or both are theirs. Read on the reader lane, not on the screen.
+    private static ChatEnvelope.Reference quotedAuthor(ChatEngine current, ChatEngine.Entry reply, ChatEnvelope.Reference reference) {
+        if (reference.ownMessage() != null) return reference;
+        ChatEngine.Entry quoted = current.entry(reference.messageId());
+        if (quoted == null || !quoted.peerId().equals(reply.peerId())) return reference;
+        return new ChatEnvelope.Reference(reference.messageId(), reference.snippet(), quoted.outgoing() == reply.outgoing());
     }
 
     private void messagesFailed(MessageLoad load, Exception failure) {
@@ -2003,7 +2021,7 @@ public final class MainActivity extends AppCompatActivity {
         for (MessageRow row : messageRows.values()) row.clear();
         messageRows.clear(); messageDates.clear(); messageEmpty = null;
         shownConversationPeer = null; shownConversationGroup = null; shownPresence = null; checkedPresence = null;
-        pendingReplyTo = null; pendingReplySnippet = null; replyStrip = null; replySnippetLabel = null;
+        pendingReplyTo = null; pendingReplySnippet = null; replyStrip = null; replyQuote = null;
     }
 
     private void applyMessages(ChatEngine.Peer peer, java.util.List<ChatEngine.Entry> loaded,
@@ -2110,10 +2128,26 @@ public final class MainActivity extends AppCompatActivity {
         if (row.groupReceipt != null) row.groupReceipt.setText(entry.state());
     }
 
-    private MessageRow messageRow(ChatEngine.Peer peer, ChatEngine.Entry entry, String text, String senderName, ChatEnvelope.Reference reference) {
+    /** The message as it is drawn: the bubble, with the reactions to it hanging off its lower corner. */
+    private static final class Bubble {
+        final LinearLayout holder;
+        final TextView body;
+        final TextView sender;
+        final ImageView receipt;
+        final TextView groupReceipt;
+        final View chip;
+        Bubble(LinearLayout holder, TextView body, TextView sender, ImageView receipt, TextView groupReceipt, View chip) {
+            this.holder = holder; this.body = body; this.sender = sender; this.receipt = receipt; this.groupReceipt = groupReceipt; this.chip = chip;
+        }
+    }
+
+    // {@code interactive} is false for the copy that the message actions show, where nothing opens when it is touched.
+    private Bubble messageBubble(ChatEngine.Peer peer, ChatEngine.Entry entry, String text, String senderName, ChatEnvelope.Reference reference, boolean interactive) {
             long created = entry.expiresAt() - entry.expiry().milliseconds;
-            LinearLayout alignment = horizontal(); alignment.setGravity(entry.outgoing() ? Gravity.END : Gravity.START); alignment.setTag(entry.expiresAt());
+            int limit = Math.max(dp(120), root.getWidth() - root.getPaddingLeft() - root.getPaddingRight() - dp(80));
             LinearLayout row = vertical();
+            // A quote reaches the edge of the bubble, past its padding.
+            row.setClipToPadding(false); row.setClipChildren(false);
             row.setPadding(dp(14), dp(12), dp(14), dp(8));
             row.setBackground(design.background(entry.outgoing() ? Ui.TINT : Ui.SURFACE, 8, entry.outgoing() ? 0 : Ui.LINE));
             TextView sender = null;
@@ -2122,33 +2156,27 @@ public final class MainActivity extends AppCompatActivity {
                 sender.setMaxWidth(Math.max(dp(120),root.getWidth()-root.getPaddingLeft()-root.getPaddingRight()-dp(80))); row.addView(sender);
             }
             if (reference != null) {
-                TextView quoted = design.text(reference.snippet(), 11, 500, MUTED);
-                quoted.setMaxLines(2); quoted.setEllipsize(android.text.TextUtils.TruncateAt.END);
-                quoted.setBackground(design.background(Ui.CANVAS, 5, Ui.LINE)); quoted.setPadding(dp(8), dp(5), dp(8), dp(5));
-                quoted.setMaxWidth(Math.max(dp(120), root.getWidth() - root.getPaddingLeft() - root.getPaddingRight() - dp(80)));
-                LinearLayout.LayoutParams quotedParams = new LinearLayout.LayoutParams(-2, -2); quotedParams.bottomMargin = dp(5);
-                row.addView(quoted, quotedParams);
+                // Whose words are quoted: the reply says whether they were its own writer's; an older app's reply does not say.
+                Boolean own = reference.ownMessage();
+                boolean mine = own != null && entry.outgoing() == own;
+                row.addView(new QuoteBlock(this, design, entry.outgoing() ? QuoteBlock.ON_TINT : QuoteBlock.ON_SURFACE, 3, limit)
+                    .show(own == null ? null : mine ? "You" : peer.name(), mine, reference.snippet()), quoteParams(sender == null));
             }
             TextView body;
             if (entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE) {
                 body = design.text(entry.outgoing() ? "View-once message" : "View once", 13, 500, GREEN);
-                if (!entry.outgoing()) body.setOnClickListener(view -> viewContent(entry));
+                if (!entry.outgoing() && interactive) body.setOnClickListener(view -> viewContent(entry));
             } else if (entry.image()) {
                 body = design.text("Photo", 13, 600, GREEN); body.setMinHeight(dp(44)); body.setGravity(Gravity.CENTER_VERTICAL);
                 body.setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_image, 0, 0, 0);
                 body.setCompoundDrawablePadding(dp(8));
-                body.setOnClickListener(view -> viewContent(entry));
+                if (interactive) body.setOnClickListener(view -> viewContent(entry));
             } else {
                 body = design.text(Objects.requireNonNull(text), 13, 500, INK);
             }
             body.setMaxWidth(Math.max(dp(120), root.getWidth() - root.getPaddingLeft() - root.getPaddingRight() - dp(80)));
             if (entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE) { body.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_eye, 0, 0, 0); body.setCompoundDrawablePadding(dp(8)); }
             row.addView(body);
-            if (entry.reactionMine() != null || entry.reactionTheirs() != null) {
-                String chips = java.util.stream.Stream.of(entry.reactionMine(), entry.reactionTheirs())
-                    .filter(Objects::nonNull).distinct().reduce("", (joined, emoji) -> joined.isEmpty() ? emoji : joined + " " + emoji);
-                TextView reactions = design.text(chips, 13, 500, INK); reactions.setPadding(0, dp(3), 0, 0); row.addView(reactions);
-            }
             LinearLayout metadata = horizontal(); metadata.setGravity(Gravity.END);
             String time = java.time.format.DateTimeFormatter.ofPattern("HH:mm", Locale.getDefault()).format(java.time.Instant.ofEpochMilli(created).atZone(java.time.ZoneId.systemDefault()));
             TextView timestamp = design.text(time + (entry.edited() ? "  /  edited  /  " : "  /  ") + expiryName(entry.expiry()), 9, 500, MUTED); timestamp.setPadding(0, dp(5), dp(5), 0); metadata.addView(timestamp);
@@ -2163,72 +2191,249 @@ public final class MainActivity extends AppCompatActivity {
                 groupStatus=design.text("",10,500,MUTED); groupStatus.setGravity(Gravity.END);
                 groupStatus.setPadding(0,dp(4),0,0); groupStatus.setMaxWidth(Math.max(dp(120),root.getWidth()-root.getPaddingLeft()-root.getPaddingRight()-dp(80))); row.addView(groupStatus);
             }
-            row.setOnLongClickListener(view -> {
-                boolean oneToOne = entry.groupEpoch() == null;
-                boolean alive = entry.expiresAt() > System.currentTimeMillis();
-                LinearLayout actions = vertical();
-                ScrollView scroll = new ScrollView(this); scroll.addView(actions);
-                SecureSheet dialog = new SecureSheet.Builder(this).setTitle("Message actions").setView(scroll).setNegativeButton("Cancel", null).create();
-                if (oneToOne) actions.addView(profileAction("Reply", R.drawable.ic_reply, () -> { dialog.dismiss(); replyTo(entry, text); }));
-                if (oneToOne) actions.addView(profileAction(entry.reactionMine() == null ? "React" : "Change reaction", 0, () -> { dialog.dismiss(); reactDialog(peer, entry); }));
-                if (oneToOne && entry.outgoing() && !entry.image() && entry.expiry() != ChatEnvelope.Expiry.VIEW_ONCE && alive)
-                    actions.addView(profileAction("Edit", R.drawable.ic_square_pen, () -> { dialog.dismiss(); editDialog(peer, entry, text); }));
-                if (oneToOne && entry.outgoing() && alive) actions.addView(profileAction("Delete for everyone", R.drawable.ic_trash_2,
-                    () -> { dialog.dismiss(); submit(() -> engine.deleteForEveryone(entry), () -> refreshMessages(peer)); }));
-                actions.addView(profileAction("Delete for me", R.drawable.ic_trash_2, () -> { dialog.dismiss(); submit(() -> engine.erase(entry, "delete"), () -> refreshMessages(peer)); }));
-                if (!entry.outgoing()) actions.addView(profileAction("Report", 0,
-                    () -> { dialog.dismiss(); reportUserDialog(entry.groupEpoch() == null ? entry.peerId() : entry.senderId(), entry); }));
-                showDialog(dialog);
-                return true;
-            });
-            alignment.setClipChildren(false);
-            alignment.addView(row, new LinearLayout.LayoutParams(-2, -2));
-            if (entry.groupEpoch() == null) swipeToReply(entry, text, alignment, row, body);
+            LinearLayout holder = vertical(); holder.setClipChildren(false);
+            holder.addView(row, new LinearLayout.LayoutParams(-2, -2));
+            View chip = reactionChip(peer, entry);
+            if (chip != null) {
+                // Half on the bubble and half below it, on the side that faces the middle of the screen, clear of the time and the ticks.
+                LinearLayout.LayoutParams hanging = new LinearLayout.LayoutParams(-2, -2);
+                hanging.gravity = entry.outgoing() ? Gravity.START : Gravity.END;
+                hanging.setMargins(dp(10), -dp(9), dp(10), 0);
+                holder.addView(chip, hanging);
+            }
+            return new Bubble(holder, body, sender, status, groupStatus, chip);
+    }
+
+    private MessageRow messageRow(ChatEngine.Peer peer, ChatEngine.Entry entry, String text, String senderName, ChatEnvelope.Reference reference) {
+            Bubble bubble = messageBubble(peer, entry, text, senderName, reference, true);
+            boolean oneToOne = entry.groupEpoch() == null;
+            SwipeRow alignment = new SwipeRow(this, bubble.holder, oneToOne ? () -> replyTo(entry, text) : null);
+            alignment.setGravity(entry.outgoing() ? Gravity.END : Gravity.START); alignment.setTag(entry.expiresAt());
+            alignment.addView(bubble.holder, new LinearLayout.LayoutParams(-2, -2));
+            // The row takes the press, wherever on it the finger is; the reactions on a message open the same actions.
+            alignment.setOnLongClickListener(view -> { messageActions(peer, entry, text, senderName, reference, bubble.holder); return true; });
+            if (bubble.chip != null) bubble.chip.setOnClickListener(view -> messageActions(peer, entry, text, senderName, reference, bubble.holder));
+            if (oneToOne) androidx.core.view.ViewCompat.addAccessibilityAction(alignment, "Reply", (view, arguments) -> { replyTo(entry, text); return true; });
             LinearLayout.LayoutParams placement = new LinearLayout.LayoutParams(-1, -2); placement.setMargins(0, 0, 0, dp(14)); alignment.setLayoutParams(placement);
-            MessageRow result = new MessageRow(null, alignment, body, sender, status, groupStatus);
+            MessageRow result = new MessageRow(null, alignment, bubble.body, bubble.sender, bubble.receipt, bubble.groupReceipt);
             updateReceipt(result, entry);
             return result;
     }
 
+    // A quote is pulled out to the edge of the bubble it is in, as in a chat app, with a little room under it. It fills the bubble, and
+    // like everything else in the bubble it counts toward how wide the bubble is.
+    private LinearLayout.LayoutParams quoteParams(boolean first) {
+        LinearLayout.LayoutParams quoted = new LinearLayout.LayoutParams(-1, -2);
+        quoted.setMargins(-dp(10), first ? -dp(8) : 0, -dp(10), dp(6));
+        return quoted;
+    }
+
+    // The reactions to a message, as a small pill (one emoji for each reaction, and how many when there are two).
+    private View reactionChip(ChatEngine.Peer peer, ChatEngine.Entry entry) {
+        String mine = entry.reactionMine(), theirs = entry.reactionTheirs();
+        if (mine == null && theirs == null) return null;
+        int total = (mine == null ? 0 : 1) + (theirs == null ? 0 : 1);
+        String symbols = mine == null ? theirs : theirs == null || theirs.equals(mine) ? mine : mine + theirs;
+        LinearLayout chip = horizontal();
+        chip.setPadding(dp(7), dp(3), dp(7), dp(3));
+        chip.setBackground(design.background(Ui.SURFACE, 13, Ui.LINE));
+        chip.addView(design.text(symbols, 14, 500, INK));
+        if (total > 1) {
+            TextView count = design.text(Integer.toString(total), 11, 700, MUTED);
+            count.setPadding(dp(4), 0, 0, 0);
+            chip.addView(count);
+        }
+        chip.setContentDescription("Reactions: " + (mine == null ? "" : "you " + mine) + (mine != null && theirs != null ? ", " : "")
+                + (theirs == null ? "" : peer.name() + " " + theirs));
+        return chip;
+    }
+
     private void replyTo(ChatEngine.Entry entry, String text) {
         pendingReplyTo = entry;
-        pendingReplySnippet = entry.image() ? "Photo" : entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE ? "View-once message" : text;
+        pendingReplySnippet = entry.image() ? QuoteBlock.PHOTO : entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE ? QuoteBlock.VIEW_ONCE : ChatEnvelope.Reference.excerpt(text);
         updateReplyStrip();
         if (composer != null) composer.requestFocus();
     }
 
-    // Swiping a message to the right starts a reply to it, as the long-press action does; the arrow shows through as the message moves.
-    private void swipeToReply(ChatEngine.Entry entry, String text, LinearLayout alignment, View bubble, View body) {
-        android.graphics.drawable.Drawable cue = ContextCompat.getDrawable(this, R.drawable.ic_reply).mutate();
-        cue.setTint(MUTED); cue.setAlpha(0);
-        // A layout with nothing of its own to draw leaves its overlay out when it is drawn into a software canvas (a screenshot).
-        alignment.setWillNotDraw(false);
-        alignment.getOverlay().add(cue);
-        int full = dp(22);
-        HorizontalSwipe swipe = new HorizontalSwipe(bubble, 1, dp(56), dp(76), fraction -> {
-            int size = Math.round(full * (0.6f + 0.4f * fraction)), top = Math.max(0, (alignment.getHeight() - size) / 2);
-            cue.setBounds(dp(8), top, dp(8) + size, top + size);
-            cue.setAlpha(Math.round(255 * fraction));
-        }, () -> replyTo(entry, text));
-        bubble.setOnTouchListener(swipe);
-        // A photo or a view-once message is itself something to tap, so the touch starts on it, not on the bubble around it.
-        if (body.hasOnClickListeners()) body.setOnTouchListener(swipe);
-        androidx.core.view.ViewCompat.addAccessibilityAction(bubble, "Reply", (view, arguments) -> { replyTo(entry, text); return true; });
+    // The long press on a message: the chat dims, the message stays where it was with the reactions floating above it, and below it
+    // comes what can be done with it. What is offered depends on the message and on whose it is.
+    private void messageActions(ChatEngine.Peer peer, ChatEngine.Entry entry, String text, String senderName, ChatEnvelope.Reference reference, View original) {
+        if (!resumed || engine == null || busy || original.getWidth() == 0 || original.getHeight() == 0) return;
+        if (messageOverlay != null && messageOverlay.isShowing()) return;
+        if (entry.expiresAt() <= System.currentTimeMillis()) return;
+        boolean oneToOne = entry.groupEpoch() == null;
+        boolean viewOnce = entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE;
+        boolean textual = !entry.image() && !viewOnce;
+        java.util.List<MessageActions.Item> items = new ArrayList<>();
+        if (oneToOne) items.add(new MessageActions.Item(R.drawable.ic_reply, "Reply", () -> replyTo(entry, text)));
+        if (!viewOnce) items.add(new MessageActions.Item(R.drawable.ic_forward, "Forward", () -> forwardDialog(entry, text)));
+        if (textual) items.add(new MessageActions.Item(R.drawable.ic_copy, "Copy", () -> copyMessage(text)));
+        if (oneToOne && entry.outgoing() && textual) items.add(new MessageActions.Item(R.drawable.ic_square_pen, "Edit", () -> editDialog(peer, entry, text)));
+        items.add(new MessageActions.Item(R.drawable.ic_info, "Info", () -> infoDialog(peer, entry)));
+        items.add(new MessageActions.Item(R.drawable.ic_trash_2, "Delete", true, false, () -> deleteDialog(peer, entry)));
+        if (!entry.outgoing()) items.add(new MessageActions.Item(R.drawable.ic_ellipsis, "More\u2026", false, true, () -> moreDialog(entry)));
+        int[] at = new int[2];
+        original.getLocationOnScreen(at);
+        Rect bounds = new Rect(at[0], at[1], at[0] + original.getWidth(), at[1] + original.getHeight());
+        Bubble copy = messageBubble(peer, entry, text, senderName, reference, false);
+        updateReceipt(new MessageRow(null, copy.holder, copy.body, copy.sender, copy.receipt, copy.groupReceipt), entry);
+        MessageActions overlay = new MessageActions(this, design, copy.holder, bounds, entry.outgoing(),
+                oneToOne ? ChatEnvelope.REACTION_CHOICES : null, entry.reactionMine(),
+                emoji -> submit(() -> engine.react(entry, emoji), () -> refreshMessages(peer)), items);
+        original.setAlpha(0f);
+        overlay.setOnDismissListener(dialog -> { original.setAlpha(1f); if (messageOverlay == overlay) messageOverlay = null; });
+        messageOverlay = overlay;
+        overlay.show();
+        ui.postDelayed(() -> { if (overlay.isShowing()) overlay.dismiss(); }, Math.max(1, entry.expiresAt() - System.currentTimeMillis()));
     }
 
-    private void reactDialog(ChatEngine.Peer peer, ChatEngine.Entry entry) {
-        LinearLayout row = horizontal(); row.setGravity(Gravity.CENTER); row.setPadding(dp(8), dp(16), dp(8), dp(4));
-        LinearLayout content = vertical(); content.addView(row);
-        SecureSheet dialog = new SecureSheet.Builder(this).setTitle("React").setView(content).setNegativeButton("Cancel", null).create();
-        for (String emoji : ChatEnvelope.REACTIONS) {
-            TextView button = design.text(emoji, 22, 500, INK); button.setGravity(Gravity.CENTER);
-            button.setPadding(dp(6), dp(6), dp(6), dp(6)); button.setBackground(design.feedback(Color.TRANSPARENT, 20));
-            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(dp(40), dp(40)); row.addView(button, size);
-            button.setOnClickListener(view -> { dialog.dismiss(); submit(() -> engine.react(entry, emoji), () -> refreshMessages(peer)); });
+    // The text leaves the encrypted store for the clipboard, which other apps and keyboards can read; where Android knows how, it is
+    // marked sensitive so that it is hidden from clipboard previews. Nothing here clears it later.
+    private void copyMessage(String text) {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (text == null || clipboard == null) return;
+        ClipData clip = ClipData.newPlainText("Message", text);
+        if (Build.VERSION.SDK_INT >= 33) {
+            PersistableBundle sensitive = new PersistableBundle();
+            sensitive.putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true);
+            clip.getDescription().setExtras(sensitive);
         }
-        if (entry.reactionMine() != null) content.addView(profileAction("Remove reaction", R.drawable.ic_x,
-            () -> { dialog.dismiss(); submit(() -> engine.react(entry, null), () -> refreshMessages(peer)); }));
-        showDialog(dialog);
+        clipboard.setPrimaryClip(clip);
+        // From Android 13 the system confirms a copy itself.
+        if (Build.VERSION.SDK_INT < 33) Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show();
+    }
+
+    private void infoDialog(ChatEngine.Peer peer, ChatEngine.Entry entry) {
+        java.time.format.DateTimeFormatter format = java.time.format.DateTimeFormatter.ofLocalizedDateTime(
+                java.time.format.FormatStyle.MEDIUM, java.time.format.FormatStyle.SHORT).withLocale(Locale.getDefault());
+        java.util.function.LongFunction<String> when = millis -> format.format(java.time.Instant.ofEpochMilli(millis).atZone(java.time.ZoneId.systemDefault()));
+        boolean viewOnce = entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE;
+        LinearLayout panel = vertical(); panel.setPadding(dp(2), dp(2), dp(2), dp(8));
+        infoLine(panel, entry.outgoing() ? "Sent" : "Received", when.apply(entry.expiresAt() - entry.expiry().milliseconds));
+        if (entry.outgoing()) infoLine(panel, "Status", switch (entry.state()) {
+            case "READ" -> "Read"; case "DELIVERED" -> "Delivered"; case "QUEUED" -> "Sent"; default -> "Sending";
+        });
+        infoLine(panel, "Disappears", viewOnce ? "When it is opened, or at the latest " + when.apply(entry.expiresAt()) : when.apply(entry.expiresAt()));
+        if (entry.edited()) infoLine(panel, "Edited", "Yes");
+        if (entry.reactionMine() != null) infoLine(panel, "Your reaction", entry.reactionMine());
+        if (entry.reactionTheirs() != null) infoLine(panel, peer.name() + "'s reaction", entry.reactionTheirs());
+        showDialog(new SecureSheet.Builder(this).setTitle("Message info").setView(panel).setPositiveButton("Close", null).create());
+    }
+
+    private void infoLine(LinearLayout panel, String label, String value) {
+        panel.addView(design.text(label, 12, 600, MUTED));
+        TextView shown = design.text(value, 15, 500, INK);
+        shown.setPadding(0, dp(3), 0, dp(14));
+        panel.addView(shown);
+    }
+
+    // Delete for everyone is offered only for a message of mine that is still alive in a one-to-one chat; for me it always is.
+    private void deleteDialog(ChatEngine.Peer peer, ChatEngine.Entry entry) {
+        boolean everyone = entry.groupEpoch() == null && entry.outgoing() && entry.expiresAt() > System.currentTimeMillis();
+        SecureSheet[] sheet = new SecureSheet[1];
+        LinearLayout actions = vertical();
+        if (everyone) {
+            actions.addView(profileAction("Delete for everyone", R.drawable.ic_trash_2, () -> {
+                sheet[0].dismiss(); submit(() -> engine.deleteForEveryone(entry), () -> refreshMessages(peer));
+            }, Ui.ERROR));
+            actions.addView(design.divider());
+        }
+        actions.addView(profileAction("Delete for me", R.drawable.ic_trash_2, () -> {
+            sheet[0].dismiss(); submit(() -> engine.erase(entry, "delete"), () -> refreshMessages(peer));
+        }, Ui.ERROR));
+        sheet[0] = new SecureSheet.Builder(this).setTitle("Delete message?")
+                .setMessage(everyone ? "Delete for everyone removes it from both phones. Delete for me removes it from this phone only."
+                        : "This removes it from this phone only.")
+                .setView(actions).setNegativeButton("Cancel", null).create();
+        showDialog(sheet[0]);
+    }
+
+    private void moreDialog(ChatEngine.Entry entry) {
+        SecureSheet[] sheet = new SecureSheet[1];
+        LinearLayout actions = vertical();
+        actions.addView(profileAction("Report", R.drawable.ic_circle_alert, () -> {
+            sheet[0].dismiss(); reportUserDialog(entry.groupEpoch() == null ? entry.peerId() : entry.senderId(), entry);
+        }));
+        sheet[0] = new SecureSheet.Builder(this).setTitle("More").setView(actions).setNegativeButton("Cancel", null).create();
+        showDialog(sheet[0]);
+    }
+
+    // Forwarding sends a new message, with the lifetime now chosen for new messages, to each conversation picked. A view-once message
+    // is never forwarded: it can be opened once, here, and nowhere else.
+    private void forwardDialog(ChatEngine.Entry entry, String text) {
+        ChatEngine current = engine;
+        if (!resumed || current == null || busy || entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE) return;
+        if (entry.image() && !(allowed(RemoteSettings.Flag.IMAGES) && allowed(RemoteSettings.Flag.PHOTOS))) return;
+        int generation = screenGeneration;
+        onReader(() -> {
+            try {
+                java.util.List<ChatEngine.Peer> peers = current.peers();
+                java.util.List<GroupChat.Conversation> groups = new ArrayList<>();
+                for (GroupChat.Conversation group : current.groups().conversations())
+                    if (!current.groups().invited(group) && current.groups().ready(group) && group.snapshot().active().size() > 1) groups.add(group);
+                ui.post(() -> { if (resumed && engine == current && generation == screenGeneration) forwardSheet(entry, text, peers, groups); });
+            } catch (Exception failure) {
+                ui.post(() -> { if (resumed && engine == current && generation == screenGeneration) showFailure(failure); });
+            }
+        });
+    }
+
+    private void forwardSheet(ChatEngine.Entry entry, String text, java.util.List<ChatEngine.Peer> peers, java.util.List<GroupChat.Conversation> groups) {
+        if (peers.isEmpty() && groups.isEmpty()) { problem("There is nobody to forward to yet."); return; }
+        CharSequence[] names = new CharSequence[peers.size() + groups.size()];
+        for (int index = 0; index < peers.size(); index++) names[index] = peers.get(index).name();
+        for (int index = 0; index < groups.size(); index++) names[peers.size() + index] = groups.get(index).name();
+        boolean[] chosen = new boolean[names.length];
+        SecureSheet sheet = new SecureSheet.Builder(this).setTitle("Forward to")
+                .setMultiChoiceItems(names, chosen, (dialog, which, checked) -> {
+                    boolean any = false;
+                    for (boolean value : chosen) any |= value;
+                    ((SecureSheet) dialog).getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(any);
+                })
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Forward", (dialog, which) -> forward(entry, text, peers, groups, chosen)).create();
+        sheet.setOnShowListener(ignored -> sheet.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false));
+        showDialog(sheet);
+    }
+
+    private void forward(ChatEngine.Entry entry, String text, java.util.List<ChatEngine.Peer> peers, java.util.List<GroupChat.Conversation> groups, boolean[] chosen) {
+        ChatEngine current = engine;
+        ChatEnvelope.Expiry lifetime = expiry;
+        java.util.List<ChatEngine.Peer> toPeers = new ArrayList<>();
+        java.util.List<GroupChat.Conversation> toGroups = new ArrayList<>();
+        for (int index = 0; index < peers.size(); index++) if (chosen[index]) toPeers.add(peers.get(index));
+        for (int index = 0; index < groups.size(); index++) if (chosen[peers.size() + index]) toGroups.add(groups.get(index));
+        if (current == null || toPeers.isEmpty() && toGroups.isEmpty()) return;
+        int[] failed = {0};
+        submit(() -> {
+            byte[] image = null;
+            try {
+                if (entry.image()) image = current.content(entry, false, false).image();
+                String forwarded = image == null ? text : null;
+                for (ChatEngine.Peer peer : toPeers) {
+                    try { current.send(peer, forwarded, image, lifetime, null, UUID.randomUUID(), System.currentTimeMillis(), () -> { }); }
+                    catch (Exception failure) { failed[0] += keepGoing(failure); }
+                }
+                for (GroupChat.Conversation group : toGroups) {
+                    try { current.groups().send(group.id(), forwarded, image, lifetime, UUID.randomUUID(), System.currentTimeMillis(), () -> { }); }
+                    catch (Exception failure) { failed[0] += keepGoing(failure); }
+                }
+            } finally { if (image != null) Arrays.fill(image, (byte) 0); }
+        }, () -> {
+            int total = toPeers.size() + toGroups.size();
+            if (failed[0] == 0) Toast.makeText(this, "Forwarded", Toast.LENGTH_SHORT).show();
+            else problem(failed[0] == total ? "It could not be forwarded. Check the connection and the contact's identity, then try again."
+                    : "Forwarded, but " + failed[0] + " of " + total + " could not be reached.");
+            ChatEngine.Peer open = selectedPeer == null ? null : conversationPeer(selectedPeer);
+            if (open != null) refreshMessages(open);
+        });
+    }
+
+    // One conversation that cannot be reached does not stop the others, but a locked or closing store stops all of them.
+    private static int keepGoing(Exception failure) throws Exception {
+        if (failure instanceof GeneralSecurityException || failure instanceof AndroidVault.PhoneLockedException
+                || failure instanceof AndroidVault.PhoneLockRequiredException || failure instanceof AccountSafety.DeletionPendingException) throw failure;
+        return 1;
     }
 
     private void editDialog(ChatEngine.Peer peer, ChatEngine.Entry entry, String currentText) {
@@ -2652,10 +2857,14 @@ public final class MainActivity extends AppCompatActivity {
         showDialog(sheet);
     }
 
-    private MaterialButton profileAction(String name, int resource, Runnable action) {
+    private MaterialButton profileAction(String name, int resource, Runnable action) { return profileAction(name, resource, action, INK); }
+
+    // {@code tone} colours the text and the icon: red for a delete.
+    private MaterialButton profileAction(String name, int resource, Runnable action, int tone) {
         MaterialButton button = design.button(name, false, action);
         button.setStrokeWidth(0); button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.TRANSPARENT));
-        button.setTextColor(INK); button.setTextSize(13); button.setGravity(Gravity.START | Gravity.CENTER_VERTICAL); button.setMinHeight(dp(52));
+        button.setTextColor(tone); button.setTextSize(13); button.setGravity(Gravity.START | Gravity.CENTER_VERTICAL); button.setMinHeight(dp(52));
+        if (tone != INK) button.setIconTint(android.content.res.ColorStateList.valueOf(tone));
         button.setIconResource(resource); button.setIconSize(dp(20)); button.setIconPadding(dp(14));
         button.setIconGravity(MaterialButton.ICON_GRAVITY_START); button.setPadding(0, dp(12), 0, dp(12));
         android.graphics.drawable.Drawable arrow=ContextCompat.getDrawable(this,R.drawable.ic_chevron_right).mutate(); arrow.setTint(MUTED); arrow.setBounds(0,0,dp(16),dp(16));
@@ -3258,7 +3467,7 @@ public final class MainActivity extends AppCompatActivity {
         ChatEnvelope.Expiry selectedExpiry = expiry;
         openDialog = new SecureSheet.Builder(this).setTitle("Send photo").setView(view).setNegativeButton("Cancel", null)
                 .setPositiveButton("Send", (dialog, which) -> {
-                    ChatEnvelope.Reference reference = pendingReplyTo == null ? null : new ChatEnvelope.Reference(pendingReplyTo.id(), pendingReplySnippet);
+                    ChatEnvelope.Reference reference = pendingReplyTo == null ? null : new ChatEnvelope.Reference(pendingReplyTo.id(), pendingReplySnippet, pendingReplyTo.outgoing());
                     if (enqueueSend(peer, null, image, selectedExpiry, reference)) { pendingReplyTo = null; pendingReplySnippet = null; updateReplyStrip(); }
                 }).create();
         openDialog.setOnDismissListener(dialog -> { view.setImageDrawable(null); Arrays.fill(image, (byte) 0); clearBitmap(); });
@@ -3538,7 +3747,8 @@ public final class MainActivity extends AppCompatActivity {
                         conversationUsername.setText(groupStatus);
                     groupComposerState(groupCanSend);
                 }
-                checkedPresence = null; shownPresence = null; refreshContactStatus();
+                // The shown status stays until the re-check below replaces or removes it, so the header does not blink on every pass.
+                checkedPresence = null; refreshContactStatus();
                 refreshMessages(selectedContact);
             }
         });
@@ -3627,7 +3837,12 @@ public final class MainActivity extends AppCompatActivity {
         dialog.show();
     }
     private void clearBitmap() { if (displayedBitmap != null) { displayedBitmap.recycle(); displayedBitmap = null; } }
-    private void dismissContent() { closePhoto(); if (openDialog != null) { openDialog.setDismissWithAnimation(false); openDialog.dismiss(); openDialog = null; } clearBitmap(); }
+    private void dismissContent() {
+        closePhoto();
+        if (messageOverlay != null) { MessageActions overlay = messageOverlay; messageOverlay = null; overlay.dismiss(); }
+        if (openDialog != null) { openDialog.setDismissWithAnimation(false); openDialog.dismiss(); openDialog = null; }
+        clearBitmap();
+    }
 
     private void hideContent() {
         photoAdmin = false; photoRoleAccount = null;

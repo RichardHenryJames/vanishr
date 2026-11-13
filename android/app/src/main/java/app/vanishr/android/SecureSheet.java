@@ -131,6 +131,7 @@ final class SecureSheet extends BottomSheetDialog {
             case "Create" -> R.drawable.ic_plus;
             case "Add contact", "Invite" -> R.drawable.ic_user_round_plus;
             case "Send", "Download" -> R.drawable.ic_arrow_up;
+            case "Forward" -> R.drawable.ic_forward;
             case "Delete", "Remove" -> R.drawable.ic_trash_2;
             case "Sign out", "Close group", "Leave group" -> R.drawable.ic_log_out;
             default -> R.drawable.ic_check;

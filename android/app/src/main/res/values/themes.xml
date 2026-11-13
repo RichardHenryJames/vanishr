@@ -50,6 +50,19 @@
         <item name="shapeAppearance">@style/Shape.Vanishr</item>
         <item name="backgroundTint">#FFFFFF</item>
     </style>
+    <style name="Theme.Vanishr.MessageActions" parent="Theme.Material3.Light.NoActionBar">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
     <style name="Theme.Vanishr.PhotoViewer" parent="Theme.Material3.Dark.NoActionBar">
         <item name="android:windowIsFloating">false</item>
         <item name="android:windowBackground">@android:color/black</item>

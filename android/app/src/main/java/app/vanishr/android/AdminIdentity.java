@@ -38,7 +38,7 @@ final class AdminIdentity {
     static final long MAX_SEQUENCE = 1_000_000;
     // The sequence of the certificate whose identity is the built-in pin. Anything at or below it is already known to this build, so only
     // a higher one can change anything. `scripts\sign-admin-identity.ps1 -Check -AppRelease` stops a release where the two disagree.
-    static final long BUILD_SEQUENCE_FLOOR = 2;
+    static final long BUILD_SEQUENCE_FLOOR = 3;
     private static final long MAX_NUMBER = 9_007_199_254_740_991L;
     // Keeps a signature made for this purpose from being valid for anything else the same key might sign.
     private static final byte[] DOMAIN = "vanishr-admin-identity-v1\0".getBytes(StandardCharsets.US_ASCII);

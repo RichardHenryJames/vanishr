@@ -8,9 +8,10 @@ import android.view.animation.DecelerateInterpolator;
 
 /**
  * A horizontal drag on one view that moves it with the finger, in one direction only, and does something when it is let go past a
- * distance: the swipe on a message that starts a reply, and the swipe on a chat in the list that asks to remove the contact. A vertical
+ * distance: the swipe on a chat in the list that asks to remove the contact. (A message in a conversation is swiped with
+ * {@link SwipeRow}, which takes the drag from anywhere on its row.) A vertical
  * drag is left to the list's own scrolling, and the view's own click and long press keep working for a tap or a press that stays put.
- * A sideways drag the other way is swallowed, so that it neither opens what it started on (a view-once photo) nor ends as a long press.
+ * A sideways drag the other way is swallowed, so that it neither opens what it started on nor ends as a long press.
  * Nothing is done while the finger is still down, and a gesture that is cancelled (the list took it) does nothing.
  */
 final class HorizontalSwipe implements View.OnTouchListener {

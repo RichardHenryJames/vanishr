@@ -44,6 +44,42 @@ class ChatEnvelopeTest {
         assertDoesNotThrow(() -> verify(withReference(new ChatEnvelope.Reference(UUID.randomUUID(), "a".repeat(160)))));
     }
 
+    @Test void theOfferedReactionsAreExactlyTheSixEarlierAppsKnowInAFixedOrder() {
+        assertEquals(java.util.List.of("\uD83D\uDC4D", "\u2764\uFE0F", "\uD83D\uDE02", "\uD83D\uDE2E", "\uD83D\uDE22", "\uD83D\uDE4F"), ChatEnvelope.REACTION_CHOICES);
+        assertEquals(java.util.Set.copyOf(ChatEnvelope.REACTION_CHOICES), ChatEnvelope.REACTIONS);
+        for (String emoji : ChatEnvelope.REACTION_CHOICES)
+            assertDoesNotThrow(() -> verify(control(ChatEnvelope.REACTION, new ChatEnvelope.Action(UUID.randomUUID(), emoji, null))));
+        assertThrows(SecurityException.class, () -> verify(control(ChatEnvelope.REACTION, new ChatEnvelope.Action(UUID.randomUUID(), "\uD83D\uDD25", null))));
+    }
+
+    @Test void aQuotedReferenceMayNameWhoWroteTheQuotedMessageAndIsStillValidWithoutIt() {
+        UUID quoted = UUID.randomUUID();
+        for (Boolean own : new Boolean[]{null, Boolean.TRUE, Boolean.FALSE})
+            assertDoesNotThrow(() -> verify(withReference(new ChatEnvelope.Reference(quoted, "Earlier message", own))));
+        assertNull(new ChatEnvelope.Reference(quoted, "Earlier message").ownMessage());
+        assertEquals(new ChatEnvelope.Reference(quoted, "Earlier message", null), new ChatEnvelope.Reference(quoted, "Earlier message"));
+        assertThrows(SecurityException.class, () -> verify(withReference(new ChatEnvelope.Reference(quoted, "a".repeat(161), Boolean.TRUE))));
+        assertThrows(SecurityException.class, () -> verify(withReference(new ChatEnvelope.Reference(null, "Earlier message", Boolean.TRUE))));
+    }
+
+    @Test void aQuotedSnippetIsCutToTheLimitWithoutBreakingACharacterAndAShortOneIsKept() {
+        assertEquals("Hello", ChatEnvelope.Reference.excerpt("  Hello \n"));
+        assertEquals("a".repeat(160), ChatEnvelope.Reference.excerpt("a".repeat(160)));
+        String cut = ChatEnvelope.Reference.excerpt("a".repeat(161));
+        assertEquals("a".repeat(157) + "\u2026", cut);
+        assertTrue(cut.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= ChatEnvelope.MAX_SNIPPET_BYTES);
+        // Two- and four-byte characters, so that the cut lands in the middle of one if it were made by bytes.
+        for (String unit : new String[]{"\u00e9", "\u20ac", "\uD83D\uDE02"}) {
+            String shortened = ChatEnvelope.Reference.excerpt(unit.repeat(200));
+            assertTrue(shortened.endsWith("\u2026"));
+            assertTrue(shortened.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= ChatEnvelope.MAX_SNIPPET_BYTES);
+            String body = shortened.substring(0, shortened.length() - 1);
+            assertEquals(unit.repeat(body.length() / unit.length()), body);
+            assertDoesNotThrow(() -> verify(withReference(new ChatEnvelope.Reference(UUID.randomUUID(), shortened, Boolean.TRUE))));
+        }
+        assertEquals("", ChatEnvelope.Reference.excerpt(null));
+    }
+
     private ChatEnvelope withReference(ChatEnvelope.Reference reference) {
         return new ChatEnvelope(1, id, sender, senderDevice, recipient, recipientDevice, now.toEpochMilli(), deadline,
             ChatEnvelope.Expiry.HOUR_1, "hello", null, null, reference, null);

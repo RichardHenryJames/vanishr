@@ -12,6 +12,19 @@ license notices at **https://vanishr-download.vercel.app**.
 The public [update feed](https://vanishr-download.vercel.app/updates.json), not
 the latest Git version, determines which release users can download and discover.
 
+Release **0.6.8/code 49** makes the chat behave like the messengers people already know, and carries the identity of the
+admin's current phone. Pressing and holding a message dims the chat, keeps the message where it was, floats the six reactions above
+it and a menu below it (Reply, Forward, Copy, Edit, Info, Delete, and More… for somebody else's message); a reaction is drawn as a
+small pill on the message; a reply quotes the earlier message in an accent-barred block that names whose words they are ("You" or the
+contact); swiping a message to the right now replies to **your own** messages too (it only worked on received ones); and the contact's
+Online / Last seen text under the name no longer blinks every few seconds. A reply to a message longer than 160 bytes could not be sent
+before, and now can. There is no Star (it would keep a message past its deadline) and no "+" for more emoji (an older app refuses an
+emoji outside the six and stops syncing at that message). Copy puts the text on Android's clipboard, outside the app's protection.
+The built-in official-admin identity is now the certificate-sequence-3 one, the identity of the Google Play install. No relay change.
+Emulator tests only: no physical phone, no Google Play install. See the
+[threat model](docs/THREAT-MODEL.md#the-message-menu-quoted-replies-reactions-on-the-message-and-a-steadier-header-068) and
+[verification](docs/VERIFICATION.md#release-068--the-message-menu-quoted-replies-reactions-on-the-message-swipes-on-own-messages-and-a-steadier-header-2026-11-13).
+
 Release **0.6.6/code 47** lowers the minimum password length from 16 to 12 characters (12 to 64), and the official admin's
 account now signs in with a username and password instead of Google. The Google account is not needed for the admin any more,
 and no e-mail address of the admin is stored, shown or published anywhere (the relay only ever received Google's opaque account
@@ -399,10 +412,11 @@ no Azure resources or paid add-ons were changed for this website.
 - Text and encrypted image messages; per-image keys remain inside Signal envelopes.
 - View once, 12 hours or 24 hours (a 12-hour message travels as the 24-hour kind with an earlier deadline); delivery/read
   status and hard Redis TTLs.
-- Reply-with-quote, a fixed six-emoji reaction and delete-for-everyone (no placeholder left behind) for a
-  1:1 message, and edit for a sent 1:1 text message; none of these apply to group messages. Swipe a message to the
-  right to reply; swipe a chat in the list to the left to remove the contact (it asks first); tap a contact's name or
-  picture in a chat to open their profile.
+- Reply-with-quote (the quote names whose words they are), a fixed six-emoji reaction drawn as a pill on the message, and
+  delete-for-everyone (no placeholder left behind) for a 1:1 message, edit for a sent 1:1 text message, and, for any message,
+  Forward, Copy and Info; none of the reply, reaction and edit actions apply to group messages. Press and hold a message for the
+  menu; swipe a message to the right (yours or theirs) to reply; swipe a chat in the list to the left to remove the contact (it
+  asks first); tap a contact's name or picture in a chat to open their profile.
 - On the admin's phone, a contact that reinstalls Vanishr or changes phone is kept for review ("Identity changed. Tap to
   review") instead of failing the whole contact list; the new identity is used only after its safety number is shown and
   accepted.

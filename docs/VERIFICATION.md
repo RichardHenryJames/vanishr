@@ -3,6 +3,66 @@
 Evidence refreshed on Windows, 2026-11-09 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
+## Release 0.6.8 / The message menu, quoted replies, reactions on the message, swipes on own messages and a steadier header (2026-11-13)
+
+Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#the-message-menu-quoted-replies-reactions-on-the-message-and-a-steadier-header-068).
+This entry records the code, its tests and mutations, the visual review, and then the build and publication under "Release steps (0.6.8)".
+
+- **Changed.** Pressing and holding a message opens a dimmed overlay with the six reactions above the message and a menu card below it
+  (`MessageActions`, new); a swipe to the right replies from anywhere on the row, so own messages work too, and the same row takes the
+  press on a photo (`SwipeRow`, new); a reply's quote has an accent bar, the author's name and the start of the text, in the bubble
+  and above the composer (`QuoteBlock`, new); a reaction is a pill on the message; the card's actions are Reply, Forward, Copy, Edit, Info, Delete
+  and More… (`MainActivity`); the header's Online / Last seen text is kept while the next answer is checked (`ContactPresence`,
+  `MainActivity.syncOnce`/`refreshContactStatus`); `ChatEnvelope.Reference` gains an optional `ownMessage` and `excerpt` (the snippet cut
+  that was missing), and `REACTION_CHOICES` fixes the order of the six; four icons and one theme. No relay change.
+  The built-in admin pin: `AdminOnboarding.OFFICIAL` names the device `1f0b2f56-48c2-4406-98dd-db6c6a2eefa5` and the fingerprint of certificate
+  sequence 3 and `AdminIdentity.BUILD_SEQUENCE_FLOOR` is 3, so a build carries exactly the published certificate (`sign-admin-identity.ps1
+  -Check -AppRelease` passes; the unit test that ties the build to the published certificate passes again). Three emulator tests that served
+  certificates with a hard-coded sequence 3 now use `BUILD_SEQUENCE_FLOOR + 1`, like their neighbours (a fixture dependency, found by
+  reading the floor's uses, not a product fault).
+- **Tests added.** Emulator (`ScreenFlowTest`, 12): the header text never changes or empties across eight new answers and eight sync passes
+  and still disappears for another identity or an empty answer; the swipe (from the bubble and from the empty part of the row, own and
+  received, short pull, wrong way, vertical, photo tapped and not tapped); the overlay's layout for a received, own, photo, view-once and
+  bottom-of-the-screen message with what each is offered; every action (Reply, Copy with the sensitive flag, Info, Edit, More, both Delete
+  sheets and the delete itself); a reaction picked, shown as a pill on the side that faces the middle, picked in the bar and taken back;
+  forwarding text and a photo (the decrypted upload equals the photo, the original stays, no reference); a group message (no reactions, no
+  Reply, no swipe); the quote's name and width in six cases including an earlier app's; a long message quoted by its beginning and sent; a
+  message taller than the screen. JVM: `ChatEnvelopeTest` (3: the author flag, the cut at a character boundary, the six reactions in order) and
+  `ReplyReferenceJsonTest` (3: an earlier app's reply, the unchanged wire form, the flag read by an earlier-shaped record). The old swipe
+  test was replaced by the first emulator test above; the one that checks pixels behind a held message was adapted to the new row.
+- **Mutations, all caught** (each applied alone or beside others that other tests catch, built, run and restored; every restored file was
+  checked): the header text compared by object again; the sync pass blanking it again; the swipe direction reversed; a reply fired without
+  reaching the mark; a vertical drag taken as a swipe; the empty part of the row not taken; the wrong-way drag not swallowed **and** the
+  pressed state not cleared (either one alone is masked by the other, which the first attempt showed); the quote author not worked out for an
+  earlier app's reply; Edit offered on a received message; Forward offered on a view-once message; Delete for everyone offered on a
+  received message; the snippet not cut; the pill on the other side; the picked reaction not shown as picked; the original message not hidden
+  while its copy is shown; the placement not kept on screen. **Two were not caught the first time and the test was made stricter:** the pill
+  side (the assertion allowed either side) and the wrong-way drag across a photo (the check that the photo did not open depended on how long a
+  photo takes to open, so it could not fail; it now counts the photo's click).
+- **Mistakes of mine, found by looking at the screenshots and by the tests.** The pill sat on the left of every bubble because
+  `LinearLayout.LayoutParams(-2, -2, Gravity.END)` takes a *weight* as its third argument (fixed with `gravity`); the quote made bubbles
+  as narrow as the quote, because a child that is not match-parent stops the others counting toward the width of a wrapped column (the
+  quote is match-parent now, with a negative margin to reach the bubble's edge); the swipe cue, the quote's bar and an own bubble were cut at the
+  list's padding (`clipToPadding`); the taller-than-the-screen message kept its full height because a `requestLayout()` made inside a
+  layout listener is dropped (the placement now runs after the layout pass); a slow drag across a photo opened the actions because it
+  stayed inside the touch slop longer than the long-press time (the drag in the test is quicker, as a real one is). Also, the emulator's first
+  minutes after boot showed a System UI "not responding" dialog that took every injected touch; it was dismissed and the runs repeated.
+- **Visual review.** The captured screenshots (`ui-qa` of the runs: 91, 91b, 100 to 110) were read one by one: the overlay for each kind of
+  message, the pill, the quoted replies and the reply strip, a group message, a tall message, and the held swipe on both kinds of message.
+- **The gate.** `verify.ps1 -Android` passed on the final code: client-core **35** tests (was 32), relay **114** (2 skipped, as before), Android
+  unit tests (including the one that ties the build to the published certificate), debug lint **0 errors / 19 warnings** (two
+  `ViewConstructor` warnings for the new views were suppressed with a comment: they are built in code and never inflated), the script
+  tests, and the checks of the committed settings and certificate files. The Flyway "Migration … failed" line in the log is the expected
+  fixture of the upgrade test.
+- **The full emulator suite (307 tests): 1 failure and 2 skips.** The failure is `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`
+  (unchanged since 0.6.3); the skips need a device with no screen lock and an opt-in for the live relay.
+  `profileSessionRejectionReturnsToSignInInsteadOfStayingInTheDialog` passed this time. The two tests added after that run (photo forward
+  and the group message) and the overlay tests were rerun on the final code and pass.
+- **Not verified.** A physical phone; a real finger; the keyboard open under the overlay; the overlay under a screen reader; Android before 13
+  for the clipboard flag; an earlier app reading a reply that carries `ownMessage`; whether the chat feels as the owner expects.
+
+Release steps (0.6.8): TBD.
+
 ## Release 0.6.6 / Passwords of 12 characters, and the admin account without Google (2026-11-09)
 
 Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#password-length-of-12-and-the-admins-move-from-google-to-a-password-066).
@@ -127,6 +187,7 @@ unchanged. `sign-admin-identity.ps1 -Check -Live -RequireIdentical` reports that
 **Not done:** the built-in pin and `BUILD_SEQUENCE_FLOOR` in the source (and in the 0.6.7 bundle) still carry sequence 2, so until the next
 app version carries sequence 3 the committed certificate is newer than the build and `verify.ps1` /
 `sign-admin-identity.ps1 -Check -AppRelease` will stop (the unit test that ties the build to the published certificate fails on purpose).
+**Done in 0.6.8:** the pin and the floor carry sequence 3 (see the entry above).
 Apps of 0.6.3 or later follow the certificate by themselves. That the owner's phone then accepted the admin was not observed.
 
 ## Admin identity certificate, sequence 2 (2026-11-09)
