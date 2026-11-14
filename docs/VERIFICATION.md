@@ -42,8 +42,47 @@ under "Direct release and website", the direct-download APK and the website.
   transparent pixels (its alpha is equal and every visible pixel is white).
 - **What this does not show.** A physical phone; the launcher icon on a real home screen or with the themed-icon setting switched on (the
   themed layer was judged from the contact sheet only); the Play listing, where the owner has to upload the 512 px icon by hand; whether
-  Google Play accepts the bundle; an install from Play; and whether the logo suits the owner as it looks on a phone. The old
-  `Vanishr Icon.png` stays in the repository, unused.
+  Google Play accepts the bundle; an install from Play; and whether the logo suits the owner as it looks on a phone.
+
+**Direct release and website (0.6.9 / code 50, 2026-11-14)**
+
+The owner asked for the logo to be updated everywhere and for the direct download and the website to be published too; the relay needed no
+change (this release changes the app and the website only, and the relay serves no logo), so it was not touched. The checks of the app above apply to this
+APK as well (same source tree; the commits after `d19b118` changed only the website's social image and documents).
+
+- **Where the old logo still was.** After the app (launcher, themed and status-bar icons, in-app badge), the website's `icon.png`, favicon and
+  Apple icon had been regenerated but not published, and `assets/social.jpg` still carried the old logo. `prepare-site-assets.ps1 -BrandingOnly`
+  redrew the social image from the new `icon.png` (commit `ab668d5`, which also corrected the documents that said the direct release
+  would wait). The page headers, the structured-data logo and the icon links all point at `/icon.png`, so they needed no edit.
+- **Build and stage** (from `ab668d5`, tree clean; notices regenerated and unchanged): signed APK **44,665,578 bytes**, SHA-256
+  `4965def46bf9bafddb9f8e280307ec2ee6b9bc6775756939665455e6b8e5e7c7`, version 0.6.9 / code 50, min API 28, target API 36, the same
+  permissions as 0.6.8's APK (compared by `aapt2 dump permissions`: no difference), the same certificate as every release since 0.6.0
+  (SHA-256 `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`); the staged APK is byte-identical to the built one.
+  `.tools\vercel-download-0.6.9`: 33 files / 60,967,395 bytes (limit 99,000,000), recorded in `.tools\distribution-audit-0.6.9.json`.
+  The content audit of the source ZIP (492 entries, 218 of them dependency sources; 274 source files byte-identical to the commit and
+  none different), the stage and the stored APK bytes searched for nine private values by value and for the script's secret patterns:
+  no findings. Only `.vercel\project.json` was copied from the 0.6.8 stage (IDs checked, no `.env*` file).
+- **Vercel.** Deployment `dpl_FidX7xXQQcGBnSc4MJ5rhtFyQ4yR` (production, READY); the live feed served 0.6.8 / 49 before, so 50 is no
+  downgrade. The deployment itself moved only `vanishr-download-vanishr.vercel.app`, so the canonical alias `vanishr-download.vercel.app`
+  was moved to it explicitly (`vercel alias set`), as in 0.6.8.
+- **Public verification** (`.tools\public-release-verification-0.6.9.json`). The canonical feed reports 0.6.9 / 50 with `no-store`; all 32
+  audited files fetched anonymously (`vercel.json` is not served) are byte-identical (HTTP 200); the public APK is byte-identical to the
+  staged one and has the original certificate; 22 private or missing paths return 404; security headers pass; the signed settings file
+  (sequence 1) and the admin identity certificate (sequence 3) are live and identical to the committed files (the settings file still
+  expires on **2026-12-01**, 17.0 days away at the check, and needs renewing before then); no problems. The four logo files served
+  (`icon.png`, `favicon.ico`, `apple-touch-icon.png`, `assets/social.jpg`) are byte-identical to the committed ones, and the home page,
+  read in a browser, shows the new badge beside the name in the header.
+- **In-place upgrade** on the dedicated test emulator: the 0.6.8 APK (the hash the feed had published, `4170b45c…`) was installed and
+  started, then the public 0.6.9 APK, downloaded from the site and hash-checked, was installed over it with `adb install -r`, no
+  uninstall: version code 49 to 50, `firstInstallTime` unchanged, the same certificate (a different one would have refused the update),
+  the app running afterwards (a new process), an empty crash buffer and no fatal exception. The launcher showed the new icon. The
+  account was a fresh install, so this does not show that an account's stored chats survive the update, the in-app "Check for
+  updates" banner, or a browser download.
+- **What this does not show.** The **screenshots on the home page** (`conversations.png`, `chat.png`, `profile.png` and the two overview
+  boards) are still the drawings of the 0.3.3 app; they never contained the logo and were not redrawn. The GitHub repository's picture
+  and social preview and the Google Play listing (the owner uploads the 512 px icon and the bundle) are set outside the repository. The old
+  `Vanishr Icon.png` and an unused white wordmark file stay in the repository root. A physical phone, the themed-icon setting on a real
+  launcher, and a browser download of the APK were not tried.
 
 ## Release 0.6.8 / The message menu, quoted replies, reactions on the message, swipes on own messages and a steadier header (2026-11-13)
 
