@@ -12,6 +12,14 @@ license notices at **https://vanishr-download.vercel.app**.
 The public [update feed](https://vanishr-download.vercel.app/updates.json), not
 the latest Git version, determines which release users can download and discover.
 
+Release **0.6.9/code 50** gives Vanishr its new logo (two overlapping chat bubbles, a white one with three dots over a pale green
+one, on green) in the launcher icon, the themed and status-bar icons and the app's header, and it carries the chat-list swipe
+actions described next, so that it replaces both builds of 0.6.8. **It is a Google Play bundle only so far:** the website and the
+direct-download APK are still 0.6.8 until a direct release is published (the website's icon files in the repository already have
+the new logo and go out with that release). No relay change, no new permission and no change to any security rule; the logo files
+are made from one picture by `scripts/prepare-brand-assets.ps1`. Emulator tests only: no physical phone, no Google Play install.
+See the [verification](docs/VERIFICATION.md#release-069--the-new-logo-play-bundle-only-2026-11-14).
+
 Release **0.6.8/code 49** makes the chat behave like the messengers people already know, and carries the identity of the
 admin's current phone. Pressing and holding a message dims the chat, keeps the message where it was, floats the six reactions above
 it and a menu below it (Reply, Forward, Copy, Edit, Info, Delete, and More… for somebody else's message); a reaction is drawn as a

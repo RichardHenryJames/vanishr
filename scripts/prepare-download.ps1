@@ -72,7 +72,7 @@ foreach ($directory in @($stage, $source)) {
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
 }
 $sourcePaths = @('LICENSE', 'NOTICE.md', 'README.md', 'pom.xml', '.gitignore', '.dockerignore',
-    'Vanishr Icon.png', 'scripts/prepare-brand-assets.ps1',
+    'Overlapping Green Chat Bubbles.png', 'scripts/prepare-brand-assets.ps1',
     'android/build.gradle', 'android/settings.gradle', 'android/gradle.properties', 'android/app/build.gradle', 'android/app/proguard-rules.pro',
     'android/app/src', 'client-core/pom.xml', 'client-core/build.gradle', 'client-core/src', 'relay/pom.xml', 'relay/src',
     'docs/API.md', 'docs/ARCHITECTURE.md', 'docs/ENCRYPTION.md', 'docs/THREAT-MODEL.md', 'docs/VERIFICATION.md', 'docs/GOOGLE-SETUP.md', 'docs/PLAY-STORE.md', 'docs/DEPLOYMENT-GUIDE.md',

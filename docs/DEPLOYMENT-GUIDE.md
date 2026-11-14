@@ -126,6 +126,15 @@ first, including the absent Google/Firebase client configuration.
    device and identity it names. `.\scripts\sign-admin-identity.ps1 -Check` prints what is committed;
    `prepare-download.ps1` runs `-Check -AppRelease` right after the settings check and stops if the app and the certificate
    disagree. See [Changing the admin's phone](#changing-the-admins-phone).
+7. The logo is one picture, [Overlapping Green Chat Bubbles.png](<../Overlapping Green Chat Bubbles.png>): a square with a flat
+   background and the artwork on it. [prepare-brand-assets.ps1](../scripts/prepare-brand-assets.ps1) makes every logo file from it:
+   the in-app logo and the website's icon and favicon (the picture with rounded corners), the Apple icon (the plain square), the
+   launcher icon (the artwork scaled to sit inside the adaptive icon's safe circle, over the picture's own background, whose colour
+   it also writes into `brand.xml`) and the themed and status-bar icons (silhouettes). To change the logo, replace the picture and
+   run the script and commit what it writes; `package-apk.ps1` and `prepare-download.ps1` run it with `-Verify` and stop on a stale
+   file. `-PlayIcon <path>` also writes the 512 x 512 icon that the Google Play listing asks for (upload it in the Play Console; it
+   is not part of the bundle). The website's social image and screenshots are made by `prepare-site-assets.ps1` and still show the
+   old logo until that is run and the site is published.
 
 ### 4.2 Verify and, only if needed, update the relay first
 
