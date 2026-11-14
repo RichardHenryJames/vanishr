@@ -3,6 +3,65 @@
 Evidence refreshed on Windows, 2026-11-14 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
+## Release 0.6.10 / Touching a quote goes to the message (Play bundle only, 2026-11-14)
+
+Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#touching-the-quote-in-a-reply-and-a-limit-that-says-so-0610). Commit `61f2d2b`. The owner
+said the quote in a reply "does nothing when tapped" and asked for it to work as in WhatsApp, and said that a reply was "trimmed". **The
+Google Play bundle is not uploaded anywhere** (the owner uploads it). **The website and the direct-download APK are still 0.6.9** (published
+on 2026-11-14, see the entry below); a direct 0.6.10 has not been cut.
+
+- **Changed.** `QuoteBlock.opens` makes the quote a control (a ripple, and "Go to the quoted message" as the screen-reader action).
+  `MainActivity.jumpToQuoted` finds the row of the quoted message in the conversation, or, when it is not among the loaded pages, checks on
+  the reader lane that the message exists, belongs to this contact (not a group message) and has not expired, and then asks for older
+  pages one at a time (`continueQuoteJump`, run after every load) until it is found; `showQuoted` scrolls it to the middle of the screen
+  (to its top when it is taller than the screen; no scroll when it is on the screen already); `flashRow` tints the row for two seconds with a
+  foreground drawable whose alpha follows the clock. Anything else says "That message is no longer in this chat." (`notice`) and moves and
+  loads nothing. The quote in a message that could not be sent opens the original too; the copy in the message actions and the strip above
+  the composer do not open anything. `limitWithNotice` replaces the bare 4,096-character filter on the message field and on the edit field.
+  Version 0.6.10 / code 51 in `build.gradle`. No relay change and no wire change (`ChatEnvelope` and the 160-byte quote are untouched).
+- **About "trimmed".** What was meant was not clear from the report (the quote, which is a short copy, or the typed text), so both were
+  looked at. No code path shortens a typed message: the composer stops at 4,096 characters (silently, until now), the encrypted text may be
+  16,384 bytes and the relay takes 65,536 bytes of ciphertext. The quote is cut at 160 bytes and drawn in three lines at most (about 53
+  characters in Devanagari, 40 emoji), by design. Tests (below) send long typed answers in four scripts and sizes and compare what left the
+  phone with what was typed: all equal.
+- **Tests added (nine, `ScreenFlowTest`, emulator).** A tap on the quote bringing a message from far above to the middle of the screen and
+  tinting its row (the middle checked to three pixels), the tint then going out and the row being left as it was; a message already on the
+  screen tinted without the list moving; a deleted, an expired and another chat's message each saying so and moving nothing; a message beyond
+  the loaded pages (132 messages, 100 loaded) found by loading more, and an id of another chat loading nothing; the quote in a reply that could
+  not be sent; a press that stays put opening the actions (and not going anywhere when the finger lifts) and a swipe still starting a reply,
+  the copies in the actions and the strip being pictures, and the screen-reader action; the limit and its notice (exactly 4,096 kept whole
+  and silent, 5,000 cut with the notice); a long typed answer sent whole (48 lines of ASCII with `<`, `&`, `'` and `=`; Devanagari; emoji; 4,096
+  `<`, the worst case for the encrypted size), decrypted and compared, with the quote and under the relay's limit, and shown whole on screen;
+  and a long answer from the other side shown whole under its quote.
+- **What the first run showed.** Five of the eight tests then written passed at once (the notices, the press and swipe, the limit and both
+  long-answer tests). Three failed because the tint was never seen: the test emulator has animations switched off, and an animator then ends in
+  the first frame and clears the tint. A phone with animations off would have behaved the same, so the tint now follows the clock instead of an
+  animator. Two more things came from the tests and screenshots: the tests checked the tint after waiting for the list to come to rest, which
+  depended on timing (they now check it as soon as it appears), and the first tint was a band behind the row, which showed only beside a white
+  bubble (it is a tint over the whole row now). A ninth test (the unsent bubble) was added after reading the code for a path with no test.
+- **Mutations, all caught (6).** Each applied beside others that other tests catch, built, run and restored (the three files checked by hash
+  afterwards): the centring (the message put near the top instead), the copy in the actions made touchable, the notice of the limit removed,
+  the tint never started (caught by four tests), the older pages never asked for, and the check that the message belongs to this chat removed
+  (caught only by the test that counts the pages loaded: the notice is the same either way, so the check's effect is the pages it avoids).
+- **Full emulator suite: 333 tests, 1 failure and 2 skips** (324 before, plus nine). The failure is
+  `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount` (unchanged since 0.6.3); the skips need a device with no screen lock and an
+  opt-in for the live relay. The suite ran on the code that was built, before the version number was changed.
+- **The gate.** `verify.ps1 -Android` passed: client-core **35** tests, relay **114** (2 skipped), the Android unit tests, debug lint
+  **0 errors / 18 warnings** (the same as before, none new), the script suites, and the checks of the committed settings and certificate
+  files. **The signed settings file expires 2026-12-01 (see the entry below).**
+- **Google Play bundle** (`.tools\play-store-0.6.10\vanishr-0.6.10.aab`, built from the clean tree at `61f2d2b` by
+  `package-apk.ps1 -Bundle -PlayStore`, **not uploaded anywhere**): **45,980,197 bytes**, SHA-256
+  `400a759f0ab0dfbaea3f23e82b38284eb731502145c3dee0b40a7e972e1a1648`; bundletool 1.18.3 `validate` passed; 0.6.10 / code 51, min API 28,
+  target API 36; 14 permissions, identical to the 0.6.9 bundle's (compared); 64-bit native libraries 16 KiB aligned; bundled notices match the
+  source; no external updater; the Firebase client configuration present and matching; the settings key file identical to the committed one;
+  JAR signature verified with the same signer (SHA-256 `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`); an exhaustive
+  by-value scan of the decompressed bundle (894 entries, eight private values): no findings; the new strings are in its code.
+- **What this does not show.** A physical phone or a real finger (the touches are injected); a screen reader in use (only its action is
+  read); how the scroll and the tint feel to the owner; a phone with a different theme or font size; the quote of a message in a script that
+  takes more bytes per character, which is cut earlier because the 160-byte cap is unchanged; whether Google Play accepts the bundle; and an
+  install from Play. If a typed reply was really cut on the owner's phone, this release does not explain it and the length and script of
+  the text are needed.
+
 ## Release 0.6.9 / The new logo (2026-11-14)
 
 Commit `d19b118`. Version 0.6.9 / code 50 is the chat-list swipe actions of the 0.6.8 rebuild plus the owner's new logo,
