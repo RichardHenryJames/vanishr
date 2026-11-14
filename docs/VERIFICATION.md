@@ -1,6 +1,6 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-11-13 UTC. This is a development foundation,
+Evidence refreshed on Windows, 2026-11-14 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
 ## Release 0.6.8 / The message menu, quoted replies, reactions on the message, swipes on own messages and a steadier header (2026-11-13)
@@ -85,7 +85,8 @@ This entry records the code, its tests and mutations, the visual review, and the
   emulator with no screen lock, the request to set one). The account was a fresh install, so this does not show that an account's stored
   chats survive the update (only the earlier-shaped reply tests above speak to that), the in-app "Check for updates" banner, or a
   browser download.
-- **Google Play bundle** (`.tools\play-store-0.6.8\vanishr-0.6.8.aab`, **not uploaded anywhere**): **45,876,092 bytes**, SHA-256
+- **Google Play bundle, first build** (from `cfe3351`, **not uploaded anywhere, superseded by the rebuild below**; kept as
+  `.tools\play-store-0.6.8\superseded\vanishr-0.6.8-cfe3351-superseded.aab`): **45,876,092 bytes**, SHA-256
   `6c92fb43583c3f1133ed44a5fbd60fe287a9363d85fe2f7cd5136932aa71cde3`; bundletool 1.18.3 `validate` passed; 0.6.8 / code 49, min API 28,
   target API 36; 14 permissions, the same as 0.6.7's bundle (compared); 64-bit native libraries 16 KiB aligned; bundled notices match the
   source; no external updater; the Firebase client configuration present and matching; the settings key file identical to the committed
@@ -94,6 +95,61 @@ This entry records the code, its tests and mutations, the visual review, and the
 - **What this does not show.** Whether Google Play accepts the bundle, an install from Play, and the admin signing in on 0.6.8 on a
   phone. The signed settings file carries data, not code, so none of this release's changes reach a Play install until the owner uploads
   the bundle.
+
+**Rebuild with swipe actions on the chat list (same version 0.6.8 / code 49, Play bundle only, 2026-11-14)**
+
+Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#swipe-actions-on-a-chat-in-the-list-and-mute-068). Commit `3ee6dd4`. The owner had not
+uploaded the first bundle, so its version code was still free and the bundle was rebuilt under it. **The website was not touched:** the
+direct-download APK published under 0.6.8 (SHA-256 `4170b45c56f265237acd90803d29bf150053238a2bd208c0afa1bd349bc8a6e6`, with its source ZIP)
+is the first build and does not have the swipe actions, so **two different builds carry the number 0.6.8**. The deployment guide refuses a
+different APK under a published version code (phones that installed the first one would not be offered it), so the next direct release has
+to be a new version.
+
+- **Changed.** A chat in the list can be pulled to the right (Mute, Clear chat) or to the left (Remove contact, Block user); the row stays
+  open until a button is touched (`SwipeActions`, new; `HorizontalSwipe` removed). `ChatEngine.mute` / `mutedChats` keep a per-chat
+  record `muted/<id>` that the list shows as a grey count and a bell-off icon; the removal and the block delete it. Four icons.
+  The phone's alert is unchanged and cannot be silenced per chat, which the app says when a chat is muted.
+- **Tests.** Sixteen emulator tests (in `ScreenFlowTest`, replacing the old swipe test): both sides open and stay; short, slow, upward and
+  past-halfway pulls; the row covering the buttons while it moves (pixel check); a tap on an open row, a touch on another row, on the empty
+  list, Back and scrolling each putting it back without opening anything; one row open at a time; Mute / Unmute (grey count, bell, label,
+  stored record); Clear chat, Remove contact and Block user each asking first, cancelling changing nothing, confirming doing the old thing,
+  the mute going with a removed or blocked contact; the open row coming back open after a redraw and being forgotten when its chat is not
+  listed; no redraw under a finger; the four actions for a screen reader; the mute's engine rules. The relay stand-in gained the two
+  block calls. Eight JVM tests (`SwipeActionsRulesTest`) cover where a pulled row comes to rest and how far it gives way.
+- **Mutations, all caught (16).** Each applied beside others that other tests catch, built, run and restored (every file checked by hash):
+  the tap on an open row; the touch on another row; the open row restored after a redraw; the row's background made transparent; the list's
+  touch and scroll hook; forgetting a row whose chat is not listed; the mute removed with a removed contact, and with a blocked one; the
+  guard against drawing the list under a finger; the Back rule; the grey count; Clear chat wired to Remove; the panel always shown; and, in the
+  JVM tests, the halfway threshold, one flick rule and the resistance. **One was not caught the first time and the test was corrected:** the
+  scroll test started its drag on another row, whose touch puts the open row back by itself, so it could not fail; it now starts on the
+  open row.
+- **Mistakes of mine, found by the tests and screenshots.** The gap piece in each panel was a bare `View` with match-parent height, which asks
+  for all the height there is while the row's own height is still being worked out, so every chat row came out as tall as the screen (found
+  because the tests reported a holder 1,896 px tall; the piece is a layout now, and a test checks the row's height). Three of my edits to
+  the files dropped a line or part of one (a field declaration, the start of a line in `renderContacts`, and a branch of the relay
+  stand-in); each was found on reading and repaired before anything was built. A first emulator launched without a graphics mode composed no app window, so the
+  input system had none to send touches to and **every touch-driven test failed, including two old ones that had passed all day**; they
+  passed again after restarting the emulator with software rendering (`-gpu swiftshader_indirect`), which is not a product fault.
+- **Visual review.** Screenshots 112 to 118 of the runs were read: both sides open, a pull held part of the way, a second row open, the muted
+  chat, the Unmute offer, and the list after a search.
+- **Full emulator suite: 324 tests, 1 failure and 2 skips.** The failure is `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`
+  (unchanged since 0.6.3); the skips need a device with no screen lock and an opt-in for the live relay.
+- **The gate.** `verify.ps1 -Android` passed: client-core **35** tests, relay **114** (2 skipped), the Android unit tests (the eight new
+  ones included), debug lint **0 errors / 20 warnings** (19 before; two of them were right-to-left warnings in the new class, because the
+  physical sides are on purpose), and the script suites. The two warnings were then suppressed with a comment and a redundant comment was
+  dropped (neither changes behavior), and `lintDebug` with the unit tests was run again: **0 errors / 18 warnings**, none in the new class
+  (the old swipe class is gone too). The full suite and the gate ran before that edit; the bundle was built after it.
+- **Google Play bundle, rebuilt** (`.tools\play-store-0.6.8\vanishr-0.6.8.aab`, built from the clean tree at `3ee6dd4` by
+  `package-apk.ps1 -Bundle -PlayStore`, **not uploaded anywhere**): **45,885,517 bytes**, SHA-256
+  `3d2c9f4dbff85fd33787cbd60a0180eb5575cd0d2634e0d06adb41f8acec7f30`; bundletool 1.18.3 `validate` passed; 0.6.8 / code 49, min API 28,
+  target API 36; 14 permissions, identical to the first build's (compared); 64-bit native libraries 16 KiB aligned; bundled notices match
+  the source; no external updater; the Firebase client configuration present and matching; the settings key file identical to the committed
+  one; JAR signature verified with the same signer (SHA-256 `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`); an
+  exhaustive by-value scan of the decompressed bundle (894 entries, eight private values): no findings; its code holds the new strings and
+  not the old class.
+- **What this does not show.** A physical phone or a real finger (the drags are injected); a screen reader in use; a right-to-left language,
+  a large font or two fingers; a Mute that quiets the phone (it cannot, see the threat model); whether Google Play accepts the bundle;
+  an install from Play; and whether the feel suits the owner.
 
 ## Release 0.6.6 / Passwords of 12 characters, and the admin account without Google (2026-11-09)
 
