@@ -12,6 +12,15 @@ license notices at **https://vanishr-download.vercel.app**.
 The public [update feed](https://vanishr-download.vercel.app/updates.json), not
 the latest Git version, determines which release users can download and discover.
 
+Release **0.6.10/code 51** makes the quote inside a reply behave as it does in other messengers: touching it goes to the message that was
+quoted, brings it to the middle of the screen and tints its row for a moment (a message older than the ones loaded is looked for page by
+page; one that is gone, or that belongs to another chat, says so and moves nothing). It also makes the 4,096-character limit of a
+message say so, where text past it used to be dropped without a word, and its tests show that a long typed answer goes out and arrives
+whole (only the quote is a short copy). **It is a Google Play bundle only so far:** the website and the direct-download APK are still
+0.6.9 until a direct release is published. No relay change, no new permission, no change to the wire and no change to any security rule.
+Emulator tests only: no physical phone, no Google Play install. See the
+[verification](docs/VERIFICATION.md#release-0610--touching-a-quote-goes-to-the-message-play-bundle-only-2026-11-14).
+
 Release **0.6.9/code 50** gives Vanishr its new logo (two overlapping chat bubbles, a white one with three dots over a pale green
 one, on green) in the launcher icon, the themed and status-bar icons and the app's header, and it carries the chat-list swipe
 actions described next, so that it replaces both builds of 0.6.8. It is cut as a direct-download APK (the website's icon,

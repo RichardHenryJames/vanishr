@@ -1,14 +1,19 @@
 package app.vanishr.android;
 
 import android.content.Context;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
+import android.graphics.drawable.RippleDrawable;
 import android.text.TextUtils;
 import android.view.View;
 import android.view.ViewOutlineProvider;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import androidx.core.content.ContextCompat;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.accessibility.AccessibilityNodeInfoCompat;
 
 /**
  * The quoted message of a reply, in a bubble and above the composer: an accent bar, who wrote it in bold, and the start of what was
@@ -48,6 +53,18 @@ final class QuoteBlock extends LinearLayout {
         snippet.setCompoundDrawablePadding(design.dp(5));
         column.addView(snippet, new LayoutParams(-2, -2));
         addView(column, new LayoutParams(0, -2, 1));
+    }
+
+    /**
+     * Makes the quote a button, as it is in other messengers: touching it goes to the message that was quoted. A touch that stays put
+     * and the drag to the right still belong to the row around it (see {@link SwipeRow}), as they do for a photo.
+     */
+    QuoteBlock opens(Runnable action) {
+        setOnClickListener(view -> action.run());
+        // Clipped to the rounded corners of the quote by the outline set in the constructor.
+        setForeground(new RippleDrawable(ColorStateList.valueOf(0x24146C58), null, new ColorDrawable(Color.WHITE)));
+        ViewCompat.replaceAccessibilityAction(this, AccessibilityNodeInfoCompat.AccessibilityActionCompat.ACTION_CLICK, "Go to the quoted message", null);
+        return this;
     }
 
     /** {@code author} null leaves the name out (an older app's reply says nothing about who wrote what it quotes). */

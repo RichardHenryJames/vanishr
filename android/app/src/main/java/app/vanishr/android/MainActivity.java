@@ -160,6 +160,15 @@ public final class MainActivity extends AppCompatActivity {
     private String pendingReplySnippet;
     private View replyStrip;
     private QuoteBlock replyQuote;
+    // Touching the quote in a reply goes to the message it quotes. The id is what is being looked for while older messages are loaded
+    // to find it, and the row is the one that is lit up for a moment once it has been found.
+    private UUID quoteJump;
+    private View quoteFlashRow;
+    private Runnable quoteFlashStep;
+    // What the phone last said that is not an error, so that a test can read it.
+    private String lastNotice;
+    private long lastNoticeAt;
+    private Toast noticeToast;
     // The long-press overlay of the message actions, kept apart from the sheets so that closing the screen closes it too.
     private MessageActions messageOverlay;
     private void updateReplyStrip() {
@@ -1513,7 +1522,7 @@ public final class MainActivity extends AppCompatActivity {
         composer.setTextSize(13); composer.setMinHeight(dp(45));
         composer.setPadding(dp(13), dp(10), dp(58), dp(10));
         composer.setBackground(design.background(Ui.CANVAS, 7, Ui.LINE));
-        composer.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(4096)});
+        composer.setFilters(new android.text.InputFilter[]{limitWithNotice(4096)});
         FrameLayout typing = new FrameLayout(this);
         typing.addView(composer, new FrameLayout.LayoutParams(-1, -2));
         typing.addView(expiryLabel, new FrameLayout.LayoutParams(-2, dp(45), Gravity.END | Gravity.BOTTOM));
@@ -1698,8 +1707,11 @@ public final class MainActivity extends AppCompatActivity {
         bubble.setBackground(design.background(Ui.TINT, 8, 0));
         if (pending.reference != null) {
             Boolean own = pending.reference.ownMessage();
-            bubble.addView(new QuoteBlock(this, design, QuoteBlock.ON_TINT, 3, Math.max(dp(120), root.getWidth() - root.getPaddingLeft() - root.getPaddingRight() - dp(80)))
-                .show(own == null ? null : own ? "You" : pending.peer.name(), own != null && own, pending.reference.snippet()), quoteParams(true));
+            UUID quotedId = pending.reference.messageId();
+            QuoteBlock quote = new QuoteBlock(this, design, QuoteBlock.ON_TINT, 3, Math.max(dp(120), root.getWidth() - root.getPaddingLeft() - root.getPaddingRight() - dp(80)))
+                .show(own == null ? null : own ? "You" : pending.peer.name(), own != null && own, pending.reference.snippet());
+            quote.opens(() -> jumpToQuoted(pending.peer, quotedId));
+            bubble.addView(quote, quoteParams(true));
         }
         TextView body = design.text(pending.expiry == ChatEnvelope.Expiry.VIEW_ONCE ? "View-once message" : pending.image == null ? pending.text : "Photo", 13, 500, INK);
         body.setMaxWidth(Math.max(dp(120), root.getWidth() - root.getPaddingLeft() - root.getPaddingRight() - dp(80)));
@@ -1996,6 +2008,7 @@ public final class MainActivity extends AppCompatActivity {
                     if (last) messageRefreshQueued = false;
                     applyMessages(load.peer, visible, text, load.senders, references);
                     historyMore = load.hidden > 0;
+                    if (last) continueQuoteJump(load.peer);
                     if (last && messageRefreshRequested) refreshMessages(load.peer);
                     // Someone already at the top when the page finishes gets the next one without having to scroll again. It is
                     // checked after the scroll to the bottom has been applied, so a freshly opened chat does not load history early.
@@ -2056,6 +2069,7 @@ public final class MainActivity extends AppCompatActivity {
         conversationGeneration++;
         messageRefreshQueued = false; messageRefreshRequested = false; presenceRefreshQueued = false;
         historyLimit = HISTORY_PAGE; historyMore = false; nextRowExpiry = Long.MAX_VALUE; bottomScrollsPending = 0;
+        quoteJump = null; stopQuoteFlash();
         for (MessageRow row : messageRows.values()) row.clear();
         messageRows.clear(); messageDates.clear(); messageEmpty = null;
         shownConversationPeer = null; shownConversationGroup = null; shownPresence = null; checkedPresence = null;
@@ -2197,8 +2211,11 @@ public final class MainActivity extends AppCompatActivity {
                 // Whose words are quoted: the reply says whether they were its own writer's; an older app's reply does not say.
                 Boolean own = reference.ownMessage();
                 boolean mine = own != null && entry.outgoing() == own;
-                row.addView(new QuoteBlock(this, design, entry.outgoing() ? QuoteBlock.ON_TINT : QuoteBlock.ON_SURFACE, 3, limit)
-                    .show(own == null ? null : mine ? "You" : peer.name(), mine, reference.snippet()), quoteParams(sender == null));
+                QuoteBlock quote = new QuoteBlock(this, design, entry.outgoing() ? QuoteBlock.ON_TINT : QuoteBlock.ON_SURFACE, 3, limit)
+                    .show(own == null ? null : mine ? "You" : peer.name(), mine, reference.snippet());
+                // The copy that the message actions show is only a picture of the message: nothing in it opens.
+                if (interactive) quote.opens(() -> jumpToQuoted(peer, reference.messageId()));
+                row.addView(quote, quoteParams(sender == null));
             }
             TextView body;
             if (entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE) {
@@ -2291,6 +2308,109 @@ public final class MainActivity extends AppCompatActivity {
         pendingReplySnippet = entry.image() ? QuoteBlock.PHOTO : entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE ? QuoteBlock.VIEW_ONCE : ChatEnvelope.Reference.excerpt(text);
         updateReplyStrip();
         if (composer != null) composer.requestFocus();
+    }
+
+    // Touching the quote in a reply goes to the message it quotes and lights it up for a moment. A message older than the ones that
+    // are loaded is looked for a page at a time; one that has expired, been deleted or been cleared is said to be gone.
+    private void jumpToQuoted(ChatEngine.Peer peer, UUID quotedId) {
+        MessageRow row = messageRows.get(quotedId);
+        if (row != null && row.alignment.getParent() == messages) { quoteJump = null; showQuoted(row); return; }
+        ChatEngine current = engine; int generation = conversationGeneration;
+        if (current == null) return;
+        onReader(() -> {
+            ChatEngine.Entry original = current.entry(quotedId);
+            // Only a message of this conversation: the id came from the other side and must not lead anywhere else.
+            boolean here = original != null && original.groupEpoch() == null && original.peerId().equals(peer.userId())
+                && original.expiresAt() > System.currentTimeMillis();
+            ui.post(() -> {
+                if (!conversationCurrent(current, generation)) return;
+                if (!here) { quoteJump = null; notice(QUOTE_GONE); return; }
+                quoteJump = quotedId;
+                continueQuoteJump(peer);
+            });
+        });
+    }
+
+    private static final String QUOTE_GONE = "That message is no longer in this chat.";
+
+    // Run after every load of the conversation: the message is shown if it is there now, otherwise the next older page is asked for.
+    private void continueQuoteJump(ChatEngine.Peer peer) {
+        UUID wanted = quoteJump;
+        if (wanted == null) return;
+        MessageRow row = messageRows.get(wanted);
+        if (row != null && row.alignment.getParent() == messages) { quoteJump = null; showQuoted(row); }
+        else if (historyMore) loadOlderMessages(peer);
+        else if (!messageRefreshQueued) { quoteJump = null; notice(QUOTE_GONE); }
+    }
+
+    // Scrolls so that the message is in the middle of the screen (or at its top when it is taller than the screen); a message that
+    // is on the screen already stays where it is.
+    private void showQuoted(MessageRow row) {
+        ScrollView scroll = messageScroll;
+        if (scroll == null) return;
+        View view = row.alignment;
+        // After the layout of the page that has just been added, and after the scroll that keeps the reader's place.
+        scroll.post(() -> {
+            if (messageScroll != scroll || view.getParent() != messages) return;
+            int top = view.getTop(), height = view.getHeight(), shown = scroll.getHeight(), at = scroll.getScrollY();
+            if (top < at || top + height > at + shown) {
+                int target = height >= shown - dp(48) ? top - dp(24) : top - (shown - height) / 2;
+                scroll.smoothScrollTo(0, Math.max(0, Math.min(target, messages.getHeight() - shown)));
+            }
+            flashRow(view);
+        });
+    }
+
+    // A tint of the app's colour over the whole row of the message (the bubble too, as in other messengers) that comes up quickly,
+    // stays a moment and fades. It follows the clock frame by frame instead of using an animator, because a phone that has its
+    // animations switched off would end an animator at once, and the message would never be seen to light up.
+    private static final long QUOTE_FLASH_MS = 2_000;
+    private void flashRow(View row) {
+        stopQuoteFlash();
+        android.graphics.drawable.ColorDrawable band = new android.graphics.drawable.ColorDrawable(Ui.PRIMARY);
+        band.setAlpha(0);
+        row.setForeground(band);
+        quoteFlashRow = row;
+        long start = android.os.SystemClock.uptimeMillis();
+        Runnable step = new Runnable() {
+            @Override public void run() {
+                if (quoteFlashRow != row) return;
+                float time = Math.min(1f, (android.os.SystemClock.uptimeMillis() - start) / (float) QUOTE_FLASH_MS);
+                float level = time < 0.08f ? time / 0.08f : time < 0.65f ? 1f : 1f - (time - 0.65f) / 0.35f;
+                band.setAlpha(Math.round(44 * level));
+                if (time >= 1f) stopQuoteFlash(); else row.postOnAnimation(this);
+            }
+        };
+        quoteFlashStep = step;
+        row.postOnAnimation(step);
+    }
+
+    private void stopQuoteFlash() {
+        View row = quoteFlashRow;
+        quoteFlashRow = null;
+        if (row != null) { row.removeCallbacks(quoteFlashStep); row.setForeground(null); }
+        quoteFlashStep = null;
+    }
+
+    // A word on the screen that is not an error. The latest is replaced, not queued behind, and the same one is not repeated at once.
+    private void notice(String text) {
+        long now = android.os.SystemClock.elapsedRealtime();
+        boolean repeated = text.equals(lastNotice) && now - lastNoticeAt < 1_500;
+        lastNotice = text; lastNoticeAt = now;
+        if (repeated) return;
+        if (noticeToast != null) noticeToast.cancel();
+        noticeToast = Toast.makeText(this, text, Toast.LENGTH_SHORT);
+        noticeToast.show();
+    }
+
+    // Text past the limit is not accepted, and the phone says so instead of dropping it without a word.
+    private android.text.InputFilter limitWithNotice(int limit) {
+        android.text.InputFilter.LengthFilter length = new android.text.InputFilter.LengthFilter(limit);
+        return (source, start, end, dest, dstart, dend) -> {
+            CharSequence kept = length.filter(source, start, end, dest, dstart, dend);
+            if (kept != null) notice("A message can have up to " + String.format(Locale.getDefault(), "%,d", limit) + " characters.");
+            return kept;
+        };
     }
 
     // The long press on a message: the chat dims, the message stays where it was with the reactions floating above it, and below it
@@ -2477,7 +2597,7 @@ public final class MainActivity extends AppCompatActivity {
     private void editDialog(ChatEngine.Peer peer, ChatEngine.Entry entry, String currentText) {
         Ui.Field field = design.field("Message", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
         field.input().setText(currentText); field.input().setMaxLines(6);
-        field.input().setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(4096)});
+        field.input().setFilters(new android.text.InputFilter[]{limitWithNotice(4096)});
         LinearLayout fields = vertical(); fields.setPadding(dp(20), 0, dp(20), 0); fields.addView(field.view());
         SecureSheet dialog = new SecureSheet.Builder(this).setTitle("Edit message").setView(fields).setNegativeButton("Cancel", null)
             .setPositiveButton("Save", null).create();
@@ -3898,6 +4018,7 @@ public final class MainActivity extends AppCompatActivity {
         pendingSends.clear();
         if (composer != null) composer.setText("");
         composer = null; messages = null;
+        quoteJump = null; stopQuoteFlash();
         composerPeer=null;
         sendControl=null; attachmentControl=null; shownGroups=java.util.List.of();
         homeConnection=null; unreadFilter=null; homeQuery=""; unreadOnly=false; noticeHost=null; noticeArea=null;

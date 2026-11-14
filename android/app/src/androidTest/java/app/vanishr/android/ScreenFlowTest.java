@@ -10260,6 +10260,352 @@ public class ScreenFlowTest {
         }
     }
 
+    // ---- Touching the quote in a reply goes to the message it quotes (0.6.10) ----
+
+    private int[] centreOfQuote(ActivityScenario<MainActivity> scenario, String reply) {
+        int[] at = new int[2];
+        scenario.onActivity(activity -> {
+            QuoteBlock quote = quoteOf(activity, reply);
+            quote.getLocationOnScreen(at);
+            at[0] += quote.getWidth() / 2; at[1] += quote.getHeight() / 2;
+        });
+        return at;
+    }
+
+    private View rowOfEntry(MainActivity activity, UUID id) {
+        Object row = ((Map<?, ?>) readField(activity, "messageRows")).get(id);
+        return row == null ? null : (View) readField(row, "alignment");
+    }
+
+    private void awaitScrollSettled(ActivityScenario<MainActivity> scenario) {
+        int previous = -1, stable = 0;
+        for (int attempt = 0; attempt < 150 && stable < 4; attempt++) {
+            int[] now = new int[1];
+            scenario.onActivity(activity -> now[0] = messageScroll(activity).getScrollY());
+            stable = now[0] == previous ? stable + 1 : 0; previous = now[0];
+            android.os.SystemClock.sleep(100);
+        }
+        assertTrue("The list came to rest", stable >= 4);
+    }
+
+    /** A message of another chat of this account, which a reply from this peer has no business pointing at. */
+    private ChatEngine.Entry entryOfAnotherChat(UUID otherPeer, String text) throws Exception {
+        ChatEnvelope.Expiry expiry = ChatEnvelope.Expiry.HOUR_1;
+        UUID id = UUID.randomUUID(); long created = System.currentTimeMillis() - 100_000; long deadline = created + expiry.milliseconds;
+        createFixtureKey(AndroidVault.contentAlias(deadline, id));
+        ChatEnvelope envelope = new ChatEnvelope(1, id, otherPeer, UUID.randomUUID(), userId, deviceId, created, deadline, expiry, text, null);
+        ChatEngine.Entry entry = new ChatEngine.Entry(id, otherPeer, deadline, expiry, false, false, "READ");
+        vault.transaction(() -> {
+            write("entry/" + id, entry);
+            byte[] content = RelayApi.JSON.toJson(new ChatEngine.Content(envelope, null)).getBytes(StandardCharsets.UTF_8);
+            try { vault.put("body/" + id, vault.seal(AndroidVault.contentAlias(deadline, id), content)); }
+            finally { Arrays.fill(content, (byte) 0); }
+            return null;
+        });
+        return entry;
+    }
+
+    @Test public void touchingTheQuoteInAReplyGoesToTheMessageItQuotesAndLightsItUpForAMoment() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        for (int index = 1; index <= 12; index++)
+            entry(index % 2 == 0, "Early " + index + " " + "words ".repeat(14), null, ChatEnvelope.Expiry.HOUR_1, "READ", -950_000 + index * 10_000L);
+        String asked = "The original question that was asked in the middle";
+        ChatEngine.Entry original = entry(false, asked, null, ChatEnvelope.Expiry.HOUR_1, "READ", -800_000);
+        for (int index = 1; index <= 16; index++)
+            entry(index % 2 == 0, "Later " + index + " " + "words ".repeat(14), null, ChatEnvelope.Expiry.HOUR_1, "READ", -790_000 + index * 20_000L);
+        entryQuoting(true, "My answer to it", new ChatEnvelope.Reference(original.id(), asked, false), -20_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitScrollSettled(scenario);
+            scenario.onActivity(activity -> {
+                ScrollView scroll = messageScroll(activity);
+                assertTrue("The message that is quoted is well above what is on the screen", rowOfEntry(activity, original.id()).getBottom() < scroll.getScrollY());
+                assertNull(readField(activity, "quoteFlashRow"));
+            });
+            int[] at = centreOfQuote(scenario, "My answer to it");
+            assertTrue(device.click(at[0], at[1]));
+            awaitMainCondition(scenario, activity -> readField(activity, "quoteFlashRow") != null);
+            scenario.onActivity(activity -> {
+                View row = rowOfEntry(activity, original.id());
+                assertSame("The message that was quoted is the one that is lit up", row, readField(activity, "quoteFlashRow"));
+                assertTrue("The light is a tint over it", row.getForeground() instanceof android.graphics.drawable.ColorDrawable);
+            });
+            awaitScrollSettled(scenario);
+            scenario.onActivity(activity -> {
+                ScrollView scroll = messageScroll(activity);
+                View row = rowOfEntry(activity, original.id());
+                assertEquals("The message is brought to the middle of the screen", scroll.getScrollY() + scroll.getHeight() / 2, row.getTop() + row.getHeight() / 2, 3);
+                assertTrue(row.getTop() >= scroll.getScrollY() && row.getBottom() <= scroll.getScrollY() + scroll.getHeight());
+                assertNull("Nothing else was started", readField(activity, "pendingReplyTo"));
+                assertNull(overlay(activity));
+                assertNull("Nothing was said", readField(activity, "lastNotice"));
+                assertNull("It is not looked for any more", readField(activity, "quoteJump"));
+            });
+            snapshot(scenario, "119-quote-jump");
+            // The light goes out by itself, and leaves the row as it was.
+            awaitMainCondition(scenario, activity -> readField(activity, "quoteFlashRow") == null);
+            scenario.onActivity(activity -> assertNull(rowOfEntry(activity, original.id()).getForeground()));
+        }
+    }
+
+    @Test public void aQuoteOfAMessageThatIsOnTheScreenAlreadyLightsItAndLeavesTheListWhereItIs() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        for (int index = 1; index <= 14; index++)
+            entry(index % 2 == 0, "Early " + index + " " + "words ".repeat(14), null, ChatEnvelope.Expiry.HOUR_1, "READ", -950_000 + index * 10_000L);
+        String asked = "Shall we meet at five?";
+        ChatEngine.Entry original = entry(false, asked, null, ChatEnvelope.Expiry.HOUR_1, "READ", -400_000);
+        entryQuoting(true, "Yes, five works", new ChatEnvelope.Reference(original.id(), asked, false), -10_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitScrollSettled(scenario);
+            int[] before = new int[1];
+            scenario.onActivity(activity -> {
+                ScrollView scroll = messageScroll(activity);
+                before[0] = scroll.getScrollY();
+                View row = rowOfEntry(activity, original.id());
+                assertTrue("The list is long, and the message is on the screen", before[0] > 0 && row.getTop() >= before[0] && row.getBottom() <= before[0] + scroll.getHeight());
+            });
+            int[] at = centreOfQuote(scenario, "Yes, five works");
+            assertTrue(device.click(at[0], at[1]));
+            awaitMainCondition(scenario, activity -> readField(activity, "quoteFlashRow") != null);
+            scenario.onActivity(activity -> assertSame(rowOfEntry(activity, original.id()), readField(activity, "quoteFlashRow")));
+            awaitScrollSettled(scenario);
+            scenario.onActivity(activity -> assertEquals("The list did not move", before[0], messageScroll(activity).getScrollY()));
+        }
+    }
+
+    @Test public void aQuoteOfAMessageThatIsGoneOrBelongsToAnotherChatSaysSoAndMovesNothing() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        for (int index = 1; index <= 8; index++)
+            entry(index % 2 == 0, "Early " + index + " " + "words ".repeat(14), null, ChatEnvelope.Expiry.HOUR_1, "READ", -950_000 + index * 10_000L);
+        ChatEngine.Entry elsewhere = entryOfAnotherChat(UUID.randomUUID(), "A message of another chat");
+        ChatEngine.Entry expired = entry(false, "Expired a while ago", null, ChatEnvelope.Expiry.HOUR_1, "READ", -7_200_000);
+        entryQuoting(true, "r1 quotes a message that was deleted", new ChatEnvelope.Reference(UUID.randomUUID(), "Deleted for everyone", false), -30_000);
+        entryQuoting(true, "r2 quotes a message of another chat", new ChatEnvelope.Reference(elsewhere.id(), "A message of another chat", false), -20_000);
+        entryQuoting(true, "r3 quotes a message that has expired", new ChatEnvelope.Reference(expired.id(), "Expired a while ago", false), -10_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitScrollSettled(scenario);
+            int[] before = new int[1];
+            scenario.onActivity(activity -> before[0] = messageScroll(activity).getScrollY());
+            for (String reply : List.of("r1 quotes a message that was deleted", "r2 quotes a message of another chat", "r3 quotes a message that has expired")) {
+                scenario.onActivity(activity -> { setField(activity, "lastNotice", null); setField(activity, "lastNoticeAt", 0L); });
+                int[] at = centreOfQuote(scenario, reply);
+                assertTrue(device.click(at[0], at[1]));
+                awaitMainCondition(scenario, activity -> readField(activity, "lastNotice") != null);
+                scenario.onActivity(activity -> {
+                    assertEquals(reply, "That message is no longer in this chat.", readField(activity, "lastNotice"));
+                    assertNull("Nothing is lit", readField(activity, "quoteFlashRow"));
+                    assertNull("Nothing is looked for", readField(activity, "quoteJump"));
+                    assertEquals("The list did not move", before[0], messageScroll(activity).getScrollY());
+                });
+            }
+        }
+    }
+
+    @Test public void aQuotedMessageOlderThanThePagesLoadedIsFoundByLoadingMoreAndAMessageOfAnotherChatLoadsNothing() throws Exception {
+        signedInFixture(); conversationsFixture(); longChat(130);
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        ChatEngine.Entry oldest = engine.entries(peerId).get(0);
+        assertEquals("Coffee at 4?", engine.content(oldest, false, false).envelope().text());
+        ChatEngine.Entry elsewhere = entryOfAnotherChat(UUID.randomUUID(), "A message of another chat");
+        entryQuoting(true, "Reply that quotes another chat", new ChatEnvelope.Reference(elsewhere.id(), "A message of another chat", false), -800);
+        entryQuoting(true, "Reply that quotes the oldest", new ChatEnvelope.Reference(oldest.id(), "Coffee at 4?", false), -500);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitScrollSettled(scenario);
+            scenario.onActivity(activity -> {
+                assertNull("The oldest message is not loaded yet", rowOfEntry(activity, oldest.id()));
+                assertTrue((boolean) readField(activity, "historyMore"));
+                assertEquals(100, (int) readField(activity, "historyLimit"));
+            });
+            // A message that belongs to another chat is not looked for through the pages of this one.
+            int[] at = centreOfQuote(scenario, "Reply that quotes another chat");
+            assertTrue(device.click(at[0], at[1]));
+            awaitMainCondition(scenario, activity -> readField(activity, "lastNotice") != null);
+            scenario.onActivity(activity -> {
+                assertEquals(100, (int) readField(activity, "historyLimit"));
+                assertNull(rowOfEntry(activity, oldest.id()));
+            });
+            at = centreOfQuote(scenario, "Reply that quotes the oldest");
+            assertTrue(device.click(at[0], at[1]));
+            awaitMainCondition(scenario, activity -> readField(activity, "quoteFlashRow") != null);
+            scenario.onActivity(activity -> {
+                View row = rowOfEntry(activity, oldest.id());
+                assertNotNull("The older page was loaded to find it", row);
+                assertSame(row, readField(activity, "quoteFlashRow"));
+                assertFalse((boolean) readField(activity, "historyMore"));
+                assertNull(readField(activity, "quoteJump"));
+            });
+            awaitScrollSettled(scenario);
+            scenario.onActivity(activity -> {
+                ScrollView scroll = messageScroll(activity);
+                View row = rowOfEntry(activity, oldest.id());
+                assertTrue("It is on the screen", row.getTop() >= scroll.getScrollY() && row.getBottom() <= scroll.getScrollY() + scroll.getHeight());
+            });
+        }
+    }
+
+    @Test public void aPressOrASwipeOnAQuoteStillBelongsToTheRowAndTheQuotesInPreviewsOpenNothing() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        String asked = "Shall we meet at five?";
+        ChatEngine.Entry original = entry(false, asked, null, ChatEnvelope.Expiry.HOUR_1, "READ", -400_000);
+        entryQuoting(true, "Yes, five works", new ChatEnvelope.Reference(original.id(), asked, false), -10_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            // A press that stays put on the quote asks for the actions of the message, and does not go anywhere when the finger lifts.
+            int[] at = centreOfQuote(scenario, "Yes, five works");
+            touch(android.view.MotionEvent.ACTION_DOWN, at[0], at[1]);
+            android.os.SystemClock.sleep(android.view.ViewConfiguration.getLongPressTimeout() + 500);
+            touch(android.view.MotionEvent.ACTION_UP, at[0], at[1]);
+            awaitOverlay(scenario);
+            scenario.onActivity(activity -> {
+                assertNull(readField(activity, "quoteFlashRow"));
+                assertNull(readField(activity, "lastNotice"));
+                List<QuoteBlock> copies = descendants(overlay(activity).getWindow().getDecorView()).stream().filter(QuoteBlock.class::isInstance).map(QuoteBlock.class::cast).toList();
+                assertFalse("The actions show the message with its quote", copies.isEmpty());
+                for (QuoteBlock copy : copies) assertFalse("The copy in the actions is only a picture", copy.hasOnClickListeners() || copy.isClickable());
+            });
+            closeActions(scenario);
+            // A drag to the right starts a reply, as it does anywhere else on the row.
+            at = centreOfQuote(scenario, "Yes, five works");
+            assertTrue(device.swipe(at[0] - dpPx(60), at[1], at[0] + dpPx(110), at[1], 20));
+            awaitMainCondition(scenario, activity -> readField(activity, "pendingReplyTo") != null);
+            scenario.onActivity(activity -> {
+                assertNull(readField(activity, "quoteFlashRow"));
+                assertNull(readField(activity, "lastNotice"));
+                QuoteBlock strip = (QuoteBlock) readField(activity, "replyQuote");
+                assertFalse("The quote above the composer is a preview, not a button", strip.hasOnClickListeners() || strip.isClickable());
+                QuoteBlock quote = quoteOf(activity, "Yes, five works");
+                assertTrue(quote.isClickable());
+                boolean described = quote.createAccessibilityNodeInfo().getActionList().stream().anyMatch(action ->
+                    action.getId() == android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK && "Go to the quoted message".contentEquals(String.valueOf(action.getLabel())));
+                assertTrue("A screen reader is told what touching the quote does", described);
+            });
+        }
+    }
+
+    @Test public void theQuoteInAMessageThatCouldNotBeSentGoesToTheOriginalToo() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        ChatEngine.Entry coffee = engine.entries(peerId).get(0);
+        assertEquals("Coffee at 4?", engine.content(coffee, false, false).envelope().text());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            openActions(scenario, "Coffee at 4?");
+            tapAction(scenario, "Reply");
+            // With no relay to reach, the reply stays on the screen as "Not sent", with its quote.
+            scenario.onActivity(activity -> {
+                ((EditText) readField(activity, "composer")).setText("Offline reply");
+                ((View) descendants(root(activity)).stream().filter(view -> "Send".contentEquals(String.valueOf(view.getContentDescription()))).findFirst().orElseThrow()).performClick();
+            });
+            assertTrue("The reply could not be sent", device.wait(androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.text("Not sent")), 15_000));
+            awaitScrollSettled(scenario);
+            int[] at = centreOfQuote(scenario, "Offline reply");
+            assertTrue(device.click(at[0], at[1]));
+            awaitMainCondition(scenario, activity -> readField(activity, "quoteFlashRow") != null);
+            scenario.onActivity(activity -> assertSame("The message quoted by the unsent reply is lit up", rowOfEntry(activity, coffee.id()), readField(activity, "quoteFlashRow")));
+        }
+    }
+
+    @Test public void textBeyondTheLimitOfAMessageIsRefusedWithAWordAndNotDroppedInSilence() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                EditText composer = (EditText) readField(activity, "composer");
+                composer.setText("a".repeat(4096));
+                assertEquals("A message of exactly the limit is kept whole", 4096, composer.length());
+                assertNull("and nothing is said about it", readField(activity, "lastNotice"));
+                composer.setText("b".repeat(5000));
+                assertEquals("Only what fits is kept", 4096, composer.length());
+                assertEquals(String.format(Locale.getDefault(), "A message can have up to %,d characters.", 4096), readField(activity, "lastNotice"));
+            });
+        }
+    }
+
+    // What is typed in a reply goes out whole, whatever the script, and arrives whole: only the quote above it is a short copy.
+    @Test public void aLongAnswerTypedInAReplyIsSentWholeWithItsQuoteAndShownWhole() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        String question = "Could you look at the plan " + "and tell me what you think of it. ".repeat(10) + "Thanks.";
+        ChatEngine.Entry asked = entry(false, question, null, ChatEnvelope.Expiry.HOUR_1, "READ", -60_000);
+        List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(new ArrayList<>(), outgoing);
+        StringBuilder lines = new StringBuilder();
+        for (int line = 1; line <= 48; line++) lines.append("Line ").append(line).append(" of a long answer, with <angle brackets> & 'quotes' = signs.\n");
+        List<String> answers = List.of(
+            lines.toString().strip(),
+            "\u092F\u0939 \u090F\u0915 \u092C\u0939\u0941\u0924 \u0932\u0902\u092C\u093E \u091C\u0935\u093E\u092C \u0939\u0948\u0964 ".repeat(150).strip(),
+            "\uD83D\uDE00\uD83D\uDC4D\u2764\uFE0F".repeat(650),
+            // The worst case for the size of the message on the wire: every character is written out as six.
+            "<".repeat(4096));
+        for (String answer : answers) assertTrue(answer.length() <= 4096);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            for (int index = 0; index < answers.size(); index++) {
+                String answer = answers.get(index); int sentBefore = index;
+                openActions(scenario, question);
+                tapAction(scenario, "Reply");
+                scenario.onActivity(activity -> {
+                    EditText composer = (EditText) readField(activity, "composer");
+                    composer.setText(answer);
+                    assertEquals("What was typed is all still in the field", answer, composer.getText().toString());
+                    ((View) descendants(root(activity)).stream().filter(view -> "Send".contentEquals(String.valueOf(view.getContentDescription()))).findFirst().orElseThrow()).performClick();
+                });
+                awaitMainCondition(scenario, activity -> outgoing.size() == sentBefore + 1);
+                ChatEnvelope sent = decryptControl(remote, outgoing.get(sentBefore));
+                assertEquals("The answer left this phone whole (" + answer.length() + " characters)", answer, sent.text());
+                assertEquals(asked.id(), sent.reference().messageId());
+                assertTrue("with a quote that is only a short copy", sent.reference().snippet().getBytes(StandardCharsets.UTF_8).length <= ChatEnvelope.MAX_SNIPPET_BYTES);
+                assertTrue("and well within what the relay takes", outgoing.get(sentBefore).ciphertext().length < 65_536);
+                awaitMainCondition(scenario, activity -> hasText(activity, answer));
+            }
+        }
+    }
+
+    @Test public void aLongReplyFromTheOtherSideIsShownWholeBelowItsQuote() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        String mine = "Could you look at the plan and tell me what you think of it?";
+        ChatEngine.Entry asked = entry(true, mine, null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -120_000);
+        List<ChatEngine.Incoming> incoming = new ArrayList<>(); List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(incoming, outgoing);
+        StringBuilder lines = new StringBuilder();
+        for (int line = 1; line <= 48; line++) lines.append("Line ").append(line).append(" of a long answer, with <angle brackets> & 'quotes' = signs.\n");
+        String answer = lines.toString().strip();
+        ChatEnvelope.Reference reference = new ChatEnvelope.Reference(asked.id(), ChatEnvelope.Reference.excerpt(mine), Boolean.FALSE);
+        UUID id = UUID.randomUUID(); long now = System.currentTimeMillis(), deadline = now + 3_600_000;
+        ChatEnvelope envelope = new ChatEnvelope(1, id, peerId, peerDevice, userId, deviceId, now, deadline, ChatEnvelope.Expiry.HOUR_1, answer, null, null, reference, null);
+        SignalClient.Packet packet = remote.encrypt(userId, RelayApi.JSON.toJson(envelope).getBytes(StandardCharsets.UTF_8), Instant.now());
+        incoming.add(new ChatEngine.Incoming(id, peerId, peerDevice, userId, deviceId, ChatEnvelope.Expiry.HOUR_1, now, deadline, packet.type(), packet.ciphertext(), null));
+        engine.sync();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> hasText(activity, answer));
+            scenario.onActivity(activity -> assertEquals("The quote says whose words they are", "You", quoteName(quoteOf(activity, answer))));
+            snapshot(scenario, "120-long-reply");
+        }
+    }
+
     @Test public void aMessageTallerThanTheScreenIsCutShortInTheActionsSoBothTheReactionsAndTheMenuStayOnScreen() throws Exception {
         signedInFixture(); conversationsFixture();
         String tall = "A very long message. " + "Another sentence that keeps the message going. ".repeat(110) + "The end.";

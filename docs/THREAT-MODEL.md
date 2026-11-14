@@ -592,6 +592,49 @@ finger (the drags are injected); a screen reader in use (only its action list is
 fingers; Android's gesture navigation next to the left edge (the tests start a pull 60 dp in); a Mute that quiets the phone; and whether the
 feel suits the owner.
 
+## Touching the quote in a reply, and a limit that says so (0.6.10)
+
+**No relay change, no new permission, no new network call, and no change to the wire:** `ChatEnvelope` and the quote's 160-byte cap are
+exactly what they were, so an earlier app and this one read each other's replies as before.
+
+The quote inside a reply is now a control (`QuoteBlock.opens`): touching it goes to the message that was quoted, scrolls it to the middle
+of the screen (it stays where it is when it is on the screen already) and tints its row for about two seconds. A message older than the
+ones loaded is looked for by loading the next older page, again and again, until it is found or there are no more. A press that stays put
+on the quote still asks for the actions of the message and a drag to the right still starts a reply, because both belong to the row
+(`SwipeRow`), as they do for a photo. The quote in the strip above the composer and the copy of the message in the actions are pictures
+and do nothing when touched; a screen reader is told what touching the quote does.
+
+- **The id in a reply leads only to a message of this conversation.** It comes from the other side, so it is checked before anything is
+  loaded for it: the message has to be one of this chat (the same contact, not a group message) and not yet expired. Anything else, a
+  message that was deleted for everyone or cleared or has expired, an id that names nothing, or one that names a message of another chat,
+  gets one short notice ("That message is no longer in this chat.") and nothing is scrolled or loaded. The check and the page loading
+  use only what is already on the phone.
+- **The quote is still the sender's claim.** The name and the words of the quote are written by the sender and are not compared with the
+  original (the original may be gone). What changed is that the original is now one touch away, so a reader can see what was really said;
+  a forged quote that names an existing message of this chat shows that message when touched, and one that names nothing says it is gone.
+  Nothing here stops a sender from writing a quote that is not true.
+- **The tint does not depend on the phone's animations.** It follows the clock frame by frame. An animator would have ended at once on a
+  phone that has animations switched off (which the test emulator has), and the message would never have been seen to light up.
+- **A message of up to 4,096 characters, and a word when it is longer.** The field has always stopped at 4,096 characters; text typed or
+  pasted past that was dropped without a word, which looks like a message that was cut. The phone now says "A message can have up to
+  4,096 characters." (for editing as well). The limit is not raised: 4,096 characters are at most 16 KiB of text, which is what the app
+  accepts, and in the worst case (every character written out as six in the encrypted JSON, as `<` is) still fit in the relay's 64 KiB
+  limit for one message, which a test shows.
+- **What a reply sends is whole.** A typed answer, with the quote on it, is sent whole: tests send ASCII with line breaks and HTML-special
+  characters, Devanagari, emoji and 4,096 `<`, decrypt what left the phone and compare it with what was typed, and show a long answer from
+  the other side whole under its quote. Only the quote is a short copy.
+
+**Verified, and not.** Emulator tests (synthetic accounts, a relay stand-in, touches injected as a finger would) cover: a tap on the quote
+bringing a message from far above to the middle of the screen and tinting it, then the tint going out and the row being left as it was;
+a message already on the screen tinted without moving the list; a deleted, an expired and another chat's message each saying so and
+moving nothing; a message beyond the loaded pages found by loading more, and an id of another chat loading nothing; the quote in a reply
+that could not be sent; a press and a swipe on the quote still belonging to the row and the copies in the actions and the strip being
+pictures; the quote's action for a screen reader; the limit and its notice; and the long answers above. Six mutations (the centring, the
+tint, the paging, the other-chat check, the copy in the actions made touchable, the notice) were each caught. Not demonstrated: a physical
+phone or a real finger; a screen reader in use; the tint on a phone with a different theme or font size; whether it feels as the owner
+expects; and a quote that is longer than three lines in a script that takes more bytes per character (the 160-byte cap is unchanged, so
+such a quote is shown cut earlier).
+
 ## Account erasure, blocks and safety reports
 
 Account erasure requires a fresh account-only password/Google sign-in, never a
