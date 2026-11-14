@@ -433,8 +433,9 @@ one-hour and six-hour messages from older apps are still accepted, and the one-h
 deletes) are unchanged.
 
 **Gestures and the header.** None of these carry data or add a permission. Swiping a message to the right starts a reply
-(1:1 chats only, as the Reply action is); swiping a chat in the list to the left asks "Remove contact?" with the same
-confirmation as pressing and holding, so nothing is erased by the swipe itself. A sideways drag the wrong way is swallowed,
+(1:1 chats only, as the Reply action is); swiping a chat in the list to the left asked "Remove contact?" with the same
+confirmation as pressing and holding, so nothing was erased by the swipe itself (0.6.8 replaced that with
+[swipe actions that stay open](#swipe-actions-on-a-chat-in-the-list-and-mute-068)). A sideways drag the wrong way is swallowed,
 so it cannot open a view-once or photo message it started on, open a chat or end as a long press. Pressing and holding, and
 the menu actions, still work. Tapping the contact's name or picture in a chat header opens their profile (a group's, its
 info). The line under the composer that said "Account enrolled" is gone; the same trust information is a shield after the
@@ -526,7 +527,7 @@ six and its whole sync stops at that message (the reason a 12-hour message trave
 - **Swiping to reply works on my own messages.** The old gesture listened on the bubble, and a bubble on the right of the screen leaves
   a finger no room to travel. `SwipeRow` takes a mostly sideways drag to the right from anywhere on the row. A drag the other way is
   still taken from the bubble, so it cannot open a photo it started on, a vertical drag is left to the list, and nothing is done until the
-  finger is lifted past the mark (48 dp). The swipe on a chat in the contact list is unchanged.
+  finger is lifted past the mark (48 dp). The swipe on a chat in the contact list is described in the next section.
 - **Reactions are drawn as a pill on the message.** Display only: the two reactions the entry already held (mine, theirs), with the
   count when there are two, half on the bubble and half below it on the side that faces the middle of the screen. Tapping it opens the actions.
 - **The header's Online / Last seen text no longer blinks.** The app asks the relay for presence every 3 seconds and every sync pass
@@ -547,6 +548,48 @@ hidden original, the placement clamp, the snippet cut and the two header rules w
 Not demonstrated: a physical phone; a real finger or keyboard; the overlay under a screen reader; Android before 13 for the clipboard flag
 (the emulator is API 36); and an earlier app receiving a reply that carries `ownMessage` (a JVM test reads it with a record of the earlier shape; no
 old APK was run).
+
+## Swipe actions on a chat in the list, and Mute (0.6.8)
+
+**No relay change, no new permission, no new network call.** This was added to the Google Play bundle of 0.6.8 after the direct-download
+APK of 0.6.8 had been published, so **the two builds of 0.6.8 differ**: the website's APK has the earlier swipe (pull a chat to the left
+past a mark and let go to be asked about removing the contact) and the bundle has what follows. The next direct release carries it too.
+
+A chat in the list can be pulled sideways (`SwipeActions`): to the right it shows **Mute** and **Clear chat**, to the left **Remove
+contact** and **Block user**. The row then stays where it was let go, and nothing is asked or done, until one of the buttons is touched.
+It goes back when it is pulled back or tapped (that tap does not also open the chat), when another row or the empty part of the list is
+touched (that touch does not also open the other chat), when the list scrolls, and on Back. Only one row is open at a time. The list is
+drawn again from time to time (a sync, a search, the unread filter) and an open row comes back open; a row that has a finger on it is not
+drawn again under the finger, the next pass does it.
+
+- **A pull erases nothing.** Clear chat, Remove contact and Block user open the same confirmation as before (the long press and the chat's
+  menu use them too) and their effects are unchanged, so the confirmation is the only thing that acts; cancelling changes nothing.
+  The old "let go past a mark" action no longer exists in this build. The long press on a chat still asks to remove the contact. A mostly
+  vertical drag is left to the list's scrolling, and a drag is judged by how far and how fast it went (a short or slow one falls back,
+  one past halfway or a quick flick stays). The buttons are controls with their names as descriptions, they cannot be reached while the
+  row is closed, and a screen-reader user also gets the four as actions on the row. Touches are dropped when the window is obscured, like
+  every other control. Group chats are unchanged: they have no swipe actions.
+- **Mute is a preference kept on this phone, and it cannot silence the phone's alert.** It is one record in the encrypted store beside
+  the contact (`muted/<id>`): never sent anywhere, not part of the encrypted backup (a restored account has no mutes), and removed with the
+  contact when the contact is removed or blocked. All it changes is how the list draws that chat: the unread count is grey and a bell-off
+  icon stands beside it. **It does not stop notifications.** The push alert is the same generic "New message" for every chat, because
+  neither the push provider nor the alert knows which chat a message is for (see Notification navigation), so nothing can be decided
+  per chat when it arrives, and the app says so when a chat is muted. A mute that really silenced a chat would need the relay to keep a
+  list of the chats a person mutes (a relay change, and the relay learning which chats they are) or the alert to find out its chat in the
+  background with the vault open (which needs the phone unlocked); neither was built.
+
+**Verified, and not.** Emulator tests (synthetic accounts, a relay stand-in, touches injected as a finger would) cover: a pull to each
+side shows its two buttons, as tall as the row, and leaves them there; a short, a slow, an upward and a past-halfway pull; the row covering
+the buttons while it moves (a pixel check); a tap on an open row, a touch on another row, on the empty list, Back and scrolling each putting
+it back without opening anything, and only one row open; Mute and Unmute (the grey count, the bell, the label, the stored record); Clear
+chat, Remove contact and Block user each asking first, cancelling changing nothing, confirming doing the old thing, and the mute going
+with a removed or blocked contact; an open row coming back open when the list is drawn again and being forgotten when its chat is not
+listed; a sync not redrawing the list under a finger; the four actions for a screen reader; and the mute's engine rules. JVM tests cover the
+settle and resistance rules. Sixteen mutations of the touch rules, the drawing, the redraw rules, the mute's cleanup and the settle rules were
+each caught (one only after a test was corrected; see [VERIFICATION.md](VERIFICATION.md)). Not demonstrated: a physical phone or a real
+finger (the drags are injected); a screen reader in use (only its action list is read); a right-to-left language, a large font or two
+fingers; Android's gesture navigation next to the left edge (the tests start a pull 60 dp in); a Mute that quiets the phone; and whether the
+feel suits the owner.
 
 ## Account erasure, blocks and safety reports
 

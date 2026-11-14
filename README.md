@@ -20,6 +20,11 @@ contact); swiping a message to the right now replies to **your own** messages to
 Online / Last seen text under the name no longer blinks every few seconds. A reply to a message longer than 160 bytes could not be sent
 before, and now can. There is no Star (it would keep a message past its deadline) and no "+" for more emoji (an older app refuses an
 emoji outside the six and stops syncing at that message). Copy puts the text on Android's clipboard, outside the app's protection.
+A chat in the list can be pulled sideways, as in a phone's chat list: to the right for **Mute** and **Clear chat**, to the left for
+**Remove contact** and **Block user**. The row stays open until one is touched, and each that erases something asks first. Mute only
+greys the chat's count and shows a bell-off icon: the phone's alert says just "New message" and cannot be silenced per chat. **These
+swipe actions are in the Google Play bundle of 0.6.8 only**; the direct-download APK published earlier under 0.6.8 has the earlier
+swipe, and the next direct release has the new one.
 The built-in official-admin identity is now the certificate-sequence-3 one, the identity of the Google Play install. No relay change.
 Emulator tests only: no physical phone, no Google Play install. See the
 [threat model](docs/THREAT-MODEL.md#the-message-menu-quoted-replies-reactions-on-the-message-and-a-steadier-header-068) and
@@ -415,8 +420,9 @@ no Azure resources or paid add-ons were changed for this website.
 - Reply-with-quote (the quote names whose words they are), a fixed six-emoji reaction drawn as a pill on the message, and
   delete-for-everyone (no placeholder left behind) for a 1:1 message, edit for a sent 1:1 text message, and, for any message,
   Forward, Copy and Info; none of the reply, reaction and edit actions apply to group messages. Press and hold a message for the
-  menu; swipe a message to the right (yours or theirs) to reply; swipe a chat in the list to the left to remove the contact (it
-  asks first); tap a contact's name or picture in a chat to open their profile.
+  menu; swipe a message to the right (yours or theirs) to reply; pull a chat in the list to the right for Mute and Clear chat or to
+  the left for Remove contact and Block user (the row stays open until one is touched, and each that erases asks first); tap a
+  contact's name or picture in a chat to open their profile.
 - On the admin's phone, a contact that reinstalls Vanishr or changes phone is kept for review ("Identity changed. Tap to
   review") instead of failing the whole contact list; the new identity is used only after its safety number is shown and
   accepted.

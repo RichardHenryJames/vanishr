@@ -502,6 +502,28 @@ final class ChatEngine implements AutoCloseable {
         }
     }
 
+    /**
+     * The chats the person has muted. A mute is a preference kept on this phone, in the encrypted store with the contact: it is never
+     * sent anywhere, is not in the encrypted backup, and is removed with the contact. It changes how the list shows a chat's unread
+     * count; it cannot silence the phone's alert, which says only "New message" and does not know which chat it is for.
+     */
+    Set<UUID> mutedChats() {
+        Set<UUID> muted = new HashSet<>();
+        for (String name : vault.names("muted/")) {
+            try { muted.add(UUID.fromString(name.substring("muted/".length()))); }
+            catch (IllegalArgumentException invalid) { /* not one of ours; it is left alone */ }
+        }
+        return muted;
+    }
+
+    void mute(UUID peerId, boolean muted) throws Exception {
+        if (account == null || peer(peerId) == null) throw new SecurityException("Contact is unavailable");
+        vault.transaction(() -> {
+            if (muted) write("muted/" + peerId, Boolean.TRUE); else vault.remove("muted/" + peerId);
+            return null;
+        });
+    }
+
     void forget(Peer peer) throws Exception {
         PhotoSharingService.endFor(account.userId(), peer.userId());
         for (Entry entry : entries(peer.userId())) erase(entry, "delete");
@@ -510,6 +532,7 @@ final class ChatEngine implements AutoCloseable {
             signal.forgetPeer(peer.userId());
             vault.remove("contact/" + peer.userId());
             vault.remove("contact-name/" + peer.userId());
+            vault.remove("muted/" + peer.userId());
             onboarding.dismiss(peer.userId());
             return null;
         });
@@ -539,6 +562,7 @@ final class ChatEngine implements AutoCloseable {
             }
             vault.remove("contact/" + peerId);
             vault.remove("contact-name/" + peerId);
+            vault.remove("muted/" + peerId);
             onboarding.dismiss(peerId);
             groups.discardBlockedControls(peerId);
             return null;

@@ -212,6 +212,7 @@ public final class MainActivity extends AppCompatActivity {
     private TextView actionError;
     private EditText contactSearch;
     private LinearLayout contactRows;
+    private SwipeActions.Group rowSwipes = new SwipeActions.Group();
     private View homeConnection;
     private ImageButton unreadFilter;
     private boolean unreadOnly;
@@ -333,6 +334,7 @@ public final class MainActivity extends AppCompatActivity {
         design = new Ui(this);
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override public void handleOnBackPressed() {
+                if (selectedPeer == null && rowSwipes.closeOpen()) return;
                 if (selectedPeer != null && engine != null) { selectedPeer = null; render(); }
                 else { hideContent(); finish(); }
             }
@@ -1068,6 +1070,8 @@ public final class MainActivity extends AppCompatActivity {
         root.addView(noticeArea, new LinearLayout.LayoutParams(-1, -2));
         renderNotice();
         ScrollView scroll = new ScrollView(this);
+        rowSwipes = new SwipeActions.Group();
+        closeRowsOnTouch(scroll);
         contactRows = vertical(); scroll.setFillViewport(true); scroll.addView(contactRows);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         renderContacts();
@@ -1226,6 +1230,7 @@ public final class MainActivity extends AppCompatActivity {
 
     private void renderContacts() {
         if (contactRows == null || engine == null) return;
+        rowSwipes.begin();
         contactRows.removeAllViews(); unreadLabels.clear();
         if (unreadFilter != null) {
             unreadFilter.setSelected(unreadOnly); unreadFilter.setColorFilter(unreadOnly ? GREEN : INK);
@@ -1237,6 +1242,7 @@ public final class MainActivity extends AppCompatActivity {
         java.util.List<GroupChat.Conversation> groups = engine.groups().conversations();
         java.util.List<ChatEngine.Peer> peers = engine.peers();
         Map<UUID, Long> unreadCounts = engine.unreadCounts();
+        java.util.Set<UUID> muted = engine.mutedChats();
         shownPeers = peers; shownGroups = groups; shownAdminDirectory = engine.onboarding().generation();
         for (GroupChat.Conversation group : groups) {
             if (!group.name().toLowerCase(Locale.ROOT).contains(filter)) continue;
@@ -1271,7 +1277,9 @@ public final class MainActivity extends AppCompatActivity {
                 continue;
             }
             LinearLayout row = horizontal();
-            row.setMinimumHeight(dp(78)); row.setPadding(dp(18), dp(12), dp(18), dp(12)); row.setBackground(design.feedback(Color.TRANSPARENT, 0));
+            boolean quiet = muted.contains(peer.userId());
+            // Opaque, so that the actions behind the row do not show through while it moves.
+            row.setMinimumHeight(dp(78)); row.setPadding(dp(18), dp(12), dp(18), dp(12)); row.setBackground(design.feedback(Ui.CANVAS, 0));
             row.addView(profileAvatar(peer.userId(), peer.name(), 46, design.avatarColor(peer.userId())));
             LinearLayout identity = vertical(); identity.setPadding(dp(12), 0, dp(8), 0);
             TextView title=design.text(peer.name(),14,700,INK); title.setSingleLine(true); title.setEllipsize(android.text.TextUtils.TruncateAt.END); identity.addView(title);
@@ -1280,12 +1288,18 @@ public final class MainActivity extends AppCompatActivity {
                 review.setSingleLine(true); review.setEllipsize(android.text.TextUtils.TruncateAt.END); review.setPadding(0, dp(3), 0, 0); identity.addView(review);
             }
             row.addView(identity, new LinearLayout.LayoutParams(0, -2, 1));
-            row.addView(unreadBadge(peer.userId(),unread));
+            if (quiet) {
+                LinearLayout.LayoutParams bellSize = new LinearLayout.LayoutParams(dp(14), dp(14)); bellSize.setMarginEnd(dp(8));
+                row.addView(design.symbol(R.drawable.ic_bell_off, 14, MUTED), bellSize);
+                androidx.core.view.ViewCompat.setStateDescription(row, "Muted");
+            }
+            row.addView(unreadBadge(peer.userId(), unread, quiet));
             row.addView(design.symbol(R.drawable.ic_chevron_right, 16, MUTED));
             row.setOnClickListener(view -> openContact(peer));
             row.setOnLongClickListener(view -> { forgetDialog(peer); return true; });
-            addChatRow(swipeToRemove(row, peer));
+            addChatRow(chatActions(row, peer, quiet));
         }
+        rowSwipes.end();
         if (engine.onboarding().admin()) {
             ChatEngine current = engine;
             if (current.onboarding().hasPrevious()) contactRows.addView(command("First new accounts", () ->
@@ -1357,30 +1371,54 @@ public final class MainActivity extends AppCompatActivity {
                 .create());
     }
 
-    // Swiping a chat to the left asks to remove the contact, with the confirmation the long press shows; the strip behind says what letting go does.
-    // A swipe is not a click, and screen-reader users get "Remove contact" as an accessibility action on the row.
-    @android.annotation.SuppressLint("ClickableViewAccessibility")
-    private View swipeToRemove(LinearLayout row, ChatEngine.Peer peer) {
-        FrameLayout holder = new FrameLayout(this);
-        LinearLayout strip = horizontal(); strip.setGravity(Gravity.CENTER_VERTICAL | Gravity.END); strip.setBackgroundColor(Ui.ERROR);
-        strip.setPadding(0, 0, dp(12), 0); strip.setVisibility(View.INVISIBLE);
-        strip.addView(design.symbol(R.drawable.ic_trash_2, 18, Color.WHITE));
-        TextView label = design.text("Remove", 12, 700, Color.WHITE); label.setPadding(dp(8), 0, 0, 0); strip.addView(label);
-        holder.addView(strip, new FrameLayout.LayoutParams(-1, -1));
-        holder.addView(row, new FrameLayout.LayoutParams(-1, -2));
-        HorizontalSwipe swipe = new HorizontalSwipe(row, -1, dp(96), dp(120), fraction -> {
-            int exposed = Math.round(Math.abs(row.getTranslationX()));
-            strip.setVisibility(exposed == 0 ? View.INVISIBLE : View.VISIBLE);
-            strip.setClipBounds(new android.graphics.Rect(Math.max(0, strip.getWidth() - exposed), 0, strip.getWidth(), strip.getHeight()));
-        }, () -> forgetDialog(peer));
-        row.setOnTouchListener(swipe);
-        androidx.core.view.ViewCompat.addAccessibilityAction(row, "Remove contact", (view, arguments) -> { forgetDialog(peer); return true; });
+    // A chat pulled to the right shows Mute and Clear chat; pulled to the left, Remove contact and Block user. The row stays where it was
+    // pulled until one is touched, and each one that erases something asks first, exactly as the long press and the chat's menu do, so a
+    // swipe erases nothing by itself. Screen-reader users get the same four as actions on the row.
+    private View chatActions(LinearLayout row, ChatEngine.Peer peer, boolean muted) {
+        String muteLabel = muted ? "Unmute" : "Mute";
+        Runnable mute = () -> muteChat(peer, !muted);
+        Runnable clear = () -> clearChatDialog(peer);
+        Runnable remove = () -> forgetDialog(peer);
+        Runnable block = () -> blockUserDialog(peer);
+        SwipeActions holder = new SwipeActions(this, design, row,
+                java.util.List.of(new SwipeActions.Action(muted ? R.drawable.ic_bell : R.drawable.ic_bell_off, muteLabel, Ui.BLUE, mute),
+                        new SwipeActions.Action(R.drawable.ic_eraser, "Clear chat", Ui.MUTED, clear)),
+                java.util.List.of(new SwipeActions.Action(R.drawable.ic_user_round_x, "Remove contact", Ui.WARM, remove),
+                        new SwipeActions.Action(R.drawable.ic_ban, "Block user", Ui.ERROR, block)),
+                rowSwipes, peer.userId());
+        androidx.core.view.ViewCompat.addAccessibilityAction(row, muteLabel + " chat", (view, arguments) -> { mute.run(); return true; });
+        androidx.core.view.ViewCompat.addAccessibilityAction(row, "Clear chat", (view, arguments) -> { clear.run(); return true; });
+        androidx.core.view.ViewCompat.addAccessibilityAction(row, "Remove contact", (view, arguments) -> { remove.run(); return true; });
+        androidx.core.view.ViewCompat.addAccessibilityAction(row, "Block user", (view, arguments) -> { block.run(); return true; });
         return holder;
     }
 
-    private TextView unreadBadge(UUID id, long count) {
+    // Muting is kept on this phone and changes how the list shows the chat's count. The phone's own alert says only "New message" and
+    // does not know which chat it is for, so it cannot be silenced per chat; the message says so rather than let it seem to.
+    private void muteChat(ChatEngine.Peer peer, boolean mute) {
+        ChatEngine current = engine;
+        if (current == null || !resumed) return;
+        submit(() -> current.mute(peer.userId(), mute), () -> {
+            render();
+            Toast.makeText(this, mute ? "Muted. The count stays grey; the phone's alert still says only \u201cNew message\u201d." : "Unmuted", Toast.LENGTH_LONG).show();
+        });
+    }
+
+    // Touching the list anywhere that is not a row, and scrolling it, puts an open row back.
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    private void closeRowsOnTouch(ScrollView list) {
+        list.setOnTouchListener((view, event) -> {
+            int action = event.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE) rowSwipes.closeOpen();
+            return false;
+        });
+    }
+
+    private TextView unreadBadge(UUID id, long count) { return unreadBadge(id, count, false); }
+
+    private TextView unreadBadge(UUID id, long count, boolean muted) {
         TextView badge=design.text(Long.toString(count),10,800,Color.WHITE); badge.setGravity(Gravity.CENTER);
-        badge.setBackground(design.background(GREEN,11,0)); badge.setPadding(dp(5),0,dp(5),0); badge.setMinWidth(dp(21));
+        badge.setBackground(design.background(muted ? MUTED : GREEN,11,0)); badge.setPadding(dp(5),0,dp(5),0); badge.setMinWidth(dp(21));
         LinearLayout.LayoutParams size=new LinearLayout.LayoutParams(-2,dp(21)); size.setMarginEnd(dp(7)); badge.setLayoutParams(size);
         badge.setVisibility(count==0 ? View.GONE : View.VISIBLE); unreadLabels.put(id,badge); return badge;
     }
@@ -3718,7 +3756,9 @@ public final class MainActivity extends AppCompatActivity {
             if (!current.authenticated()) { if (chatScreen || contactRows != null) { dismissContent(); render(); } }
             else if (selectedPeer == null) {
                 if (connection != null) connection.setText(statusText());
-                if (!peers.equals(shownPeers) || !groups.equals(shownGroups) || shownAdminDirectory != directoryGeneration) {
+                // A row that has a finger on it is not drawn again under it; the next pass draws the list.
+                boolean touching = rowSwipes.active();
+                if (!touching && (!peers.equals(shownPeers) || !groups.equals(shownGroups) || shownAdminDirectory != directoryGeneration)) {
                     shownPeers = peers; shownGroups=groups; shownAdminDirectory = directoryGeneration; renderContacts();
                 }
                 for (var unread : unreadLabels.entrySet()) {
@@ -3726,7 +3766,7 @@ public final class MainActivity extends AppCompatActivity {
                     long count = unreadCounts.getOrDefault(unread.getKey(), 0L);
                     badge.setText(Long.toString(count)); badge.setVisibility(count == 0 ? View.GONE : View.VISIBLE);
                 }
-                if (unreadOnly) renderContacts();
+                if (unreadOnly && !touching) renderContacts();
             }
             else {
                 if (!Objects.equals(selected, selectedPeer)) return;

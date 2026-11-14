@@ -7896,6 +7896,7 @@ public class ScreenFlowTest {
     /** A plain, non-admin synthetic relay for {@code peer}: messages, keys and an empty admin directory (so sync still completes),
      * and the plain identity lookup that both sending and the automatic profile-photo exchange make for a verified contact. */
     private final List<byte[]> uploadedMedia = new ArrayList<>();
+    private final List<UUID> fixtureBlocked = new ArrayList<>();
 
     private void plainTransport(List<ChatEngine.Incoming> incoming, List<ChatEngine.Send> outgoing) {
         engine.groupApi().close();
@@ -7905,6 +7906,11 @@ public class ScreenFlowTest {
             if (path.equals("/users/id/" + peerId)) return syntheticResponse(request, 200, RemotePhotoSession.contact(peer));
             if (path.equals("/account/profile")) return syntheticResponse(request, 200, new ChatEngine.Profile(userId, "alex", null));
             if (path.equals("/account/type")) return syntheticResponse(request, 200, new RemotePhotoSession.AccountType(userId, "USER"));
+            if (path.equals("/account/blocks") && request.method().equals("GET")) return syntheticResponse(request, 200, List.copyOf(fixtureBlocked));
+            if (path.startsWith("/account/blocks/") && request.method().equals("PUT")) {
+                fixtureBlocked.add(UUID.fromString(path.substring("/account/blocks/".length())));
+                return syntheticResponse(request, 200, null);
+            }
             if (path.equals("/messages/pending")) {
                 List<ChatEngine.Incoming> batch = new ArrayList<>(incoming); incoming.clear();
                 return syntheticResponse(request, 200, batch);
@@ -9080,45 +9086,370 @@ public class ScreenFlowTest {
         awaitMainCondition(scenario, activity -> overlay(activity) == null || !overlay(activity).isShowing());
     }
 
-    @Test public void swipingAChatToTheLeftAsksToRemoveTheContactAndCancellingKeepsIt() throws Exception {
+    // ---- A chat in the list, pulled sideways: it shows its actions and stays open until one is chosen (0.6.8, rebuilt) ----
+
+    private SwipeActions actionsOf(MainActivity activity, String name) { return (SwipeActions) contactRow(activity, name).getParent(); }
+    private SwipeActions.Group rowGroup(MainActivity activity) { return (SwipeActions.Group) readField(activity, "rowSwipes"); }
+    private float shiftOf(MainActivity activity, String name) { return contactRow(activity, name).getTranslationX(); }
+    private boolean noDialog(MainActivity activity) { return dialog(activity) == null || !dialog(activity).isShowing(); }
+
+    private TextView actionLabel(MainActivity activity, String name, String label) {
+        return (TextView) descendants(actionsOf(activity, name)).stream()
+            .filter(view -> view instanceof TextView text && label.contentEquals(text.getText())).findFirst()
+            .orElseThrow(() -> new AssertionError("No action " + label + " on " + name));
+    }
+
+    private boolean showing(MainActivity activity, String name, String label) { return actionLabel(activity, name, label).isShown(); }
+
+    private Rect holderRect(ActivityScenario<MainActivity> scenario, String name) {
+        Rect[] result = new Rect[1];
+        scenario.onActivity(activity -> {
+            View holder = actionsOf(activity, name); int[] at = new int[2]; holder.getLocationOnScreen(at);
+            result[0] = new Rect(at[0], at[1], at[0] + holder.getWidth(), at[1] + holder.getHeight());
+        });
+        return result[0];
+    }
+
+    /** A quick pull of a chat's row, as a finger flicks it: to the right is positive. It starts clear of the screen's edge gestures. */
+    private void pullRow(ActivityScenario<MainActivity> scenario, androidx.test.uiautomator.UiDevice device, String name, int dp) {
+        Rect at = holderRect(scenario, name);
+        int from = dp > 0 ? at.left + dpPx(60) : at.right - dpPx(60);
+        assertTrue(device.swipe(from, at.centerY(), from + dpPx(dp), at.centerY(), 20));
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+    }
+
+    /** Drags from {@code fromX} by {@code dp} and lets go once the finger has been still for a moment, so that only the distance counts. */
+    private void dragRowAndStop(Rect at, int fromX, int dp) {
+        int toX = fromX + dpPx(dp), y = at.centerY();
+        dragAndHold(fromX, toX, y);
+        android.os.SystemClock.sleep(250);
+        touch(android.view.MotionEvent.ACTION_UP, toX, y);
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+    }
+
+    private void awaitShift(ActivityScenario<MainActivity> scenario, String name, int dp) throws Exception {
+        float[] seen = new float[1];
+        try { awaitMainCondition(scenario, activity -> { seen[0] = shiftOf(activity, name); return Math.abs(seen[0] - dpPx(dp)) <= 2f; }); }
+        catch (AssertionError failure) { throw new AssertionError("The row of " + name + " is " + seen[0] + " px from rest, not " + dpPx(dp) + " (" + dp + " dp)", failure); }
+    }
+
+    private void tapRowAction(ActivityScenario<MainActivity> scenario, androidx.test.uiautomator.UiDevice device, String name, String label) {
+        int[] at = new int[2];
+        scenario.onActivity(activity -> {
+            TextView text = actionLabel(activity, name, label);
+            assertTrue(label + " is showing on " + name, text.isShown());
+            text.getLocationOnScreen(at); at[0] += text.getWidth() / 2; at[1] += text.getHeight() / 2;
+        });
+        assertTrue(device.click(at[0], at[1]));
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+    }
+
+    private int badgeColor(MainActivity activity, UUID id) {
+        @SuppressWarnings("unchecked") Map<UUID, TextView> badges = (Map<UUID, TextView>) readField(activity, "unreadLabels");
+        return ((android.graphics.drawable.GradientDrawable) badges.get(id).getBackground()).getColor().getDefaultColor();
+    }
+
+    private long pictures(MainActivity activity, String name) { return descendants(contactRow(activity, name)).stream().filter(ImageView.class::isInstance).count(); }
+
+    @Test public void pullingAChatToTheRightShowsMuteAndClearChatAndLeavesThemThere() throws Exception {
         signedInFixture(); conversationsFixture();
         var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             scenario.onActivity(this::inject);
             InstrumentationRegistry.getInstrumentation().waitForIdleSync();
-            int[] at = new int[2], size = new int[2];
-            Runnable[] locate = new Runnable[1];
-            locate[0] = () -> scenario.onActivity(activity -> { View row = contactRow(activity, "Aarav Mehta"); row.getLocationOnScreen(at); size[0] = row.getWidth(); size[1] = row.getHeight(); });
-            locate[0].run();
-            int y = at[1] + size[1] / 2, right = at[0] + size[0] - dpPx(40);
-            // A short pull and a pull the wrong way do nothing.
-            scenario.onActivity(activity -> assertTrue("No dialog before any pull: " + shownText(activity), dialog(activity) == null || !dialog(activity).isShowing()));
-            assertTrue(device.swipe(right, y, right - dpPx(30), y, 10));
-            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
-            scenario.onActivity(activity -> assertTrue("A short pull opened: " + shownText(activity), dialog(activity) == null || !dialog(activity).isShowing()));
-            assertTrue(device.swipe(at[0] + dpPx(60), y, at[0] + dpPx(220), y, 10));
-            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
-            scenario.onActivity(activity -> assertTrue("A pull the wrong way opened: " + shownText(activity), dialog(activity) == null || !dialog(activity).isShowing()));
-            scenario.onActivity(activity -> assertNull("A pull the wrong way did not open the chat", readField(activity, "selectedPeer")));
-            // Held, a mostly vertical drag does not move the row, so the list can scroll.
-            dragAndHold(right, y, right - dpPx(30), y - dpPx(120));
-            scenario.onActivity(activity -> assertEquals("A vertical drag leaves the row where it is", 0f, contactRow(activity, "Aarav Mehta").getTranslationX(), 0.5f));
-            touch(android.view.MotionEvent.ACTION_UP, right - dpPx(30), y - dpPx(120));
-            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
-            scenario.onActivity(activity -> assertTrue("And asks nothing", dialog(activity) == null || !dialog(activity).isShowing()));
-            // Held part of the way, the row follows the finger and shows what letting go would do.
-            dragAndHold(right, right - dpPx(70), y);
             scenario.onActivity(activity -> {
-                float moved = contactRow(activity, "Aarav Mehta").getTranslationX();
-                assertTrue("The row follows the finger: " + moved, moved < 0 && moved > -dpPx(96));
-                assertTrue("The strip behind it is shown", hasText(root(activity), "Remove"));
+                assertEquals("At rest the row is where it always was", 0f, shiftOf(activity, "Aarav Mehta"), 0f);
+                View row = contactRow(activity, "Aarav Mehta"); SwipeActions holder = actionsOf(activity, "Aarav Mehta");
+                assertEquals("The actions behind a row do not make it taller", row.getHeight(), holder.getHeight());
+                assertTrue("It is an ordinary chat row: " + row.getHeight(), row.getHeight() >= dpPx(78) && row.getHeight() < dpPx(120));
+                for (View panel : List.of(holder.getChildAt(0), holder.getChildAt(1))) assertEquals("and the actions are as tall as it is", row.getHeight(), panel.getHeight());
+                for (String label : List.of("Mute", "Clear chat", "Remove contact", "Block user")) assertFalse(label + " is not showing at rest", showing(activity, "Aarav Mehta", label));
             });
-            snapshot(scenario, "96-swipe-remove-held");
-            touch(android.view.MotionEvent.ACTION_UP, right - dpPx(70), y);
-            awaitMainCondition(scenario, activity -> contactRow(activity, "Aarav Mehta").getTranslationX() == 0f);
-            scenario.onActivity(activity -> assertTrue("Letting go short of the mark does nothing", dialog(activity) == null || !dialog(activity).isShowing()));
-            // A real pull asks, with the contact's name; cancelling keeps the contact.
-            assertTrue(device.swipe(right, y, right - dpPx(200), y, 20));
+            pullRow(scenario, device, "Aarav Mehta", 220);
+            awaitShift(scenario, "Aarav Mehta", 152);
+            scenario.onActivity(activity -> {
+                assertTrue(showing(activity, "Aarav Mehta", "Mute")); assertTrue(showing(activity, "Aarav Mehta", "Clear chat"));
+                assertFalse("Not the other side's", showing(activity, "Aarav Mehta", "Remove contact") || showing(activity, "Aarav Mehta", "Block user"));
+                assertTrue("Nothing is asked: " + shownText(activity), noDialog(activity));
+                assertNull("The chat did not open", readField(activity, "selectedPeer"));
+                assertEquals("The other chats did not move", 0f, shiftOf(activity, "Maya Chen"), 0f);
+                assertSame("It is this row that is open", actionsOf(activity, "Aarav Mehta"), readField(rowGroup(activity), "open"));
+            });
+            snapshot(scenario, "112-swipe-right-actions");
+            // Nothing puts it back by itself.
+            android.os.SystemClock.sleep(1500);
+            scenario.onActivity(activity -> assertEquals(dpPx(152), shiftOf(activity, "Aarav Mehta"), 2f));
+        }
+    }
+
+    @Test public void pullingAChatToTheLeftShowsRemoveContactAndBlockUserAndLeavesThemThere() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            pullRow(scenario, device, "Aarav Mehta", -220);
+            awaitShift(scenario, "Aarav Mehta", -152);
+            scenario.onActivity(activity -> {
+                assertTrue(showing(activity, "Aarav Mehta", "Remove contact")); assertTrue(showing(activity, "Aarav Mehta", "Block user"));
+                assertFalse("Not the other side's", showing(activity, "Aarav Mehta", "Mute") || showing(activity, "Aarav Mehta", "Clear chat"));
+                assertTrue("Nothing is asked: " + shownText(activity), noDialog(activity));
+                assertNull("The chat did not open", readField(activity, "selectedPeer"));
+                assertEquals("The other chats did not move", 0f, shiftOf(activity, "Maya Chen"), 0f);
+            });
+            snapshot(scenario, "113-swipe-left-actions");
+            android.os.SystemClock.sleep(1500);
+            scenario.onActivity(activity -> assertEquals(-dpPx(152), shiftOf(activity, "Aarav Mehta"), 2f));
+            // Pulled the other way it passes through rest and shows the other two.
+            Rect at = holderRect(scenario, "Aarav Mehta");
+            dragRowAndStop(at, at.left + dpPx(40), 280);
+            awaitShift(scenario, "Aarav Mehta", 152);
+            scenario.onActivity(activity -> {
+                assertTrue(showing(activity, "Aarav Mehta", "Mute")); assertFalse(showing(activity, "Aarav Mehta", "Block user"));
+            });
+        }
+    }
+
+    @Test public void aShortOrSlowOrUpwardPullLeavesTheRowAtRestAndOnePastHalfwayStays() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            Rect at = holderRect(scenario, "Aarav Mehta");
+            // Let go before halfway of what the buttons need (76 of 152 dp): back it goes, to either side.
+            dragRowAndStop(at, at.left + dpPx(60), 60);
+            awaitShift(scenario, "Aarav Mehta", 0);
+            dragRowAndStop(at, at.right - dpPx(60), -60);
+            awaitShift(scenario, "Aarav Mehta", 0);
+            scenario.onActivity(activity -> {
+                assertTrue(noDialog(activity)); assertNull(readField(activity, "selectedPeer"));
+                assertFalse(showing(activity, "Aarav Mehta", "Mute")); assertFalse(showing(activity, "Aarav Mehta", "Block user"));
+            });
+            // A mostly vertical drag does not move the row, so the list can scroll.
+            dragAndHold(at.left + dpPx(80), at.centerY(), at.left + dpPx(110), at.centerY() - dpPx(120));
+            scenario.onActivity(activity -> assertEquals("A vertical drag leaves the row where it is", 0f, shiftOf(activity, "Aarav Mehta"), 0.5f));
+            touch(android.view.MotionEvent.ACTION_UP, at.left + dpPx(110), at.centerY() - dpPx(120));
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> { assertTrue(noDialog(activity)); assertNull(readField(activity, "selectedPeer")); });
+            // Past halfway, let go slowly: it stays open.
+            dragRowAndStop(at, at.left + dpPx(60), 100);
+            awaitShift(scenario, "Aarav Mehta", 152);
+            // From open, a short pull back leaves it open and one past halfway puts it back.
+            dragRowAndStop(at, at.left + dpPx(300), -40);
+            awaitShift(scenario, "Aarav Mehta", 152);
+            dragRowAndStop(at, at.left + dpPx(300), -110);
+            awaitShift(scenario, "Aarav Mehta", 0);
+            scenario.onActivity(activity -> { assertTrue(noDialog(activity)); assertNull(readField(activity, "selectedPeer")); });
+        }
+    }
+
+    @Test public void theRowCoversTheActionsBehindItWhileItIsBeingPulled() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            Rect at = holderRect(scenario, "Aarav Mehta");
+            dragAndHold(at.left + dpPx(60), at.left + dpPx(60) + dpPx(50), at.centerY());
+            scenario.onActivity(activity -> {
+                SwipeActions holder = actionsOf(activity, "Aarav Mehta");
+                float moved = shiftOf(activity, "Aarav Mehta");
+                assertTrue("Held, the row follows the finger: " + moved, moved > dpPx(30) && moved < dpPx(152));
+                assertTrue("and a finger is on it", rowGroup(activity).active());
+                Bitmap image = Bitmap.createBitmap(holder.getWidth(), holder.getHeight(), Bitmap.Config.ARGB_8888);
+                holder.draw(new Canvas(image));
+                int inRow = image.getPixel(Math.round(moved) + dpPx(6), dpPx(4)), beside = image.getPixel(dpPx(10), dpPx(4));
+                image.recycle();
+                assertEquals("The row's own colour, so nothing behind it shows through", Color.red(Ui.CANVAS), Color.red(inRow), 8);
+                assertEquals(Color.green(Ui.CANVAS), Color.green(inRow), 8); assertEquals(Color.blue(Ui.CANVAS), Color.blue(inRow), 8);
+                assertEquals("The button beside it is the Clear chat button", Color.green(Ui.MUTED), Color.green(beside), 8);
+                assertEquals(Color.red(Ui.MUTED), Color.red(beside), 8);
+            });
+            snapshot(scenario, "114-swipe-held");
+            touch(android.view.MotionEvent.ACTION_UP, at.left + dpPx(60) + dpPx(50), at.centerY());
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> assertFalse("Nobody is touching the list any more", rowGroup(activity).active()));
+        }
+    }
+
+    @Test public void aTapOnAnOpenRowPutsItBackAndOpensNothingWhileATapOnARowAtRestOpensTheChat() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            Rect at = holderRect(scenario, "Aarav Mehta");
+            pullRow(scenario, device, "Aarav Mehta", 220);
+            awaitShift(scenario, "Aarav Mehta", 152);
+            assertTrue(device.click(at.right - dpPx(60), at.centerY()));
+            awaitShift(scenario, "Aarav Mehta", 0);
+            scenario.onActivity(activity -> { assertNull("The tap put the row back and opened nothing", readField(activity, "selectedPeer")); assertTrue(noDialog(activity)); });
+            pullRow(scenario, device, "Aarav Mehta", -220);
+            awaitShift(scenario, "Aarav Mehta", -152);
+            assertTrue(device.click(at.left + dpPx(60), at.centerY()));
+            awaitShift(scenario, "Aarav Mehta", 0);
+            scenario.onActivity(activity -> { assertNull(readField(activity, "selectedPeer")); assertTrue(noDialog(activity)); });
+            // A row at rest still opens its chat for a tap.
+            assertTrue(device.click(at.centerX(), at.centerY()));
+            awaitMainCondition(scenario, activity -> peerId.equals(readField(activity, "selectedPeer")));
+        }
+    }
+
+    @Test public void touchingAnotherRowPutsTheOpenOneBackWithoutOpeningThatOneAndOnlyOneIsOpen() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            pullRow(scenario, device, "Aarav Mehta", 220);
+            awaitShift(scenario, "Aarav Mehta", 152);
+            Rect maya = holderRect(scenario, "Maya Chen");
+            assertTrue(device.click(maya.centerX(), maya.centerY()));
+            awaitShift(scenario, "Aarav Mehta", 0);
+            scenario.onActivity(activity -> { assertNull("The touch that put it back did not open the other chat", readField(activity, "selectedPeer")); assertTrue(noDialog(activity)); });
+            // A pull on another row does the same and moves nothing; the next pull opens it, and only it.
+            pullRow(scenario, device, "Aarav Mehta", 220);
+            awaitShift(scenario, "Aarav Mehta", 152);
+            pullRow(scenario, device, "Maya Chen", -220);
+            awaitShift(scenario, "Aarav Mehta", 0);
+            scenario.onActivity(activity -> assertEquals("The pull that put the open row back moved nothing else", 0f, shiftOf(activity, "Maya Chen"), 0.5f));
+            pullRow(scenario, device, "Maya Chen", -220);
+            awaitShift(scenario, "Maya Chen", -152);
+            scenario.onActivity(activity -> {
+                assertEquals(0f, shiftOf(activity, "Aarav Mehta"), 0.5f);
+                assertSame(actionsOf(activity, "Maya Chen"), readField(rowGroup(activity), "open"));
+            });
+            snapshot(scenario, "115-swipe-second-row");
+        }
+    }
+
+    @Test public void touchingTheEmptyPartOfTheListAndBackPutAnOpenRowBackAndASecondBackLeaves() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            pullRow(scenario, device, "Aarav Mehta", 220);
+            awaitShift(scenario, "Aarav Mehta", 152);
+            Rect last = holderRect(scenario, "Noah Williams");
+            assertTrue(device.click(last.centerX(), last.bottom + dpPx(150)));
+            awaitShift(scenario, "Aarav Mehta", 0);
+            scenario.onActivity(activity -> assertNull(readField(activity, "selectedPeer")));
+            pullRow(scenario, device, "Aarav Mehta", -220);
+            awaitShift(scenario, "Aarav Mehta", -152);
+            scenario.onActivity(activity -> activity.getOnBackPressedDispatcher().onBackPressed());
+            awaitShift(scenario, "Aarav Mehta", 0);
+            scenario.onActivity(activity -> assertFalse("The first Back only put the row back", activity.isFinishing()));
+            scenario.onActivity(activity -> activity.getOnBackPressedDispatcher().onBackPressed());
+            awaitMainCondition(scenario, MainActivity::isFinishing);
+        }
+    }
+
+    @Test public void scrollingTheListPutsAnOpenRowBack() throws Exception {
+        signedInFixture(); conversationsFixture();
+        manyVerifiedContacts(30, 1);
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            awaitMainCondition(scenario, activity -> readField(activity, "contactRows") != null && ((LinearLayout) readField(activity, "contactRows")).getChildCount() > 10);
+            pullRow(scenario, device, "Aarav Mehta", 220);
+            awaitShift(scenario, "Aarav Mehta", 152);
+            // The drag starts on the open row itself, so that no other row is touched and only the list's own scrolling can put it back.
+            Rect at = holderRect(scenario, "Aarav Mehta");
+            int x = at.right - dpPx(60);
+            assertTrue(device.swipe(x, at.centerY(), x, at.centerY() + dpPx(300), 20));
+            awaitShift(scenario, "Aarav Mehta", 0);
+            scenario.onActivity(activity -> { assertNull(readField(activity, "selectedPeer")); assertTrue(noDialog(activity)); });
+        }
+    }
+
+    @Test public void mutingAChatKeepsItsCountGreyShowsABellAndCanBeUndone() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            long[] plainCount = new long[1];
+            scenario.onActivity(activity -> plainCount[0] = pictures(activity, "Maya Chen"));
+            long plain = plainCount[0];
+            scenario.onActivity(activity -> {
+                assertEquals("A chat that is not muted has the green count", Ui.PRIMARY, badgeColor(activity, peerId));
+                assertEquals(plain, pictures(activity, "Aarav Mehta"));
+                assertNull(androidx.core.view.ViewCompat.getStateDescription(contactRow(activity, "Aarav Mehta")));
+            });
+            pullRow(scenario, device, "Aarav Mehta", 220);
+            awaitShift(scenario, "Aarav Mehta", 152);
+            tapRowAction(scenario, device, "Aarav Mehta", "Mute");
+            awaitMainCondition(scenario, activity -> engine.mutedChats().contains(peerId) && !(boolean) readField(activity, "busy"));
+            scenario.onActivity(activity -> {
+                assertEquals(Set.of(peerId), engine.mutedChats());
+                assertEquals("The count is grey", Ui.MUTED, badgeColor(activity, peerId));
+                assertEquals("and a bell is beside it", plain + 1, pictures(activity, "Aarav Mehta"));
+                assertEquals("Muted", String.valueOf(androidx.core.view.ViewCompat.getStateDescription(contactRow(activity, "Aarav Mehta"))));
+                assertEquals("The row is back at rest", 0f, shiftOf(activity, "Aarav Mehta"), 0.5f);
+                assertEquals("No other chat is muted", plain, pictures(activity, "Maya Chen"));
+                assertTrue("Muting does not touch the messages", engine.entries(peerId).size() == 7);
+            });
+            snapshot(scenario, "116-muted-chat");
+            // Opened again, the button offers to undo it, and does.
+            pullRow(scenario, device, "Aarav Mehta", 220);
+            awaitShift(scenario, "Aarav Mehta", 152);
+            scenario.onActivity(activity -> {
+                assertTrue(showing(activity, "Aarav Mehta", "Unmute"));
+                assertTrue("There is no second Mute button", descendants(actionsOf(activity, "Aarav Mehta")).stream().noneMatch(view -> view instanceof TextView label && "Mute".contentEquals(label.getText())));
+            });
+            snapshot(scenario, "117-unmute-offered");
+            tapRowAction(scenario, device, "Aarav Mehta", "Unmute");
+            awaitMainCondition(scenario, activity -> engine.mutedChats().isEmpty() && !(boolean) readField(activity, "busy"));
+            scenario.onActivity(activity -> {
+                assertEquals(Ui.PRIMARY, badgeColor(activity, peerId));
+                assertEquals(plain, pictures(activity, "Aarav Mehta"));
+                assertNull(androidx.core.view.ViewCompat.getStateDescription(contactRow(activity, "Aarav Mehta")));
+            });
+        }
+    }
+
+    @Test public void clearChatFromTheSwipeAsksFirstAndKeepsTheContact() throws Exception {
+        signedInFixture(); conversationsFixture();
+        int count = engine.entries(peerId).size();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            pullRow(scenario, device, "Aarav Mehta", 220);
+            awaitShift(scenario, "Aarav Mehta", 152);
+            tapRowAction(scenario, device, "Aarav Mehta", "Clear chat");
+            awaitDialog(scenario);
+            scenario.onActivity(activity -> assertTrue(hasText(dialog(activity).getWindow().getDecorView(), "Clear chat?")));
+            awaitShift(scenario, "Aarav Mehta", 0);
+            scenario.onActivity(activity -> dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick());
+            awaitNoDialog(scenario);
+            assertEquals("Cancelling keeps every message", count, engine.entries(peerId).size());
+            pullRow(scenario, device, "Aarav Mehta", 220);
+            awaitShift(scenario, "Aarav Mehta", 152);
+            tapRowAction(scenario, device, "Aarav Mehta", "Clear chat");
+            awaitDialog(scenario);
+            scenario.onActivity(activity -> dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+            awaitMainCondition(scenario, activity -> engine.entries(peerId).isEmpty() && !(boolean) readField(activity, "busy"));
+            scenario.onActivity(activity -> {
+                assertTrue("The contact stays", engine.peers().stream().anyMatch(value -> value.userId().equals(peerId)));
+                assertTrue(hasText(root(activity), "Aarav Mehta"));
+                assertNull(readField(activity, "selectedPeer"));
+                @SuppressWarnings("unchecked") Map<UUID, TextView> badges = (Map<UUID, TextView>) readField(activity, "unreadLabels");
+                assertEquals("There is nothing left to count", View.GONE, badges.get(peerId).getVisibility());
+            });
+        }
+    }
+
+    @Test public void removeContactFromTheSwipeAsksFirstAndTakesTheMuteWithIt() throws Exception {
+        signedInFixture(); conversationsFixture();
+        engine.mute(peerId, true);
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            pullRow(scenario, device, "Aarav Mehta", -220);
+            awaitShift(scenario, "Aarav Mehta", -152);
+            tapRowAction(scenario, device, "Aarav Mehta", "Remove contact");
             awaitDialog(scenario);
             scenario.onActivity(activity -> {
                 View sheet = dialog(activity).getWindow().getDecorView();
@@ -9127,16 +9458,166 @@ public class ScreenFlowTest {
                 dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
             });
             awaitNoDialog(scenario);
-            awaitMainCondition(scenario, activity -> contactRow(activity, "Aarav Mehta").getTranslationX() == 0f);
-            assertTrue("Cancelling keeps the contact", engine.peers().stream().anyMatch(value -> value.userId().equals(peerId)));
-            // The long press still asks; and confirming a swipe removes the contact.
-            locate[0].run();
-            y = at[1] + size[1] / 2; right = at[0] + size[0] - dpPx(40);
-            assertTrue(device.swipe(right, y, right - dpPx(200), y, 20));
+            awaitShift(scenario, "Aarav Mehta", 0);
+            assertTrue("Cancelling keeps the contact and the mute", engine.peers().stream().anyMatch(value -> value.userId().equals(peerId)) && engine.mutedChats().contains(peerId));
+            pullRow(scenario, device, "Aarav Mehta", -220);
+            awaitShift(scenario, "Aarav Mehta", -152);
+            tapRowAction(scenario, device, "Aarav Mehta", "Remove contact");
             awaitDialog(scenario);
             scenario.onActivity(activity -> dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick());
-            awaitMainCondition(scenario, activity -> engine.peers().stream().noneMatch(value -> value.userId().equals(peerId)));
+            awaitMainCondition(scenario, activity -> engine.peers().stream().noneMatch(value -> value.userId().equals(peerId)) && !(boolean) readField(activity, "busy"));
             scenario.onActivity(activity -> assertFalse(hasText(root(activity), "Aarav Mehta")));
+            assertTrue("The mute went with the contact", engine.mutedChats().isEmpty());
+            assertTrue(vault.names("muted/").isEmpty());
+        }
+    }
+
+    @Test public void blockUserFromTheSwipeAsksFirstAndTakesTheMuteAndTheContactWithIt() throws Exception {
+        signedInFixture(); conversationsFixture();
+        engine.mute(peerId, true);
+        plainTransport(new ArrayList<>(), new ArrayList<>());
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            pullRow(scenario, device, "Aarav Mehta", -220);
+            awaitShift(scenario, "Aarav Mehta", -152);
+            tapRowAction(scenario, device, "Aarav Mehta", "Block user");
+            awaitDialog(scenario);
+            scenario.onActivity(activity -> {
+                assertTrue(hasText(dialog(activity).getWindow().getDecorView(), "Block Aarav Mehta?"));
+                dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+            });
+            awaitNoDialog(scenario);
+            assertFalse("Cancelling blocks nobody", engine.safety().isBlocked(peerId));
+            assertTrue(engine.mutedChats().contains(peerId));
+            pullRow(scenario, device, "Aarav Mehta", -220);
+            awaitShift(scenario, "Aarav Mehta", -152);
+            tapRowAction(scenario, device, "Aarav Mehta", "Block user");
+            awaitDialog(scenario);
+            scenario.onActivity(activity -> dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+            awaitMainCondition(scenario, activity -> engine.safety().isBlocked(peerId) && !(boolean) readField(activity, "busy"));
+            scenario.onActivity(activity -> assertFalse(hasText(root(activity), "Aarav Mehta")));
+            assertTrue("The mute went with the contact", engine.mutedChats().isEmpty());
+        }
+    }
+
+    @Test public void anOpenRowComesBackOpenWhenTheListIsDrawnAgainAndIsForgottenWhenItsChatIsNotListed() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            pullRow(scenario, device, "Aarav Mehta", -220);
+            awaitShift(scenario, "Aarav Mehta", -152);
+            // A sync draws the list again; the row has to come back as it was, without a gesture.
+            scenario.onActivity(activity -> {
+                View before = contactRow(activity, "Aarav Mehta");
+                invoke(activity, "renderContacts");
+                View after = contactRow(activity, "Aarav Mehta");
+                assertNotSame("The rows are new views", before, after);
+                assertEquals(-dpPx(152), after.getTranslationX(), 2f);
+                assertTrue(showing(activity, "Aarav Mehta", "Block user"));
+                assertEquals("Only that one", 0f, shiftOf(activity, "Maya Chen"), 0f);
+                assertSame(actionsOf(activity, "Aarav Mehta"), readField(rowGroup(activity), "open"));
+            });
+            // So does the filter for chats with something unread, which draws it again as well.
+            scenario.onActivity(activity -> ((View) readField(activity, "unreadFilter")).performClick());
+            scenario.onActivity(activity -> assertEquals(-dpPx(152), shiftOf(activity, "Aarav Mehta"), 2f));
+            scenario.onActivity(activity -> ((View) readField(activity, "unreadFilter")).performClick());
+            // A search that leaves the chat out forgets it: it is back at rest when it is listed again.
+            scenario.onActivity(activity -> ((EditText) readField(activity, "contactSearch")).setText("Maya"));
+            scenario.onActivity(activity -> ((EditText) readField(activity, "contactSearch")).setText(""));
+            scenario.onActivity(activity -> assertEquals(0f, shiftOf(activity, "Aarav Mehta"), 0.5f));
+            snapshot(scenario, "118-list-after-search");
+        }
+    }
+
+    @Test public void theFourActionsAreOfferedToAScreenReaderAsActionsOnTheRowAndAsButtons() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                for (String label : List.of("Mute", "Clear chat", "Remove contact", "Block user")) {
+                    View button = descendants(actionsOf(activity, "Aarav Mehta")).stream().filter(view -> label.equals(String.valueOf(view.getContentDescription()))).findFirst()
+                        .orElseThrow(() -> new AssertionError("No button described as " + label));
+                    assertTrue(label + " is a button", button.isClickable() && button.isFocusable());
+                }
+                View row = contactRow(activity, "Aarav Mehta");
+                Map<String, Integer> actions = new HashMap<>();
+                for (var action : row.createAccessibilityNodeInfo().getActionList()) if (action.getLabel() != null) actions.put(action.getLabel().toString(), action.getId());
+                assertTrue("The row offers them: " + actions.keySet(), actions.keySet().containsAll(List.of("Mute chat", "Clear chat", "Remove contact", "Block user")));
+                assertTrue(row.performAccessibilityAction(actions.get("Clear chat"), null));
+            });
+            awaitDialog(scenario);
+            scenario.onActivity(activity -> {
+                assertTrue(hasText(dialog(activity).getWindow().getDecorView(), "Clear chat?"));
+                dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+            });
+            awaitNoDialog(scenario);
+            scenario.onActivity(activity -> {
+                View row = contactRow(activity, "Aarav Mehta");
+                Map<String, Integer> actions = new HashMap<>();
+                for (var action : row.createAccessibilityNodeInfo().getActionList()) if (action.getLabel() != null) actions.put(action.getLabel().toString(), action.getId());
+                assertTrue(row.performAccessibilityAction(actions.get("Remove contact"), null));
+            });
+            awaitDialog(scenario);
+            scenario.onActivity(activity -> {
+                assertTrue(hasText(dialog(activity).getWindow().getDecorView(), "Remove contact?"));
+                dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+            });
+            awaitNoDialog(scenario);
+            assertTrue(engine.peers().stream().anyMatch(value -> value.userId().equals(peerId)));
+        }
+    }
+
+    @Test public void aMuteBelongsToAContactStaysOnThisPhoneAndGoesWithTheContact() throws Exception {
+        signedInFixture(); conversationsFixture();
+        assertTrue(engine.mutedChats().isEmpty());
+        assertThrows("Only a contact can be muted", SecurityException.class, () -> engine.mute(UUID.randomUUID(), true));
+        engine.mute(peerId, true);
+        engine.mute(peerId, true);
+        assertEquals("Muting twice is the same as once", Set.of(peerId), engine.mutedChats());
+        assertEquals("Kept in the encrypted store beside the contact", List.of("muted/" + peerId), vault.names("muted/"));
+        vault.transaction(() -> { vault.put("muted/not-a-chat", new byte[]{1}); return null; });
+        assertEquals("A stray name is not a chat", Set.of(peerId), engine.mutedChats());
+        engine.mute(peerId, false);
+        assertTrue(engine.mutedChats().isEmpty());
+        engine.mute(peerId, true);
+        engine.forget(peer);
+        assertTrue("Removing the contact removes the mute", engine.mutedChats().isEmpty());
+        assertEquals(List.of("muted/not-a-chat"), vault.names("muted/"));
+    }
+
+    private void syncPass(ActivityScenario<MainActivity> scenario) {
+        scenario.onActivity(activity -> {
+            var worker = (java.util.concurrent.ExecutorService) readField(activity, "work");
+            try { worker.submit(() -> invoke(activity, "syncOnce")).get(10, java.util.concurrent.TimeUnit.SECONDS); }
+            catch (Exception failure) { throw new AssertionError(failure); }
+        });
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+    }
+
+    @Test public void aSyncDoesNotDrawTheListAgainUnderAFingerAndTheListCatchesUpWhenItIsLifted() throws Exception {
+        signedInFixture(); conversationsFixture(); notificationTransport(reference -> null);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            Rect at = holderRect(scenario, "Aarav Mehta");
+            dragAndHold(at.left + dpPx(60), at.left + dpPx(60) + dpPx(40), at.centerY());
+            View[] before = new View[1];
+            scenario.onActivity(activity -> { before[0] = contactRow(activity, "Aarav Mehta"); assertTrue(rowGroup(activity).active()); });
+            vault.transaction(() -> { write("contact/" + UUID.randomUUID(), new ChatEngine.Peer(UUID.randomUUID(), UUID.randomUUID(), peer.identityKey(), "Zed Newcomer")); return null; });
+            syncPass(scenario);
+            scenario.onActivity(activity -> {
+                assertSame("The row under the finger was not replaced", before[0], contactRow(activity, "Aarav Mehta"));
+                assertFalse("and the list has not caught up yet", hasText(root(activity), "Zed Newcomer"));
+            });
+            touch(android.view.MotionEvent.ACTION_UP, at.left + dpPx(60) + dpPx(40), at.centerY());
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            syncPass(scenario);
+            scenario.onActivity(activity -> assertTrue("With the finger lifted the next pass draws it", hasText(root(activity), "Zed Newcomer")));
         }
     }
 
