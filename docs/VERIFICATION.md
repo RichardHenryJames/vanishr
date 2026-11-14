@@ -3,6 +3,49 @@
 Evidence refreshed on Windows, 2026-11-14 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
+## Release 0.6.9 / The new logo (Play bundle only, 2026-11-14)
+
+Commit `d19b118`. Version 0.6.9 / code 50 is the chat-list swipe actions of the 0.6.8 rebuild plus the owner's new logo,
+`Overlapping Green Chat Bubbles.png` (a flat `#028351` square with a white and a mint chat bubble). It replaces **both** 0.6.8 builds
+for Play. **The website and the direct-download APK were not touched:** they still serve 0.6.8 / code 49 (APK SHA-256
+`4170b45c56f265237acd90803d29bf150053238a2bd208c0afa1bd349bc8a6e6`), and the website's social images and screenshots still show the old logo
+until a direct 0.6.9 is cut and published.
+
+- **Changed.** `scripts/prepare-brand-assets.ps1` is rebuilt around the new picture and is the one place that writes the logo files: the in-app
+  badge (`vanishr_logo.png`, 256 px, rounded), the adaptive launcher foreground (the whole picture on the `#028351` fill, scaled so the bubbles
+  sit inside the 66 dp safe circle), the themed monochrome layer and the status-bar icon (both pure white, alpha only), and the website's
+  `icon.png`, `apple-touch-icon.png` and `favicon.ico`. `launcher_background` in `brand.xml` is `#028351`, the picture's own colour, so the
+  fill and the picture meet without a seam. `-Verify` (run by `package-apk.ps1` and `prepare-download.ps1`) re-derives the files and the colour
+  and refuses a mismatch; `-PlayIcon` exports the 512 px listing icon (`.tools\play-store-0.6.9\play-icon-512.png`, outside git). The source
+  allowlist of `prepare-download.ps1` names the new picture. The version is raised in `build.gradle` only. No code, relay or protocol change.
+- **A test found a mistake of mine.** `launcherAndNotificationBrandingUseTheSharedLogo` failed on the first regeneration (`expected 255 but was
+  242`): resampling left a few edge pixels of the status-bar icon slightly grey, and the test requires every visible pixel to be white. The
+  script now forces RGB to white on both monochrome files (`Set-White`); a scan finds none that are not, and the test passes. A check of
+  the verifier itself: the colour in `brand.xml` changed by one step makes `-Verify` stop with a message, and the restored file passes.
+- **Checks run.** Eight emulator tests on the final assets (the branding test, the compact home and the login screen, which both show the
+  logo, and the pull-open, mute and tap-on-an-open-row tests): all pass. A **full emulator suite was not rerun** for this version, because
+  nothing but images and the version number changed after the 324-test run of the swipe actions (1 failure, 2 skips, as there). The
+  screenshots of the login screen and the home screen were read: the badge is sharp beside the name at both sizes. A screenshot of the
+  emulator's app drawer shows the adaptive icon under the launcher's circle mask without cutting the bubbles. A contact sheet of the
+  launcher icon under circle, rounded-square and square masks, the themed layer, the status-bar silhouette and the badges was also read.
+  `sign-admin-identity.ps1 -Check -AppRelease` and `sign-ota-settings.ps1 -Check -AppRelease` pass (the settings floor needed no change).
+- **The gate.** `verify.ps1 -Android` passed: client-core **35** tests, relay **114** (2 skipped), the Android unit tests, debug lint
+  **0 errors / 18 warnings** (as before), the script suites, and the checks of the committed settings and certificate files.
+  **The signed settings file expires 2026-12-01 06:28:06Z (17 days).**
+- **Google Play bundle** (`.tools\play-store-0.6.9\vanishr-0.6.9.aab`, built from the clean tree at `d19b118` by
+  `package-apk.ps1 -Bundle -PlayStore`, **not uploaded anywhere**): **45,976,974 bytes**, SHA-256
+  `168b3bea36f0e26c2f09381399aa651d13e21ab9d1967969ef1612f5bee9a2a5`; bundletool 1.18.3 `validate` passed; 0.6.9 / code 50, min API 28,
+  target API 36; 14 permissions, identical to the 0.6.8 rebuild's (compared); 64-bit native libraries 16 KiB aligned; bundled notices match
+  the source; no external updater; the Firebase client configuration present and matching; the settings key file identical to the committed
+  one; JAR signature verified with the same signer (SHA-256 `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`); an
+  exhaustive by-value scan of the decompressed bundle (894 entries, eight private values): no findings. The four logo images in the bundle were
+  decoded and compared with the committed files: pixel for pixel equal, except that the themed layer differs only in the colour of fully
+  transparent pixels (its alpha is equal and every visible pixel is white).
+- **What this does not show.** A physical phone; the launcher icon on a real home screen or with the themed-icon setting switched on (the
+  themed layer was judged from the contact sheet only); the Play listing, where the owner has to upload the 512 px icon by hand; whether
+  Google Play accepts the bundle; an install from Play; and whether the logo suits the owner as it looks on a phone. The old
+  `Vanishr Icon.png` stays in the repository, unused.
+
 ## Release 0.6.8 / The message menu, quoted replies, reactions on the message, swipes on own messages and a steadier header (2026-11-13)
 
 Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#the-message-menu-quoted-replies-reactions-on-the-message-and-a-steadier-header-068).
