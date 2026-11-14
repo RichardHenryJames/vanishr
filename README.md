@@ -14,11 +14,11 @@ the latest Git version, determines which release users can download and discover
 
 Release **0.6.9/code 50** gives Vanishr its new logo (two overlapping chat bubbles, a white one with three dots over a pale green
 one, on green) in the launcher icon, the themed and status-bar icons and the app's header, and it carries the chat-list swipe
-actions described next, so that it replaces both builds of 0.6.8. **It is a Google Play bundle only so far:** the website and the
-direct-download APK are still 0.6.8 until a direct release is published (the website's icon files in the repository already have
-the new logo and go out with that release). No relay change, no new permission and no change to any security rule; the logo files
+actions described next, so that it replaces both builds of 0.6.8. It is cut as a direct-download APK (the website's icon,
+favicon, Apple icon and social image have the new logo too) and as a Google Play bundle that the owner uploads by hand together
+with the 512 px listing icon. No relay change, no new permission and no change to any security rule; the logo files
 are made from one picture by `scripts/prepare-brand-assets.ps1`. Emulator tests only: no physical phone, no Google Play install.
-See the [verification](docs/VERIFICATION.md#release-069--the-new-logo-play-bundle-only-2026-11-14).
+See the [verification](docs/VERIFICATION.md#release-069--the-new-logo-2026-11-14).
 
 Release **0.6.8/code 49** makes the chat behave like the messengers people already know, and carries the identity of the
 admin's current phone. Pressing and holding a message dims the chat, keeps the message where it was, floats the six reactions above

@@ -239,9 +239,10 @@ App icon - required:
   512 x 512 pixels, 32-bit PNG, maximum 1,024 KB. [S03]
   Use the approved Vanishr logo, not a new unrelated brand.
   Existing download\icon.png is only 192 x 192: do NOT upload it as the
-  finished Play icon. Vanishr Icon.png is a 1374 x 1145 source image, not
-  itself the correctly sized square Play asset.
-  OWNER ACTION: export the approved logo as a proper 512 x 512 PNG.
+  finished Play icon. The logo source (since 0.6.9, "Overlapping Green Chat
+  Bubbles.png") is 1254 x 1254; scripts\prepare-brand-assets.ps1 -PlayIcon <path>
+  exports the 512 x 512 icon from it.
+  OWNER ACTION: upload that 512 x 512 PNG in the Play Console.
   Suggested icon alt text, if requested: Vanishr app logo.
 
 Feature graphic - required for the standard listing:

@@ -553,8 +553,8 @@ old APK was run).
 
 **No relay change, no new permission, no new network call.** This was added to the Google Play bundle of 0.6.8 after the direct-download
 APK of 0.6.8 had been published, so **the two builds of 0.6.8 differ**: the website's APK has the earlier swipe (pull a chat to the left
-past a mark and let go to be asked about removing the contact) and the bundle has what follows. Release 0.6.9 carries the new one in a
-Play bundle, and the next direct release will too.
+past a mark and let go to be asked about removing the contact) and the bundle has what follows. Release 0.6.9 carries the new one in
+both the bundle and the direct-download APK.
 
 A chat in the list can be pulled sideways (`SwipeActions`): to the right it shows **Mute** and **Clear chat**, to the left **Remove
 contact** and **Block user**. The row then stays where it was let go, and nothing is asked or done, until one of the buttons is touched.

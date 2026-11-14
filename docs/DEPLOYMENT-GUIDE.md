@@ -133,8 +133,9 @@ first, including the absent Google/Firebase client configuration.
    it also writes into `brand.xml`) and the themed and status-bar icons (silhouettes). To change the logo, replace the picture and
    run the script and commit what it writes; `package-apk.ps1` and `prepare-download.ps1` run it with `-Verify` and stop on a stale
    file. `-PlayIcon <path>` also writes the 512 x 512 icon that the Google Play listing asks for (upload it in the Play Console; it
-   is not part of the bundle). The website's social image and screenshots are made by `prepare-site-assets.ps1` and still show the
-   old logo until that is run and the site is published.
+   is not part of the bundle). The website's social image is made by `prepare-site-assets.ps1 -BrandingOnly` from the generated
+   `download/icon.png`: run it after the script above and before cutting the release. (The screenshots on the site do not show the
+   logo; they are only redrawn by `prepare-site-assets.ps1` without `-BrandingOnly`.)
 
 ### 4.2 Verify and, only if needed, update the relay first
 

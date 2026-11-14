@@ -3,13 +3,12 @@
 Evidence refreshed on Windows, 2026-11-14 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
-## Release 0.6.9 / The new logo (Play bundle only, 2026-11-14)
+## Release 0.6.9 / The new logo (2026-11-14)
 
 Commit `d19b118`. Version 0.6.9 / code 50 is the chat-list swipe actions of the 0.6.8 rebuild plus the owner's new logo,
-`Overlapping Green Chat Bubbles.png` (a flat `#028351` square with a white and a mint chat bubble). It replaces **both** 0.6.8 builds
-for Play. **The website and the direct-download APK were not touched:** they still serve 0.6.8 / code 49 (APK SHA-256
-`4170b45c56f265237acd90803d29bf150053238a2bd208c0afa1bd349bc8a6e6`), and the website's social images and screenshots still show the old logo
-until a direct 0.6.9 is cut and published.
+`Overlapping Green Chat Bubbles.png` (a flat `#028351` square with a white and a mint chat bubble). It replaces **both** 0.6.8 builds.
+This entry first records the Google Play bundle, which was built first and **is not uploaded anywhere** (the owner uploads it), and then,
+under "Direct release and website", the direct-download APK and the website.
 
 - **Changed.** `scripts/prepare-brand-assets.ps1` is rebuilt around the new picture and is the one place that writes the logo files: the in-app
   badge (`vanishr_logo.png`, 256 px, rounded), the adaptive launcher foreground (the whole picture on the `#028351` fill, scaled so the bubbles
