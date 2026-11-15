@@ -5,7 +5,7 @@ not a production security assessment or independent audit.
 
 ## Release 0.7.0 / Photos in the chat, albums, emoji and typed faces (Play bundle only, 2026-11-15)
 
-Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#photos-in-the-chat-albums-emoji-and-typed-faces-070). Commit: the one that holds this record. The owner asked
+Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#photos-in-the-chat-albums-emoji-and-typed-faces-070). Commit `f26d0ee`. The owner asked
 for what other messengers do with photos and emoji: a photo drawn in the chat as a small picture that opens when touched; a view-once photo
 not drawn, only opened when touched; several photos sent at once as a square collage with "+3" on the fourth when there are six; several
 view-once photos as rows with no picture; an emoji panel; and faces typed with keys (":D", ":)", "<3") turned into emoji, adding "what you
@@ -76,7 +76,15 @@ still 0.6.9** (see the entry below); a direct 0.7.0 has not been cut.
   suites (21 release-configuration, 25 over-the-air settings, 15 admin identity tests) and the checks of the committed settings and
   certificate files. The gate ran before those lint-only edits; lint and the 120 Android unit tests were run again on the final code.
   **The signed settings file expires 2026-12-01 (15.9 days left at the time of the gate; see the entry below).**
-- **Google Play bundle.** Built from the clean tree after this commit; its size, hash and checks are recorded in the commit that follows.
+- **Google Play bundle** (`.tools\play-store-0.7.0\vanishr-0.7.0.aab`, built from the clean tree at `f26d0ee` by
+  `package-apk.ps1 -Bundle -PlayStore`, **not uploaded anywhere**): **46,024,818 bytes**, SHA-256
+  `0cdd64687521bb1bccbb57a86b95ecbbf0b20959f524b43e0e94e7180b147347`; bundletool 1.18.3 `validate` passed; 0.7.0 / code 52, min API 28,
+  target API 36; 14 permissions, identical to the 0.6.10 bundle's (compared); 64-bit native libraries 16 KiB aligned; bundled notices match
+  the source; no external updater; the Firebase client configuration present and matching; the settings key file identical to the committed
+  one; JAR signature verified with the same signer (SHA-256 `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`); an
+  exhaustive by-value scan of the decompressed bundle (897 entries, eight private values): no findings; the new strings ("Choose images",
+  "photos go at once.", "Not sent: ", "Send photo" and others) are in its code, and its R8 mapping keeps `ChatEngine$PhotoInfo`,
+  `ChatEnvelope$Album` and `Albums$Row` under their own names with no renamed field.
 - **What this does not show.** A physical phone or a real finger (the touches are injected); a screen reader in use; keyboards other than the
   emulator's, and faces typed through a keyboard that works on text it is still composing; the emoji drawn by another phone's fonts; an
   Android version other than the emulator's (the hand-over between keyboard and panel may time differently); a release (R8) build run on
