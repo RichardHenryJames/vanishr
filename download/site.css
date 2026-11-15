@@ -67,9 +67,10 @@ p { margin-bottom: 18px; }
 .feature a { display: inline-flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 750; text-decoration: none; min-height: 40px; }
 .feature a svg { width: 15px; height: 15px; }
 .product-band { padding-block: 76px 40px; background: repeating-linear-gradient(90deg, transparent, transparent 95px, #dfe6e850 96px), #eef2f6; }
-.screen-gallery { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 62px; margin: 36px 0 28px; }
+.screen-gallery { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 56px 48px; margin: 36px 0 28px; }
 .screen-gallery figure { margin: 0; min-width: 0; }
-.screen-gallery img { display: block; width: 100%; aspect-ratio: 1 / 2; object-fit: contain; object-position: top; border: 1px solid #c5d2d7; border-radius: 6px; }
+.screen-gallery img { display: block; width: 100%; aspect-ratio: 9 / 20; object-fit: contain; object-position: top; border: 1px solid #c5d2d7; border-radius: 10px; background: var(--white); }
+.screen-gallery:focus-visible { outline: 3px solid var(--blue); outline-offset: 6px; }
 figcaption { padding-top: 20px; font-size: 12px; color: var(--muted); }
 figcaption strong, figcaption span { display: block; }
 figcaption strong { color: var(--ink); font-size: 14px; margin-bottom: 6px; }
@@ -143,7 +144,7 @@ code { overflow-wrap: anywhere; font: 12px/1.8 Consolas, monospace; }
 @media (max-width: 900px) {
 	.desktop-nav { display: none; }
 	.mobile-nav { display: block; }
-	.screen-gallery { gap: 26px; }
+	.screen-gallery { gap: 44px 26px; }
 	.security-summary, .faq { gap: 40px; }
 	.development-inner { flex-wrap: wrap; }
 	.development-inner a { margin-left: 52px; }
@@ -168,7 +169,8 @@ code { overflow-wrap: anywhere; font: 12px/1.8 Consolas, monospace; }
 	.feature-grid { grid-template-columns: 1fr; gap: 28px; margin-top: 26px; }
 	.feature > svg { margin-bottom: 16px; }
 	.product-band { padding-block: 52px 30px; }
-	.screen-gallery { grid-template-columns: 1fr; gap: 38px; max-width: 300px; margin-inline: auto; }
+	.screen-gallery { display: flex; gap: 18px; margin: 26px -18px 16px; padding: 0 18px 16px; overflow-x: auto; scroll-snap-type: x mandatory; scroll-padding-inline: 18px; overscroll-behavior-x: contain; }
+	.screen-gallery figure { flex: 0 0 min(74%, 290px); scroll-snap-align: start; }
 	.security-summary, .faq { grid-template-columns: 1fr; gap: 28px; }
 	.development-inner { gap: 16px; }
 	.development-inner > div { flex-basis: calc(100% - 48px); }

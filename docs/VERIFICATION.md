@@ -3,6 +3,47 @@
 Evidence refreshed on Windows, 2026-11-15 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
+## Website only / New screenshots on the home page and for the store listing (2026-11-15)
+
+The owner asked for the screenshots on the home page to be updated, and for current phone screenshots for the Google Play listing, to be put in a
+phone frame and uploaded by the owner. **No app, relay or APK change:** the 0.7.0 / code 52 download, its update feed and the Play bundle are as
+they were. Procedure and sizes: [PLAY-STORE.md](PLAY-STORE.md#listing-screenshots-070).
+
+- **Changed.** `ScreenFlowTest#storeListingScreenshots` (skipped unless given `storeShots=<folder>`) and
+  [make-store-screenshots.ps1](../scripts/make-store-screenshots.ps1) make real screenshots of the QA build on the dedicated emulator, from
+  made-up people, messages and pictures drawn by the test, with `FLAG_SECURE` taken off the windows of the test's own process only (the shipped
+  app is untouched). [prepare-site-assets.ps1](../scripts/prepare-site-assets.ps1) now scales the 1080 x 2400 captures to 540 x 1200
+  (`app-chats`, `app-chat`, `app-disappearing`, `app-photos`, `app-group`, `app-verify`, 24-bit PNG) and redraws the three boards with round-cornered
+  screens that run off the bottom edge, so that they can be read; the three 0.3.3 drawings (`conversations.png`, `chat.png`, `profile.png`) are removed
+  and the renderer's file list names the new ones. The home page shows six screens (three columns; a strip to swipe on a phone), with new captions
+  and alt text, and its structured data lists the six images.
+- **A wrong claim corrected on four pages.** The home page, `/android/`, `/privacy/` and `/security/` said that a message can be sent as "view once, one
+  hour, six hours or 24 hours". Since 0.6.5 the app offers **view once, 12 hours and 24 hours** only. All four now say so. (Other mentions of "one hour"
+  are the lifetime of access tokens and a note about an older release; they are right and were left.)
+- **What the capture runs showed.** Two passes of eight screens were looked at one by one. The first showed: a "3G" and an empty signal icon in the status
+  bar (the emulator's demo-mode mobile icon ignores the data type that is asked for in this Android version, so the icon is left out and Wi-Fi and
+  battery are shown); the plate emoji, a faint grey on a light bubble, replaced by one that can be seen; the oldest bubble cut off at the top of two chats
+  (the chats are shorter now); and the connection dot grey in the first picture, because the first background sync fails just as it is taken (the capture waits
+  for that and sets it again). On a 1080 x 1920 screen fewer messages fit, so `-Keep` makes only the newest few of a chat. Run without
+  `storeShots` and with the usual phone lock, the test is **skipped** (status -4). Run without a phone lock it fails, as every test of that class does, because the
+  app refuses to open its storage without one. The script was then run end to end once more (8 files, the temporary lock cleared, the screen size
+  restored). All 16 Play files are 24-bit RGB PNGs (colour type 2, checked in the file header), 1080 x 1920 or 1080 x 2400, between 98 and 304 KB.
+- **The page, looked at.** The built site was served locally and read in a browser at 1280, about 910 and 390 pixels wide: the hero board with the new screens, the
+  gallery of six (three columns) and, at 390 pixels, the strip with the next screen showing at the edge and scrolling to it (the page itself did not
+  scroll sideways). The live page was looked at again after publication (its hero).
+- **Published.** Website-only stage `.tools\vercel-website-0.7.0` (36 files, 61,555,491 bytes; only the website files differ from the audited release:
+  pages, CSS, the three boards, the sitemap and `vercel.json`, whose script hashes follow the changed structured data), linked with the existing project's
+  `project.json` only, deployed to production as `dpl_AjxxHNKaRpSybgm7FAp78EdRgSXq`, and the canonical alias moved to it with `vercel alias set` (the deployment alone
+  only moves the team URL). [Anonymous verification](DEPLOYMENT-GUIDE.md#7-verify-the-actual-public-release-without-login) of the canonical origin, recorded in
+  `.tools\public-website-verification-0.7.0.json`: 35 served files byte for byte the website inventory; the APK, 44,700,450 bytes, `ff4e0128…`, with the release
+  certificate, and the feed (0.7.0 / 52, `no-store`) unchanged; the security headers; 22 private or missing paths answer 404, and so do the three old pictures; the six new
+  pictures are served as PNGs; the four pages no longer offer one or six hours; the signed settings file (sequence 1) and the admin certificate (sequence 3) served as
+  committed, with signatures that verify under the keys in the app.
+- **What this does not show.** The screens are from an Android 16 emulator, not a physical phone, and the photos in them are drawings. The pages were read in a
+  desktop browser at three widths, not on a phone's browser. The Play listing itself was not changed and the screenshots are not uploaded anywhere (the owner does that).
+  A picture that is put in a phone frame or redrawn must be checked again against the app. **The signed settings file still expires on 2026-12-01
+  (15.6 days at the check) and needs renewing before then.**
+
 ## Release 0.7.0 / Photos in the chat, albums, emoji and typed faces (2026-11-15)
 
 Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#photos-in-the-chat-albums-emoji-and-typed-faces-070). Commit `f26d0ee`. The owner asked

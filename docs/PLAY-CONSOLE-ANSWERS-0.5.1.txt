@@ -262,10 +262,11 @@ Phone screenshots:
     2. Direct conversation with expiry controls
     3. Private group
     4. Profile/account deletion or safety controls
-  Existing download\assets\conversations.png is 480 x 1067 with alpha:
-  its aspect ratio exceeds 2:1, and it is not a ready Play screenshot.
-  Existing chat.png and profile.png are 480 x 960 with alpha:
-  export suitable opaque images and verify current UI before using them.
+  Since 0.7.0 there are ready screenshots, 1080 x 1920 and 1080 x 2400, 24-bit
+  PNG without alpha, eight screens made from synthetic data: see
+  docs\PLAY-STORE.md, "Listing screenshots". The old 0.3.3 pictures
+  download\assets\conversations.png, chat.png and profile.png (with alpha, and
+  not Play-sized) are no longer on the website.
   Do not upload real chats, usernames, tokens, credentials or personal photos.
   Do not disable the shipping app's privacy protections just for marketing.
 

@@ -134,8 +134,9 @@ first, including the absent Google/Firebase client configuration.
    run the script and commit what it writes; `package-apk.ps1` and `prepare-download.ps1` run it with `-Verify` and stop on a stale
    file. `-PlayIcon <path>` also writes the 512 x 512 icon that the Google Play listing asks for (upload it in the Play Console; it
    is not part of the bundle). The website's social image is made by `prepare-site-assets.ps1 -BrandingOnly` from the generated
-   `download/icon.png`: run it after the script above and before cutting the release. (The screenshots on the site do not show the
-   logo; they are only redrawn by `prepare-site-assets.ps1` without `-BrandingOnly`.)
+   `download/icon.png`: run it after the script above and before cutting the release. (The screenshots on the site are of the app itself, and the
+   chat list shows the logo in its header, so after a change of logo they are made again with `make-store-screenshots.ps1` and redrawn by
+   `prepare-site-assets.ps1` without `-BrandingOnly`.)
 
 ### 4.2 Verify and, only if needed, update the relay first
 
@@ -528,7 +529,10 @@ not a substitute for the Vercel upload above.
 Use this when the APK is unchanged. Do not increase the Android version, build
 an APK/AAB, redeploy Azure or advertise a new app update just for a web edit.
 
-1. Edit the relevant source files under [download](../download/).
+1. Edit the relevant source files under [download](../download/). To change the pictures on the home page, make fresh screenshots with
+   [make-store-screenshots.ps1](../scripts/make-store-screenshots.ps1) and then run
+   [prepare-site-assets.ps1](../scripts/prepare-site-assets.ps1) (see [PLAY-STORE.md](PLAY-STORE.md#listing-screenshots-070)). A file added to
+   `download/assets` must also be named in the list of assets in [render-website.ps1](../scripts/render-website.ps1), or the stage is refused.
 2. Read the production update feed. Use the **currently published and locally
    verified** app version, not a newer unpublished build:
 

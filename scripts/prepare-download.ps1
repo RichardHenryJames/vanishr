@@ -79,7 +79,7 @@ $sourcePaths = @('LICENSE', 'NOTICE.md', 'README.md', 'pom.xml', '.gitignore', '
     'infra/Dockerfile', 'infra/compose.yml', 'infra/compose.low-memory.yml', 'infra/pg_hba.conf', 'infra/postgres-entrypoint.sh',
     'scripts/build-android.ps1', 'scripts/new-local-config.ps1', 'scripts/package-apk.ps1', 'scripts/start-local.ps1', 'scripts/test-android.ps1',
     'scripts/test-release.ps1', 'scripts/test-google-config.ps1', 'scripts/prepare-ui-assets.ps1', 'scripts/verify.ps1', 'scripts/read-google-config.ps1', 'scripts/prepare-download.ps1',
-    'scripts/render-website.ps1', 'scripts/prepare-website.ps1', 'scripts/prepare-site-assets.ps1',
+    'scripts/render-website.ps1', 'scripts/prepare-website.ps1', 'scripts/prepare-site-assets.ps1', 'scripts/make-store-screenshots.ps1',
     'scripts/google-certificates.json', 'scripts/new-ota-key.ps1', 'scripts/sign-ota-settings.ps1', 'scripts/ota-settings-rules.ps1', 'scripts/test-ota-settings.ps1',
     'scripts/sign-admin-identity.ps1', 'scripts/admin-identity-rules.ps1', 'scripts/test-admin-identity.ps1',
     'ota/settings.source.json', 'ota/rules-cases.json',

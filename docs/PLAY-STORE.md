@@ -389,6 +389,52 @@ versions/configurations distributed through Play, not just one test run.
   have the account holder review every declaration. No upload, publish, commit,
   deployment or live-account action is part of this website task.
 
+## Listing screenshots (0.7.0)
+
+The phone screenshots for the listing, and the pictures on the home page of the website, are **real screens of the app**, made by a
+test, not drawn by hand. They hold made-up people and messages; the photos in them are pictures that the test draws itself (a sunset,
+the sea, a forest, a night sky), not anybody's photographs. Nothing of a real account is on them.
+
+- **How they are made.** `ScreenFlowTest#storeListingScreenshots` (in `androidTest`) is skipped unless the instrumentation is given
+  `storeShots=<folder name>`. On the dedicated `Vanishr_Security_Test` emulator it creates seven contacts, a group of four, messages
+  with a quoted reply, reactions, a view-once photo and an album of six photos, and one person who is not yet a contact, and then takes
+  screenshots of the running QA build with `UiAutomation.takeScreenshot()`, status bar included.
+  [make-store-screenshots.ps1](../scripts/make-store-screenshots.ps1) runs it: it only accepts that emulator, gives it a temporary
+  screen lock that it clears again, sets the status bar to a clock, full Wi-Fi and battery and no notification icons (the emulator draws its
+  mobile connection as "3G", so that icon is left out), and puts the screen size back afterwards.
+- **The privacy protection stays on in the app that is shipped.** The app keeps every window of its own out of screenshots
+  (`FLAG_SECURE`), so a screenshot taken from outside is black. The test takes that flag off the windows of **its own process** in the QA
+  build, for these captures only. The release app, the code of the app and its protections are not touched; this follows the rule not to
+  disable the shipping app's privacy protections for marketing.
+- **Two sizes.** The emulator's own screen is 1080 x 2400 (20:9, the shape of a current phone). Google Play does not take that:
+  the long side of a screenshot may be at most twice the short side, and it recommends 1080 x 1920 (9:16; at least four screenshots
+  of at least 1080 pixels are needed to be considered for featuring). So the same screens are made twice: at 1080 x 2400 (these are for putting into
+  a phone frame, and the website images are made from them) and, with `wm size 1080x1920`, at 1080 x 1920 (these can be uploaded as they are). A shorter screen
+  holds fewer messages, so the second pass makes only the newest few of a chat (`-Keep aarav:3,maya:3,noah:2,group:5`) instead of
+  showing a bubble cut off at the top.
+- **The files** (session artifacts, not committed): `.tools\play-store-0.7.0\screenshots\upload-1080x1920\` and
+  `...\frame-ready-1080x2400\`, eight PNGs each, 24-bit RGB without alpha (colour type 2, checked), each well under 8 MB, named in the
+  order to upload them, with the suggested alt text (140 characters at most, which the Console accepts) in `alt-text.txt`:
+
+  | File | Screen |
+  | --- | --- |
+  | `01-private-chat.png` | A private chat: a photo, reactions, each message with its deadline (the 2400 version also shows a quoted reply) |
+  | `02-disappearing-messages.png` | View once, 12 hours or 24 hours |
+  | `03-photos-and-albums.png` | An album of six photos as four tiles with +3 (the 2400 version also shows a view-once photo) |
+  | `04-message-actions.png` | The reaction bar and the menu on a pressed message |
+  | `05-emoji.png` | The emoji panel and emoji sent on their own, drawn large |
+  | `06-group-chat.png` | An invite-only group, the sender named on each incoming message |
+  | `07-verify-contact.png` | Comparing the safety number before adding a contact |
+  | `08-chat-list.png` | The chat list: a group, unread counts and a muted chat |
+
+- **Before a picture is changed.** Google asks that screenshots show the app as it is and advises against device frames. A picture
+  that is put in a frame, or redrawn, must be looked at again: no text, button or screen of the app may have been changed.
+  The website uses the same screens in `download/assets/app-*.png`: `.\scripts\prepare-site-assets.ps1` scales the 1080 x 2400 captures to
+  540 x 1200 and draws the boards (`app-overview.jpg`, `app-overview-mobile.jpg`, `social.jpg`).
+- **What this does not show.** The screens are from an Android 16 emulator (Pixel 7 profile), not from a physical phone, and they show
+  made-up data. They are not evidence that the app was reviewed by Google, and the listing's feature graphic (1024 x 500) and the 512 px icon are
+  separate files that this does not make.
+
 ## Local website validation and release boundary
 
 Use a **new session-artifact stage**, never overwrite a prior audited release.

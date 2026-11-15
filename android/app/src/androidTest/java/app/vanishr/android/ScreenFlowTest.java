@@ -12129,4 +12129,387 @@ public class ScreenFlowTest {
         return (View) ((View) column.getParent()).getParent();
     }
 
+    // ---- Screenshots for the store listing and the website (made only when asked for) ----
+    //
+    // The app keeps every one of its windows out of screenshots (FLAG_SECURE), so a screenshot of it taken from outside is black. This test is
+    // skipped unless the instrumentation is given storeShots=<folder name>. Then it sets up made-up people and messages on the dedicated test
+    // emulator, takes the flag off the windows of its own process (the app that is shipped is not touched), and takes real screenshots of what
+    // is drawn, status bar and all. Nothing of a real account is on the screen. The photos are pictures drawn here, not anybody's photographs.
+
+    private static boolean storeShotsAsked() { return InstrumentationRegistry.getArguments().getString("storeShots") != null; }
+
+    private interface StoreStep { void run() throws Exception; }
+
+    // A shorter screen cannot hold a whole conversation without cutting a bubble at the top, so storeKeep=aarav:3,maya:4 makes only the
+    // newest messages of the chats named; the others are made in full.
+    private static int storeKeep(String chat, int total) {
+        for (String part : InstrumentationRegistry.getArguments().getString("storeKeep", "").split(",")) {
+            String[] pair = part.split(":");
+            if (pair.length == 2 && pair[0].trim().equals(chat)) return Math.max(1, Math.min(total, Integer.parseInt(pair[1].trim())));
+        }
+        return total;
+    }
+
+    private static void storeNewest(String chat, List<StoreStep> steps) throws Exception {
+        for (StoreStep step : steps.subList(steps.size() - storeKeep(chat, steps.size()), steps.size())) step.run();
+    }
+
+    private File storeShotFolder() {
+        File folder = new File(context.getExternalFilesDir(null), "store-shots/" + InstrumentationRegistry.getArguments().getString("storeShots"));
+        assertTrue(folder.isDirectory() || folder.mkdirs());
+        return folder;
+    }
+
+    private void storeOnline(ActivityScenario<MainActivity> scenario) {
+        // The phone was not able to reach a relay, which would grey the dot beside the name; as on a phone that is connected, it is green.
+        scenario.onActivity(activity -> {
+            engine.online = true;
+            if (readField(activity, "homeConnection") != null) invoke(activity, "homeStatus");
+        });
+    }
+
+    private void storeShot(ActivityScenario<MainActivity> scenario, String name) throws Exception {
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        scenario.onActivity(activity -> {
+            activity.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
+            SecureSheet sheet = dialog(activity);
+            if (sheet != null && sheet.isShowing()) sheet.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
+            MessageActions actions = overlay(activity);
+            if (actions != null && actions.isShowing()) actions.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        });
+        storeOnline(scenario);
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        android.os.SystemClock.sleep(1_000);
+        storeOnline(scenario);
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        android.os.SystemClock.sleep(250);
+        Bitmap screen = InstrumentationRegistry.getInstrumentation().getUiAutomation().takeScreenshot();
+        assertNotNull("The screen could not be captured: " + name, screen);
+        try (FileOutputStream output = new FileOutputStream(new File(storeShotFolder(), name + ".png"))) { assertTrue(screen.compress(Bitmap.CompressFormat.PNG, 100, output)); }
+        finally { screen.recycle(); }
+    }
+
+    // A person's colour in the list follows from the hash of their id, so ids are looked for until the colour is the one wanted.
+    private static UUID storeId(int colour, int serial) {
+        for (long low = 0; ; low++) {
+            UUID candidate = new UUID(0x7A1E0000L + serial, low);
+            if (Math.floorMod(candidate.hashCode(), 4) == colour) return candidate;
+        }
+    }
+
+    private ChatEngine.Peer storeContact(String name, int colour, int serial) throws Exception {
+        UUID id = storeId(colour, serial);
+        SignalClient remote = new SignalClient(id, new DeviceSecurityTest.MemoryVault());
+        ChatEngine.Peer contact = new ChatEngine.Peer(id, UUID.randomUUID(), Base64.getEncoder().encodeToString(remote.publicIdentity()), name);
+        vault.transaction(() -> {
+            new SignalClient(userId, vault).verifyPeer(id, remote.publicIdentity());
+            write("contact/" + id, contact);
+            return null;
+        });
+        return contact;
+    }
+
+    private ChatEngine.Entry storeMessage(ChatEngine.Peer who, boolean outgoing, String text, ChatEnvelope.Expiry expiry, String state, long minutesAgo,
+                                          ChatEnvelope.Reference reference, String mine, String theirs) throws Exception {
+        return storeMessage(who, outgoing, text, null, 0, 0, null, expiry, state, minutesAgo * 60, reference, mine, theirs);
+    }
+
+    private ChatEngine.Entry storeMessage(ChatEngine.Peer who, boolean outgoing, String text, byte[] image, int width, int height, ChatEnvelope.Album album,
+                                          ChatEnvelope.Expiry expiry, String state, long secondsAgo, ChatEnvelope.Reference reference,
+                                          String mine, String theirs) throws Exception {
+        UUID id = UUID.randomUUID();
+        long created = System.currentTimeMillis() - secondsAgo * 1_000, deadline = created + expiry.milliseconds;
+        createFixtureKey(AndroidVault.contentAlias(deadline, id));
+        ChatEnvelope.Attachment attachment = image == null ? null
+            : new ChatEnvelope.Attachment(UUID.randomUUID(), new byte[32], new byte[12], "image/jpeg", width, height, album);
+        ChatEnvelope envelope = new ChatEnvelope(1, id, outgoing ? userId : who.userId(), outgoing ? deviceId : who.deviceId(),
+            outgoing ? who.userId() : userId, outgoing ? who.deviceId() : deviceId, created, deadline, expiry, text, attachment, null, reference, null);
+        ChatEngine.Entry entry = new ChatEngine.Entry(id, who.userId(), deadline, expiry, outgoing, image != null, state);
+        if (attachment != null) entry = entry.withPhoto(ChatEngine.PhotoInfo.of(attachment, reference));
+        if (mine != null) entry = entry.withReaction(true, mine);
+        if (theirs != null) entry = entry.withReaction(false, theirs);
+        ChatEngine.Entry stored = entry;
+        vault.transaction(() -> {
+            write("entry/" + id, stored);
+            byte[] content = RelayApi.JSON.toJson(new ChatEngine.Content(envelope, image)).getBytes(StandardCharsets.UTF_8);
+            try { vault.put("body/" + id, vault.seal(AndroidVault.contentAlias(deadline, id), content)); }
+            finally { Arrays.fill(content, (byte) 0); }
+            return null;
+        });
+        return stored;
+    }
+
+    private List<ChatEngine.Entry> storeAlbum(ChatEngine.Peer who, boolean outgoing, int count, int firstScene, ChatEnvelope.Expiry expiry, String state, long minutesAgo) throws Exception {
+        UUID album = UUID.randomUUID();
+        List<ChatEngine.Entry> members = new ArrayList<>();
+        for (int index = 0; index < count; index++)
+            members.add(storeMessage(who, outgoing, null, scenic(firstScene + index, 1200, 900), 1200, 900, new ChatEnvelope.Album(album, index, count),
+                expiry, state, minutesAgo * 60, null, null, null));
+        return members;
+    }
+
+    private static final String THUMB = "\uD83D\uDC4D";
+
+    // Pictures that are drawn here, so that the screens show photographs without being anybody's: a sunset, the sea, a forest, a night sky,
+    // dunes and a city at dusk.
+    private static byte[] scenic(int scene, int width, int height) throws Exception {
+        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        float w = width, h = height;
+        switch (Math.floorMod(scene, 6)) {
+            case 0 -> {
+                sky(canvas, paint, w, h, new int[]{0xFF1E2A5E, 0xFF7A3E8E, 0xFFE9745B, 0xFFFFC47E}, new float[]{0f, .42f, .72f, 1f});
+                glow(canvas, paint, w * .66f, h * .6f, h * .5f, 0xFFFFF0B0);
+                paint.setShader(null); paint.setColor(0xFFFFF4C6); canvas.drawCircle(w * .66f, h * .6f, h * .06f, paint);
+                ridge(canvas, paint, w, h, .66f, .16f, 0xFF6A4382, 11, true);
+                ridge(canvas, paint, w, h, .77f, .13f, 0xFF40295F, 12, true);
+                ridge(canvas, paint, w, h, .92f, .10f, 0xFF211739, 13, false);
+            }
+            case 1 -> {
+                sky(canvas, paint, w, h * .6f, new int[]{0xFF7CC8EE, 0xFFE6F6FF}, null);
+                glow(canvas, paint, w * .74f, h * .22f, h * .4f, 0xFFFFF6CF);
+                paint.setShader(null); paint.setColor(0xFFFFFAE0); canvas.drawCircle(w * .74f, h * .22f, h * .05f, paint);
+                paint.setShader(new LinearGradient(0, h * .6f, 0, h, 0xFF37B2D2, 0xFF0B4F7C, Shader.TileMode.CLAMP));
+                canvas.drawRect(0, h * .6f, w, h, paint);
+                Random waves = new Random(21); paint.setShader(null); paint.setStrokeWidth(h * .006f); paint.setStrokeCap(Paint.Cap.ROUND);
+                for (int index = 0; index < 46; index++) {
+                    float x = waves.nextFloat() * w, y = h * (.63f + waves.nextFloat() * .35f), length = w * (.03f + waves.nextFloat() * .05f);
+                    paint.setColor(Color.argb(60 + waves.nextInt(110), 255, 255, 255)); canvas.drawLine(x, y, x + length, y, paint);
+                }
+                Path hull = new Path(); hull.moveTo(w * .24f, h * .66f); hull.lineTo(w * .46f, h * .66f); hull.lineTo(w * .42f, h * .70f); hull.lineTo(w * .28f, h * .70f); hull.close();
+                paint.setColor(0xFF8E2F2F); canvas.drawPath(hull, paint);
+                Path sail = new Path(); sail.moveTo(w * .35f, h * .30f); sail.lineTo(w * .35f, h * .65f); sail.lineTo(w * .46f, h * .65f); sail.close();
+                paint.setColor(0xFFFFFFFF); canvas.drawPath(sail, paint);
+                Path jib = new Path(); jib.moveTo(w * .33f, h * .36f); jib.lineTo(w * .33f, h * .65f); jib.lineTo(w * .25f, h * .65f); jib.close();
+                paint.setColor(0xFFF1F4F8); canvas.drawPath(jib, paint);
+            }
+            case 2 -> {
+                sky(canvas, paint, w, h, new int[]{0xFFE6EFE1, 0xFFB3CDAE}, null);
+                glow(canvas, paint, w * .25f, h * .2f, h * .5f, 0xFFFFFFF0);
+                pines(canvas, paint, w, h, .62f, h * .16f, 0xFFA3BFA0, 31);
+                fog(canvas, paint, w, h, .45f, .75f);
+                pines(canvas, paint, w, h, .78f, h * .21f, 0xFF5F8D69, 32);
+                fog(canvas, paint, w, h, .62f, .9f);
+                pines(canvas, paint, w, h, .98f, h * .27f, 0xFF2C5B43, 33);
+            }
+            case 3 -> {
+                sky(canvas, paint, w, h, new int[]{0xFF070C24, 0xFF28246A, 0xFF7B5092}, new float[]{0f, .62f, 1f});
+                stars(canvas, paint, w, h, 150, 41);
+                glow(canvas, paint, w * .3f, h * .27f, h * .3f, 0xFFFDF6D3);
+                paint.setShader(null); paint.setColor(0xFFFDF6D3); canvas.drawCircle(w * .3f, h * .27f, h * .08f, paint);
+                ridge(canvas, paint, w, h, .80f, .16f, 0xFF0F1438, 42, true);
+                ridge(canvas, paint, w, h, .96f, .10f, 0xFF050818, 43, false);
+            }
+            case 4 -> {
+                sky(canvas, paint, w, h, new int[]{0xFFFFE9B8, 0xFFFFC98A}, null);
+                glow(canvas, paint, w * .76f, h * .26f, h * .45f, 0xFFFFFFFF);
+                paint.setShader(null); paint.setColor(0xFFFFFFF2); canvas.drawCircle(w * .76f, h * .26f, h * .06f, paint);
+                ridge(canvas, paint, w, h, .66f, .12f, 0xFFEFB878, 51, false);
+                ridge(canvas, paint, w, h, .80f, .12f, 0xFFD98F4E, 52, false);
+                ridge(canvas, paint, w, h, .96f, .12f, 0xFFA9622F, 53, false);
+            }
+            default -> {
+                sky(canvas, paint, w, h, new int[]{0xFF222C5C, 0xFF7E4E8E, 0xFFF5A06E}, new float[]{0f, .6f, 1f});
+                glow(canvas, paint, w * .5f, h * .86f, h * .5f, 0xFFFFD79A);
+                skyline(canvas, paint, w, h, 61);
+            }
+        }
+        try { return SafeImages.encode(bitmap); } finally { bitmap.recycle(); }
+    }
+
+    private static void sky(Canvas canvas, Paint paint, float w, float h, int[] colours, float[] positions) {
+        paint.setShader(new LinearGradient(0, 0, 0, h, colours, positions, Shader.TileMode.CLAMP));
+        canvas.drawRect(0, 0, w, h, paint);
+        paint.setShader(null);
+    }
+
+    private static void glow(Canvas canvas, Paint paint, float x, float y, float radius, int colour) {
+        paint.setShader(new RadialGradient(x, y, radius, new int[]{colour, colour & 0x00FFFFFF}, null, Shader.TileMode.CLAMP));
+        canvas.drawCircle(x, y, radius, paint);
+        paint.setShader(null);
+    }
+
+    private static void fog(Canvas canvas, Paint paint, float w, float h, float from, float to) {
+        paint.setShader(new LinearGradient(0, h * from, 0, h * to, 0x00FFFFFF, 0xA0F2F7EE, Shader.TileMode.CLAMP));
+        canvas.drawRect(0, h * from, w, h * to, paint);
+        paint.setShader(null);
+    }
+
+    private static void ridge(Canvas canvas, Paint paint, float w, float h, float base, float rise, int colour, long seed, boolean jagged) {
+        Random random = new Random(seed);
+        Path path = new Path();
+        float x = 0, y = h * (base - rise * random.nextFloat());
+        path.moveTo(0, h); path.lineTo(0, y);
+        int steps = jagged ? 9 : 5;
+        for (int step = 1; step <= steps; step++) {
+            float nextX = w * step / steps, nextY = h * (base - rise * random.nextFloat());
+            if (jagged) path.lineTo(nextX, nextY); else path.quadTo((x + nextX) / 2, Math.min(y, nextY) - h * rise * .4f, nextX, nextY);
+            x = nextX; y = nextY;
+        }
+        path.lineTo(w, h); path.close();
+        paint.setShader(null); paint.setColor(colour); canvas.drawPath(path, paint);
+    }
+
+    private static void pines(Canvas canvas, Paint paint, float w, float h, float base, float size, int colour, long seed) {
+        Random random = new Random(seed);
+        paint.setShader(null); paint.setColor(colour);
+        for (float x = -size; x < w + size; x += size * (.5f + random.nextFloat() * .3f)) {
+            float top = h * base - size * (1.7f + random.nextFloat() * 1.1f);
+            Path tree = new Path(); tree.moveTo(x, top); tree.lineTo(x + size * .5f, h * base); tree.lineTo(x - size * .5f, h * base); tree.close();
+            canvas.drawPath(tree, paint);
+        }
+        canvas.drawRect(0, h * base - 2, w, h, paint);
+    }
+
+    private static void stars(Canvas canvas, Paint paint, float w, float h, int count, long seed) {
+        Random random = new Random(seed);
+        paint.setShader(null);
+        for (int index = 0; index < count; index++) {
+            paint.setColor(Color.argb(110 + random.nextInt(140), 255, 255, 235));
+            canvas.drawCircle(random.nextFloat() * w, random.nextFloat() * h * .62f, 1.2f + random.nextFloat() * 2.8f, paint);
+        }
+    }
+
+    private static void skyline(Canvas canvas, Paint paint, float w, float h, long seed) {
+        Random random = new Random(seed);
+        for (float x = 0; x < w; ) {
+            float buildingWidth = w * (.06f + random.nextFloat() * .08f), buildingHeight = h * (.2f + random.nextFloat() * .36f);
+            paint.setShader(null); paint.setColor(Color.rgb(20 + random.nextInt(10), 26 + random.nextInt(12), 58 + random.nextInt(16)));
+            canvas.drawRect(x, h - buildingHeight, x + buildingWidth, h, paint);
+            paint.setColor(Color.rgb(255, 214, 120));
+            for (float y = h - buildingHeight + h * .025f; y < h - h * .04f; y += h * .04f)
+                for (float windowX = x + buildingWidth * .12f; windowX < x + buildingWidth * .82f; windowX += buildingWidth * .26f)
+                    if (random.nextInt(5) > 1) canvas.drawRect(windowX, y, windowX + buildingWidth * .11f, y + h * .018f, paint);
+            x += buildingWidth + w * .004f;
+        }
+    }
+
+    @Test public void storeListingScreenshots() throws Exception {
+        Assume.assumeTrue("Store screenshots are made only when asked for: storeShots=<folder name>", storeShotsAsked());
+        signedInFixture();
+        ChatEnvelope.Expiry day = ChatEnvelope.Expiry.HOURS_12;
+        ChatEngine.Peer aarav = storeContact("Aarav Mehta", 1, 1), kenji = storeContact("Kenji Sato", 3, 2), leo = storeContact("Leo Fischer", 0, 3),
+            maya = storeContact("Maya Chen", 0, 4), noah = storeContact("Noah Williams", 2, 5), priya = storeContact("Priya Nair", 1, 6), sofia = storeContact("Sofia Rossi", 3, 7);
+        engine.mute(priya.userId(), true);
+        storeMessage(priya, false, "Did you see the news?", ChatEnvelope.Expiry.HOURS_12, "DELIVERED", 75, null, null, null);
+        storeMessage(priya, false, "Call me when you can", ChatEnvelope.Expiry.HOURS_12, "DELIVERED", 74, null, null, null);
+
+        // Aarav: the chat that shows text, a reply, reactions and a photo; the last message has not been read.
+        String dinnerText = "Dinner at 8? I booked the rooftop \uD83C\uDF55";
+        ChatEngine.Entry[] dinner = new ChatEngine.Entry[1];
+        storeNewest("aarav", List.of(
+            () -> dinner[0] = storeMessage(aarav, false, dinnerText, day, "READ", 36, null, null, null),
+            () -> storeMessage(aarav, true, "Perfect, see you there!", day, "READ", 35,
+                new ChatEnvelope.Reference(dinner[0] == null ? UUID.randomUUID() : dinner[0].id(), dinnerText, false), null, THUMB),
+            () -> storeMessage(aarav, false, null, scenic(1, 1200, 900), 1200, 900, null, day, "READ", 30 * 60, null, null, null),
+            () -> storeMessage(aarav, true, "Wow, that view \uD83D\uDE0D", day, "READ", 29, null, null, HEART),
+            () -> storeMessage(aarav, false, "Bring something warm, it gets windy up there \uD83E\uDDE5", day, "DELIVERED", 6, null, null, null)));
+
+        // Maya: photos, as one album and as one that can be opened once.
+        storeNewest("maya", List.of(
+            () -> storeMessage(maya, false, null, scenic(5, 1200, 900), 1200, 900, null, ChatEnvelope.Expiry.VIEW_ONCE, "READ", 47 * 60, null, null, null),
+            () -> storeMessage(maya, false, "That one vanishes once you open it \uD83D\uDE09", day, "READ", 46, null, null, null),
+            () -> storeAlbum(maya, false, 6, 0, day, "READ", 45),
+            () -> storeMessage(maya, true, "Send me all of them! \uD83D\uDE4F", day, "READ", 38, null, null, null),
+            () -> storeMessage(maya, false, "Sending the rest tonight \uD83D\uDE04", day, "DELIVERED", 12, null, null, null)));
+
+        // Noah: emoji, which are drawn large when they are alone, and a draft with one in it.
+        storeNewest("noah", List.of(
+            () -> storeMessage(noah, false, "Guess who finally booked the trip!", day, "READ", 22, null, null, null),
+            () -> storeMessage(noah, true, "\uD83C\uDF89\uD83C\uDF89\uD83C\uDF89", day, "READ", 21, null, null, null),
+            () -> storeMessage(noah, false, "Window seat for you \u2708\uFE0F", day, "READ", 19, null, null, null),
+            () -> storeMessage(noah, true, "\uD83D\uDE0D", day, "READ", 18, null, null, null),
+            () -> storeMessage(noah, false, "\uD83D\uDD25\uD83D\uDD25", day, "READ", 16, null, null, null)));
+
+        // The group: four people, and four messages that have not been read.
+        UUID groupId = UUID.fromString("0f6a7c3e-5b1d-4e29-9a47-3c2d8e1f4b60"), epoch = UUID.fromString("5d1e9b02-7a64-4c83-b3f1-9e0a2c7d6a18");
+        String ownKey = Base64.getEncoder().encodeToString(engine.groupSignal().publicIdentity());
+        GroupChat.Snapshot snapshot = new GroupChat.Snapshot(groupId, userId, 1, epoch, false, List.of(
+            new GroupChat.Member(userId, deviceId, ownKey, "alex", null, "ACTIVE", 0),
+            new GroupChat.Member(maya.userId(), maya.deviceId(), maya.identityKey(), "maya", "Maya Chen", "ACTIVE", 0),
+            new GroupChat.Member(noah.userId(), noah.deviceId(), noah.identityKey(), "noah", "Noah Williams", "ACTIVE", 0),
+            new GroupChat.Member(priya.userId(), priya.deviceId(), priya.identityKey(), "priya", "Priya Nair", "ACTIVE", 0)));
+        vault.transaction(() -> {
+            write("group/" + groupId, new GroupChat.Conversation(snapshot, "Weekend plans", null));
+            write("group-approval/" + groupId + "/" + epoch, new GroupChat.Approval(snapshot.roster(), "Weekend plans", System.currentTimeMillis() + 86_400_000));
+            return null;
+        });
+        String[][] talk = {{"maya", "Who is up for a hike on Saturday? \uD83E\uDD7E", "READ", "20"}, {"noah", "Count me in!", "READ", "19"},
+            {"me", "Love it. 8am at the trailhead?", "READ", "17"}, {"priya", "I can bring the snacks \uD83C\uDF6B", "DELIVERED", "9"},
+            {"maya", "Perfect \uD83D\uDC4D", "DELIVERED", "8"}, {"noah", "I'll bring the speaker", "DELIVERED", "6"},
+            {"priya", "Don't forget the sunscreen \uD83C\uDF1E", "DELIVERED", "4"}};
+        for (String[] line : Arrays.copyOfRange(talk, talk.length - storeKeep("group", talk.length), talk.length)) {
+            ChatEngine.Peer from = switch (line[0]) { case "maya" -> maya; case "noah" -> noah; case "priya" -> priya; default -> null; };
+            boolean outgoing = from == null;
+            UUID id = UUID.randomUUID(), sender = outgoing ? userId : from.userId();
+            long created = System.currentTimeMillis() - Long.parseLong(line[3]) * 60_000, deadline = created + day.milliseconds;
+            createFixtureKey(AndroidVault.contentAlias(deadline, id, userId));
+            ChatEnvelope envelope = new ChatEnvelope(1, id, sender, outgoing ? deviceId : from.deviceId(), groupId, deviceId, created, deadline, day, line[1], null);
+            ChatEngine.Entry entry = new ChatEngine.Entry(id, groupId, deadline, day, outgoing, false, line[2], userId, epoch, 1, sender);
+            vault.transaction(() -> {
+                write("entry/" + id, entry);
+                byte[] content = RelayApi.JSON.toJson(new ChatEngine.Content(envelope, null)).getBytes(StandardCharsets.UTF_8);
+                try { vault.put("body/" + id, vault.seal(AndroidVault.contentAlias(deadline, id, userId), content)); }
+                finally { Arrays.fill(content, (byte) 0); }
+                return null;
+            });
+        }
+        // Someone who is not a contact yet, for the screen that asks for their safety number to be compared.
+        SignalClient stranger = new SignalClient(storeId(2, 20), new DeviceSecurityTest.MemoryVault());
+        ChatEngine.Peer candidate = new ChatEngine.Peer(storeId(2, 20), UUID.randomUUID(), Base64.getEncoder().encodeToString(stranger.publicIdentity()), "Ira Kapoor", "ira", "Ira Kapoor");
+
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            // The first background sync fails a moment after the start and would put the dot back to grey, so it is let through first.
+            android.os.SystemClock.sleep(3_000);
+            storeShot(scenario, "01-chats");
+
+            scenario.onActivity(activity -> invoke(activity, "verifyContactDialog", new Class<?>[]{ChatEngine.Peer.class}, candidate));
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> descendants(dialog(activity).getWindow().getDecorView()).stream().filter(view -> view instanceof MaterialCheckBox)
+                .map(view -> (MaterialCheckBox) view).findFirst().orElseThrow().setChecked(true));
+            storeShot(scenario, "07-verify");
+            scenario.onActivity(activity -> dialog(activity).dismiss());
+
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", aarav.userId()); invoke(activity, "render"); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> !tilesOf(activity).isEmpty() && tilesOf(activity).stream().allMatch(PhotoTile::drawn));
+            awaitScrollSettled(scenario);
+            storeShot(scenario, "02-chat");
+
+            openActions(scenario, "Bring something warm, it gets windy up there \uD83E\uDDE5");
+            storeShot(scenario, "04-actions");
+            closeActions(scenario);
+
+            scenario.onActivity(activity -> invoke(activity, "expiryDialog"));
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            storeShot(scenario, "06-disappearing");
+            scenario.onActivity(activity -> dialog(activity).dismiss());
+
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", maya.userId()); invoke(activity, "render"); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> !tilesOf(activity).isEmpty() && tilesOf(activity).stream().allMatch(PhotoTile::drawn));
+            awaitScrollSettled(scenario);
+            storeShot(scenario, "03-photos");
+
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", noah.userId()); invoke(activity, "render"); });
+            awaitMessages(scenario);
+            awaitScrollSettled(scenario);
+            scenario.onActivity(activity -> {
+                ((EditText) readField(activity, "composer")).setText("See you at the airport \uD83D\uDE42");
+                invoke(activity, "toggleEmoji");
+            });
+            awaitMainCondition(scenario, activity -> (boolean) readField(activity, "emojiShown"));
+            android.os.SystemClock.sleep(600);
+            storeShot(scenario, "05-emoji");
+
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", groupId); invoke(activity, "render"); });
+            awaitMessages(scenario);
+            awaitScrollSettled(scenario);
+            storeShot(scenario, "08-group");
+        }
+    }
+
 }
