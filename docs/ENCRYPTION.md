@@ -89,6 +89,14 @@ platform `AES/GCM/NoPadding` implementation and a 128-bit tag. Associated data
 is `vanishr/image/v1/<random media UUID>`. This is the standard file encryption
 primitive, not a custom session protocol. The key, nonce and MIME type travel
 only in the Signal-authenticated encrypted envelope, never in upload metadata.
+Since 0.7.0 the envelope may also carry the picture's stated width and height
+and, for photos sent together, an album (a random id, the photo's place and the
+count); these are as private as the key, are the sender's word, and are used
+only to lay out the chat (the picture itself is decoded from its own bytes).
+On the phone, the size and the album place (numbers) and whether a photo answers
+a message (a flag) are kept on the record that lists the message; words, including
+what a reply quotes, stay in the sealed message under its own per-message key and
+go with it when that key is deleted at expiry.
 
 ## 6. Rotation and local storage
 

@@ -12,6 +12,19 @@ license notices at **https://vanishr-download.vercel.app**.
 The public [update feed](https://vanishr-download.vercel.app/updates.json), not
 the latest Git version, determines which release users can download and discover.
 
+Release **0.7.0/code 52** brings photos and emoji closer to the messengers people already know. A photo that is not view-once is now drawn in
+the chat as a small picture, and touching it opens it full screen as before; a view-once photo stays a row of text that opens only when
+touched, and nothing is decoded or marked read until then. Up to six photos can be chosen at once and arrive as one album, drawn as a
+square of up to four pictures with "+N" on the fourth when there are more (a send of several as view-once is one "View once" row per photo,
+because each is opened on its own). The composer has an emoji panel that takes the keyboard's place; one to three emoji sent alone are
+drawn large and without a bubble; and faces typed with keys (":)", ":D", "<3" and some twenty more) become their emoji when the next
+space is typed, and one press of delete brings the face back. The pictures exist in memory only and are dropped when the app leaves the
+screen. The album's place and the picture's size travel inside the encrypted message, so an earlier app shows the photos one after the
+other as it always did. **It is a Google Play bundle only so far:** the website and the direct-download APK are still 0.6.9 until a
+direct release is published. No relay change, no new permission and no new network call. Emulator tests only: no physical phone, no
+Google Play install. See the [threat model](docs/THREAT-MODEL.md#photos-in-the-chat-albums-emoji-and-typed-faces-070) and the
+[verification](docs/VERIFICATION.md#release-070--photos-in-the-chat-albums-emoji-and-typed-faces-play-bundle-only-2026-11-15).
+
 Release **0.6.10/code 51** makes the quote inside a reply behave as it does in other messengers: touching it goes to the message that was
 quoted, brings it to the middle of the screen and tints its row for a moment (a message older than the ones loaded is looked for page by
 page; one that is gone, or that belongs to another chat, says so and moves nothing). It also makes the 4,096-character limit of a
@@ -431,7 +444,12 @@ no Azure resources or paid add-ons were changed for this website.
 - Non-destructive sign-out and isolated account switching without Android's Clear data step.
 - Username contact lookup followed by independent safety-number verification.
 - Official Signal libsignal sessions with mandatory independent peer verification.
-- Text and encrypted image messages; per-image keys remain inside Signal envelopes.
+- Text and encrypted image messages; per-image keys remain inside Signal envelopes. A photo is drawn in the chat as a small
+  picture that opens full screen when touched; photos sent together (up to 6, which is what the relay takes in a minute) arrive as one
+  album, a square of up to four with "+N" on the fourth, which the viewer pages through. A view-once photo is not drawn: it stays
+  a row that opens once. The pictures live in memory only and go when the app leaves the screen.
+- An emoji panel in place of the keyboard, one to three emoji sent alone drawn large without a bubble, and faces typed with keys
+  (":)", ":D", "<3") turned into emoji when the word is finished or the message is sent (one press of delete brings the face back).
 - View once, 12 hours or 24 hours (a 12-hour message travels as the 24-hour kind with an earlier deadline); delivery/read
   status and hard Redis TTLs.
 - Reply-with-quote (the quote names whose words they are), a fixed six-emoji reaction drawn as a pill on the message, and

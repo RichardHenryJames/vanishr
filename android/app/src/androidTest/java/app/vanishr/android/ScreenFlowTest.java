@@ -712,7 +712,10 @@ public class ScreenFlowTest {
     }
 
     private View text(View root, String value) {
-        return descendants(root).stream().filter(view -> view instanceof TextView label && label.getText().toString().equals(value)).findFirst().orElseThrow(() -> new AssertionError("Missing control: " + value));
+        return descendants(root).stream().filter(view -> view instanceof TextView label && label.getText().toString().equals(value)).findFirst()
+            // A photo is a picture, not a row of text, so the word "Photo" stands for the first picture there is.
+            .or(() -> value.equals("Photo") ? descendants(root).stream().filter(PhotoTile.class::isInstance).findFirst() : Optional.empty())
+            .orElseThrow(() -> new AssertionError("Missing control: " + value));
     }
 
     private void tapText(ActivityScenario<MainActivity> scenario, String value) throws Exception {
@@ -1163,7 +1166,7 @@ public class ScreenFlowTest {
             });
             snapshot(scenario,"52-compact-attachments");
             scenario.onActivity(activity -> {
-                assertNotNull(text(dialog(activity).getWindow().getDecorView(),"Choose image"));
+                assertNotNull(text(dialog(activity).getWindow().getDecorView(),"Choose images"));
                 assertNotNull(text(dialog(activity).getWindow().getDecorView(),"Take photo"));
                 invoke(activity,"dismissContent"); invoke(activity,"accountDialog");
             });
@@ -1786,9 +1789,12 @@ public class ScreenFlowTest {
                 assertTrue("Composer must stay above the keyboard", bounds.bottom <= activity.getWindow().getDecorView().getHeight() - keyboardHeight + 4);
                 activity.getSystemService(android.view.inputmethod.InputMethodManager.class).hideSoftInputFromWindow(input.getWindowToken(), 0);
             });
-            ChatEngine.Entry expires = entry(false, "Expiring test content", null, ChatEnvelope.Expiry.HOUR_1, "READ", -3_599_000);
+            // It is on the screen first, with a few seconds to live, and then it is gone: waiting for it to be gone alone is satisfied at
+            // once when the refresh has not drawn it yet, and the purge would then come before its deadline.
+            ChatEngine.Entry expires = entry(false, "Expiring test content", null, ChatEnvelope.Expiry.HOUR_1, "READ", -3_596_000);
             scenario.onActivity(activity -> invoke(activity, "refreshMessages", new Class<?>[]{ChatEngine.Peer.class}, peer));
-            assertTrue(device.wait(androidx.test.uiautomator.Until.gone(androidx.test.uiautomator.By.text("Expiring test content")), 5000));
+            assertTrue("The message is drawn", device.wait(androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.text("Expiring test content")), 5000));
+            assertTrue(device.wait(androidx.test.uiautomator.Until.gone(androidx.test.uiautomator.By.text("Expiring test content")), 8000));
             engine.purge(); assertNull(vault.get("body/" + expires.id()));
             snapshot(scenario, "21-expired");
         }
@@ -7897,13 +7903,18 @@ public class ScreenFlowTest {
      * and the plain identity lookup that both sending and the automatic profile-photo exchange make for a verified contact. */
     private final List<byte[]> uploadedMedia = new ArrayList<>();
     private final List<UUID> fixtureBlocked = new ArrayList<>();
+    // A test can make the lookup of the contact fail (as the relay answers when the contact is gone) once this many messages have been sent.
+    private volatile int failLookupsAfterSends = -1;
 
     private void plainTransport(List<ChatEngine.Incoming> incoming, List<ChatEngine.Send> outgoing) {
         engine.groupApi().close();
         setField(engine, "api", syntheticApi(chain -> {
             var request = chain.request(); String path = request.url().encodedPath();
             if (path.equals("/account/admin-contacts")) return syntheticResponse(request, 200, new AdminOnboarding.Page(userId, null, List.of(), null));
-            if (path.equals("/users/id/" + peerId)) return syntheticResponse(request, 200, RemotePhotoSession.contact(peer));
+            if (path.equals("/users/id/" + peerId)) {
+                if (failLookupsAfterSends >= 0 && outgoing.size() >= failLookupsAfterSends) return syntheticResponse(request, 404, Map.of("error", "not_found"));
+                return syntheticResponse(request, 200, RemotePhotoSession.contact(peer));
+            }
             if (path.equals("/account/profile")) return syntheticResponse(request, 200, new ChatEngine.Profile(userId, "alex", null));
             if (path.equals("/account/type")) return syntheticResponse(request, 200, new RemotePhotoSession.AccountType(userId, "USER"));
             if (path.equals("/account/blocks") && request.method().equals("GET")) return syntheticResponse(request, 200, List.copyOf(fixtureBlocked));
@@ -8883,6 +8894,14 @@ public class ScreenFlowTest {
         });
     }
 
+    /** The bubble round the first photo of the chat, which is a picture and not a row of text. */
+    private void locatePhotoBubble(ActivityScenario<MainActivity> scenario, int[] at, int[] size) {
+        scenario.onActivity(activity -> {
+            View bubble = (View) tilesOf(activity).get(0).getParent();
+            bubble.getLocationOnScreen(at); size[0] = bubble.getWidth(); size[1] = bubble.getHeight();
+        });
+    }
+
     private void awaitDialog(ActivityScenario<MainActivity> scenario) throws Exception {
         awaitMainCondition(scenario, activity -> dialog(activity) != null && dialog(activity).isShowing());
     }
@@ -9034,19 +9053,20 @@ public class ScreenFlowTest {
             // A photo (which is itself something to tap) replies too, and does not open. Its click is counted here, so that what is checked
             // does not depend on how long a photo takes to decrypt and open.
             java.util.concurrent.atomic.AtomicInteger taps = new java.util.concurrent.atomic.AtomicInteger();
+            awaitMainCondition(scenario, activity -> !tilesOf(activity).isEmpty() && tilesOf(activity).stream().allMatch(PhotoTile::drawn));
             scenario.onActivity(activity -> {
-                View photoBody = text(root(activity), "Photo");
+                PhotoTile photoBody = tilesOf(activity).get(0);
                 assertTrue("The photo is something to tap", photoBody.hasOnClickListeners());
                 photoBody.setOnClickListener(view -> taps.incrementAndGet());
             });
-            locateBubble(scenario, "Photo", at, size);
+            locatePhotoBubble(scenario, at, size);
             assertTrue(device.swipe(at[0] + size[0] / 2, at[1] + size[1] / 2, at[0] + size[0] / 2 + dpPx(150), at[1] + size[1] / 2, 20));
             awaitMainCondition(scenario, activity -> "Photo".equals(readField(activity, "pendingReplySnippet")));
             assertEquals("Swiping a photo does not tap it", 0, taps.get());
             clearReply(scenario);
             // A sideways drag the other way across the photo does not tap it either, even a slow one. (It has to pass the touch slop before
             // the long-press time is up, or it is what it looks like, a press that is held.)
-            locateBubble(scenario, "Photo", at, size);
+            locatePhotoBubble(scenario, at, size);
             assertTrue(device.swipe(at[0] + size[0] * 3 / 4, at[1] + size[1] / 2, at[0] + size[0] / 4, at[1] + size[1] / 2, 40));
             InstrumentationRegistry.getInstrumentation().waitForIdleSync();
             assertEquals("A drag the wrong way across a photo does not tap it", 0, taps.get());
@@ -9835,6 +9855,8 @@ public class ScreenFlowTest {
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
             awaitMessages(scenario);
+            // A photo whose size the message does not state takes its shape when it has been decoded, and the rows below it move then.
+            awaitMainCondition(scenario, activity -> tilesOf(activity).stream().allMatch(PhotoTile::drawn));
             Object[][] cases = {
                 {"Coffee at 4?", false, List.of("Reply", "Forward", "Copy", "Info", "Delete", "More\u2026"), "100-actions-received-text"},
                 {"Sounds good. Same place?", true, List.of("Reply", "Forward", "Copy", "Edit", "Info", "Delete"), "101-actions-own-text"},
@@ -10603,6 +10625,1472 @@ public class ScreenFlowTest {
             awaitMainCondition(scenario, activity -> hasText(activity, answer));
             scenario.onActivity(activity -> assertEquals("The quote says whose words they are", "You", quoteName(quoteOf(activity, answer))));
             snapshot(scenario, "120-long-reply");
+        }
+    }
+
+    // ---- Photos drawn in the chat, and several at once (0.7.0) ----
+
+    private byte[] jpeg(int width, int height, int color) throws Exception {
+        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        canvas.drawColor(color);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        paint.setColor(Color.WHITE); canvas.drawCircle(width / 2f, height / 2f, Math.min(width, height) / 4f, paint);
+        try { return SafeImages.encode(bitmap); } finally { bitmap.recycle(); }
+    }
+
+    /** A photo message with its size, album and quote on its record, as a real send or receive makes it. */
+    private ChatEngine.Entry photoEntry(boolean outgoing, ChatEnvelope.Expiry expiry, byte[] bytes, int width, int height, ChatEnvelope.Album album,
+                                        ChatEnvelope.Reference reference, String state, long offset) throws Exception {
+        UUID id = UUID.randomUUID(), media = UUID.randomUUID(); long created = System.currentTimeMillis() + offset; long deadline = created + expiry.milliseconds;
+        createFixtureKey(AndroidVault.contentAlias(deadline, id));
+        ChatEnvelope.Attachment attachment = new ChatEnvelope.Attachment(media, new byte[32], new byte[12], "image/jpeg", width, height, album);
+        ChatEnvelope envelope = new ChatEnvelope(1, id, outgoing ? userId : peerId, outgoing ? deviceId : peerDevice,
+                outgoing ? peerId : userId, outgoing ? peerDevice : deviceId, created, deadline, expiry, null, attachment, null, reference, null);
+        ChatEngine.Entry entry = new ChatEngine.Entry(id, peerId, deadline, expiry, outgoing, true, state).withPhoto(ChatEngine.PhotoInfo.of(attachment, reference));
+        vault.transaction(() -> {
+            write("entry/" + id, entry);
+            byte[] content = RelayApi.JSON.toJson(new ChatEngine.Content(envelope, bytes)).getBytes(StandardCharsets.UTF_8);
+            try { vault.put("body/" + id, vault.seal(AndroidVault.contentAlias(deadline, id), content)); }
+            finally { Arrays.fill(content, (byte) 0); }
+            return null;
+        });
+        return entry;
+    }
+
+    private List<PhotoTile> tilesOf(MainActivity activity) {
+        List<PhotoTile> tiles = new ArrayList<>();
+        for (View view : descendants(root(activity))) if (view instanceof PhotoTile tile) tiles.add(tile);
+        return tiles;
+    }
+
+    private PhotoTile tileOf(MainActivity activity, UUID entry) {
+        return tilesOf(activity).stream().filter(tile -> tile.entry() != null && tile.entry().id().equals(entry)).findFirst().orElse(null);
+    }
+
+    private PhotoThumbnails thumbnailsOf(MainActivity activity) { return (PhotoThumbnails) readField(activity, "thumbnails"); }
+
+    private int[] centreOf(ActivityScenario<MainActivity> scenario, java.util.function.Function<MainActivity, View> find) {
+        int[] at = new int[2];
+        scenario.onActivity(activity -> {
+            View view = find.apply(activity);
+            view.getLocationOnScreen(at); at[0] += view.getWidth() / 2; at[1] += view.getHeight() / 2;
+        });
+        return at;
+    }
+
+    @Test public void aPhotoThatIsNotViewOnceIsDrawnAsAPictureOfTheRightShapeAndOpensWhenTouched() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        ChatEngine.Entry landscape = photoEntry(false, ChatEnvelope.Expiry.HOUR_1, jpeg(1600, 1200, Color.rgb(46, 125, 94)), 1600, 1200, null, null, "DELIVERED", -30_000);
+        ChatEngine.Entry portrait = photoEntry(true, ChatEnvelope.Expiry.HOURS_24, jpeg(900, 1600, Color.rgb(53, 92, 190)), 900, 1600, null, null, "QUEUED", -20_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> { List<PhotoTile> tiles = tilesOf(activity); return tiles.size() == 3 && tiles.stream().allMatch(PhotoTile::drawn); });
+            scenario.onActivity(activity -> {
+                int width = Math.min(dpPx(240), Math.max(dpPx(120), root(activity).getWidth() - root(activity).getPaddingLeft() - root(activity).getPaddingRight() - dpPx(80)));
+                PhotoTile wide = tileOf(activity, landscape.id()), tall = tileOf(activity, portrait.id());
+                assertEquals("A landscape photo is three quarters as high as it is wide", Math.round(width * 0.75f), wide.getLayoutParams().height);
+                assertEquals(width, wide.getLayoutParams().width);
+                assertEquals("A very tall one is held to the tallest", Math.round(width * AlbumLayout.TALLEST), tall.getLayoutParams().height);
+                assertFalse("The size was stated, so nothing is worked out again", wide.adaptive());
+                assertTrue("A photo from an earlier app does not say, and takes its shape from the picture", tilesOf(activity).stream().anyMatch(PhotoTile::adaptive));
+                assertFalse("The photos are pictures, not rows of text", hasText(activity, "Photo"));
+                assertNotNull("A view-once photo stays a row that has to be opened", text(root(activity), "View once"));
+                assertEquals("A view-once photo has no picture, so only the other three are drawn", 3, tilesOf(activity).size());
+                assertEquals("Each picture is kept once, in memory", 3, thumbnailsOf(activity).size());
+                assertEquals("A photo that is drawn is read, like text", "READ", engine.entry(landscape.id()).state());
+                assertEquals("while a view-once photo is not read until it is opened", "DELIVERED", engine.entry(once.id()).state());
+            });
+            snapshot(scenario, "130-photos-in-chat");
+            int[] at = centreOf(scenario, activity -> tileOf(activity, landscape.id()));
+            assertTrue(device.click(at[0], at[1]));
+            awaitMainCondition(scenario, activity -> readField(activity, "photoViewer") != null);
+            scenario.onActivity(activity -> invoke(activity, "closePhoto"));
+        }
+    }
+
+    @Test public void photosSwitchedOffAreARowOfTextAndNothingIsDecodedOrMarkedRead() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry received = photoEntry(false, ChatEnvelope.Expiry.HOUR_1, jpeg(800, 600, Color.rgb(46, 125, 94)), 800, 600, null, null, "DELIVERED", -30_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                setField(activity, "remote", remoteSettings(EnumSet.of(RemoteSettings.Flag.PHOTOS), null, null));
+                setField(activity, "selectedPeer", peerId); inject(activity);
+            });
+            awaitMessages(scenario);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertTrue("No picture is drawn", tilesOf(activity).isEmpty());
+                assertTrue("and none is decoded", thumbnailsOf(activity).size() == 0);
+                assertTrue("The photo is a row of text again", hasText(activity, "Photo"));
+                assertEquals("and was not read", "DELIVERED", engine.entry(received.id()).state());
+            });
+        }
+    }
+
+    @Test public void aPhotoYouSendIsDrawnAtOnceAndKeepsItsPictureWhenItIsStored() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(new ArrayList<>(), outgoing);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                assertTrue((boolean) invoke(activity, "enqueueSend", new Class<?>[]{ChatEngine.Peer.class, String.class, byte[].class, ChatEnvelope.Expiry.class},
+                    peer, null, photo, ChatEnvelope.Expiry.HOURS_12));
+                List<PhotoTile> tiles = tilesOf(activity);
+                assertEquals("The photo is on the screen as soon as it is sent", 1, tiles.size());
+                assertNull("while it is still being sent", tiles.get(0).entry());
+                assertTrue(tiles.get(0).drawn());
+            });
+            awaitMainCondition(scenario, activity -> outgoing.size() == 1);
+            awaitMainCondition(scenario, activity -> { PhotoTile stored = tilesOf(activity).stream().filter(tile -> tile.entry() != null).findFirst().orElse(null); return stored != null && stored.drawn(); });
+            scenario.onActivity(activity -> {
+                assertEquals(1, tilesOf(activity).size());
+                ChatEngine.Entry stored = tilesOf(activity).get(0).entry();
+                assertTrue("The stored message is drawn with the picture the sender saw", thumbnailsOf(activity).get(stored.id()) != null);
+                ChatEngine.PhotoInfo info = stored.photo();
+                assertEquals("The size of the photo is on its record", 720, info.width());
+                assertEquals(480, info.height());
+            });
+        }
+    }
+
+    @Test public void thePicturesOfAChatGoWithTheirMessagesAndWhenTheScreenIsHidden() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry first = photoEntry(false, ChatEnvelope.Expiry.HOUR_1, jpeg(800, 600, Color.rgb(46, 125, 94)), 800, 600, null, null, "DELIVERED", -30_000);
+        ChatEngine.Entry second = photoEntry(false, ChatEnvelope.Expiry.HOUR_1, jpeg(800, 600, Color.rgb(53, 92, 190)), 800, 600, null, null, "DELIVERED", -20_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> tilesOf(activity).size() == 3 && tilesOf(activity).stream().allMatch(PhotoTile::drawn));
+            scenario.onActivity(activity -> assertEquals(3, thumbnailsOf(activity).size()));
+            // A message that goes takes its picture with it.
+            scenario.onActivity(activity -> { try { engine.erase(first, "delete"); } catch (Exception failure) { throw new AssertionError(failure); } invoke(activity, "refreshMessages", new Class<?>[]{ChatEngine.Peer.class}, peer); });
+            awaitMainCondition(scenario, activity -> tileOf(activity, first.id()) == null && !(boolean) readField(activity, "messageRefreshQueued"));
+            scenario.onActivity(activity -> {
+                assertNull(thumbnailsOf(activity).get(first.id()));
+                assertNotNull(thumbnailsOf(activity).get(second.id()));
+                PhotoTile kept = tileOf(activity, second.id());
+                // Hiding the screen lets go of every picture.
+                invoke(activity, "hideContent");
+                assertEquals(0, thumbnailsOf(activity).size());
+                assertFalse("and the tiles that showed them", kept.drawn());
+            });
+        }
+    }
+
+    @Test public void aPhotoSentAsAReplyKeepsItsQuoteWhenTheChatIsOpenedAgain() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry asked = entry(false, "Could you send the picture?", null, ChatEnvelope.Expiry.HOUR_1, "READ", -50_000);
+        ChatEnvelope.Reference reference = new ChatEnvelope.Reference(asked.id(), "Could you send the picture?", Boolean.FALSE);
+        ChatEngine.Entry answer = photoEntry(true, ChatEnvelope.Expiry.HOUR_1, jpeg(800, 600, Color.rgb(46, 125, 94)), 800, 600, null, reference, "DELIVERED", -20_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> tileOf(activity, answer.id()) != null && tileOf(activity, answer.id()).drawn());
+            scenario.onActivity(activity -> {
+                View bubble = (View) tileOf(activity, answer.id()).getParent();
+                QuoteBlock quote = descendants(bubble).stream().filter(QuoteBlock.class::isInstance).map(QuoteBlock.class::cast).findFirst().orElse(null);
+                assertNotNull("The photo that answers a message shows what it answers", quote);
+                assertTrue(hasText(quote, "Could you send the picture?"));
+                assertEquals("The quote names whose words they are: the other side's", "Aarav Mehta", quoteName(quote));
+            });
+        }
+    }
+
+    @Test public void aPhotoThatAnswersAMessageKeepsTheWordsItQuotesOutOfItsRecordAndStillShowsThemWhenOpenedAgain() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        List<ChatEngine.Incoming> incoming = new ArrayList<>(); List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(incoming, outgoing);
+        String words = "Quoted words 7731";
+        ChatEnvelope.Reference reference = new ChatEnvelope.Reference(UUID.randomUUID(), words, Boolean.FALSE);
+        UUID id = UUID.randomUUID();
+        engine.send(peer, null, jpeg(400, 300, Color.rgb(46, 125, 94)), ChatEnvelope.Expiry.HOURS_12, reference, id, System.currentTimeMillis(), () -> { });
+        // The record that lists the message is kept under the vault's key, not the message's own; words belong in the sealed message.
+        String record = new String(vault.get("entry/" + id), StandardCharsets.UTF_8);
+        assertFalse("The words are not in the record that lists the message: " + record, record.contains(words));
+        assertTrue("which only says that it answers one", engine.entry(id).photo().quotes());
+        ChatEngine.Content kept = engine.content(engine.entry(id), false, false);
+        try { assertEquals("The words are in the sealed message, as for any message", reference, kept.envelope().reference()); }
+        finally { if (kept.image() != null) Arrays.fill(kept.image(), (byte) 0); }
+        assertEquals("and went over the wire as before", reference, decryptControl(remote, outgoing.get(0)).reference());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> tileOf(activity, id) != null && tileOf(activity, id).drawn() && hasText(activity, words));
+            scenario.onActivity(activity -> {
+                View bubble = (View) tileOf(activity, id).getParent();
+                assertTrue("The quote is read from the sealed message when the chat is drawn", descendants(bubble).stream().anyMatch(QuoteBlock.class::isInstance));
+            });
+        }
+    }
+
+    @Test public void photosSwitchedOffSayNothingWhileTheChatIsDrawnAndSaySoOnlyWhenAPhotoIsTouched() throws Exception {
+        signedInFixture(); conversationsFixture();
+        photoEntry(false, ChatEnvelope.Expiry.HOUR_1, jpeg(800, 600, Color.rgb(46, 125, 94)), 800, 600, null, null, "DELIVERED", -30_000);
+        entry(true, "Some words", null, ChatEnvelope.Expiry.HOUR_1, "READ", -40_000);
+        String refusal = RemoteSettings.Flag.PHOTOS.refusal;
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                setField(activity, "remote", remoteSettings(EnumSet.of(RemoteSettings.Flag.PHOTOS), null, null));
+                setField(activity, "selectedPeer", peerId); inject(activity);
+            });
+            awaitMessages(scenario);
+            // Several refreshes: the chat is drawn, and then drawn again as the screen is brought up to date.
+            for (int round = 0; round < 3; round++)
+                scenario.onActivity(activity -> invoke(activity, "refreshMessages", new Class<?>[]{ChatEngine.Peer.class}, peer));
+            awaitMainCondition(scenario, activity -> !(boolean) readField(activity, "messageRefreshQueued"));
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertTrue("The photos are rows of text", hasText(activity, "Photo"));
+                assertNotEquals("Drawing the chat says nothing about photos", refusal, readField(activity, "lastProblem"));
+            });
+            // What a person asks for does say it.
+            scenario.onActivity(activity -> {
+                View row = text(root(activity), "Photo");
+                while (row != null && !row.hasOnClickListeners()) row = row.getParent() instanceof View parent ? parent : null;
+                assertNotNull("The row of a photo can be touched", row);
+                assertTrue(row.performClick());
+                assertEquals("Touching a photo says that photos are off", refusal, readField(activity, "lastProblem"));
+            });
+        }
+    }
+
+    @Test public void thePictureOfAPhotoThatExpiresWhileTheChatIsOpenLeavesMemoryWithIt() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry soon = photoEntry(false, ChatEnvelope.Expiry.HOUR_1, jpeg(800, 600, Color.rgb(46, 125, 94)), 800, 600, null, null, "DELIVERED", -(3_600_000 - 12_000));
+        ChatEngine.Entry later = photoEntry(false, ChatEnvelope.Expiry.HOUR_1, jpeg(800, 600, Color.rgb(53, 92, 190)), 800, 600, null, null, "DELIVERED", -30_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> tileOf(activity, soon.id()) != null && tileOf(activity, soon.id()).drawn()
+                && tileOf(activity, later.id()) != null && tileOf(activity, later.id()).drawn());
+            scenario.onActivity(activity -> {
+                assertNotNull(thumbnailsOf(activity).get(soon.id()));
+                assertNotNull(thumbnailsOf(activity).get(later.id()));
+            });
+            awaitMainCondition(scenario, activity -> tileOf(activity, soon.id()) == null);
+            scenario.onActivity(activity -> {
+                assertNull("The picture of what has expired is not kept", thumbnailsOf(activity).get(soon.id()));
+                assertNotNull("and the other is", thumbnailsOf(activity).get(later.id()));
+            });
+        }
+    }
+
+    @Test public void aPictureThatFinishesDecodingAfterItsMessageIsNoLongerDrawnIsNotKept() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry shown = photoEntry(false, ChatEnvelope.Expiry.HOUR_1, jpeg(800, 600, Color.rgb(46, 125, 94)), 800, 600, null, null, "DELIVERED", -30_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> tileOf(activity, shown.id()) != null && tileOf(activity, shown.id()).drawn()
+                && ((Map<?, ?>) readField(activity, "thumbnailWaiting")).isEmpty());
+            // A message that no row of the chat draws (it was deleted for everyone, say) whose picture was already being decoded.
+            ChatEngine.Entry gone = photoEntry(false, ChatEnvelope.Expiry.HOUR_1, jpeg(800, 600, Color.rgb(200, 60, 60)), 800, 600, null, null, "DELIVERED", -20_000);
+            PhotoTile[] orphan = new PhotoTile[1];
+            scenario.onActivity(activity -> {
+                orphan[0] = new PhotoTile(activity, new Ui(activity), gone, 8);
+                invoke(activity, "bindThumbnail", new Class<?>[]{ChatEngine.Entry.class, PhotoTile.class}, gone, orphan[0]);
+                assertEquals("The decode was started", 1, ((Map<?, ?>) readField(activity, "thumbnailWaiting")).size());
+            });
+            awaitMainCondition(scenario, activity -> ((Map<?, ?>) readField(activity, "thumbnailWaiting")).isEmpty());
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertNull("It is not kept, for no row draws it", thumbnailsOf(activity).get(gone.id()));
+                assertFalse("nor shown", orphan[0].drawn());
+                assertNotNull("What is drawn keeps its picture", thumbnailsOf(activity).get(shown.id()));
+            });
+        }
+    }
+
+    @Test public void photosSwitchedOffWhileTheChatIsOpenStopEveryFurtherPictureFromBeingDecoded() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry shown = photoEntry(false, ChatEnvelope.Expiry.HOUR_1, jpeg(800, 600, Color.rgb(46, 125, 94)), 800, 600, null, null, "DELIVERED", -30_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> tileOf(activity, shown.id()) != null && tileOf(activity, shown.id()).drawn()
+                && ((Map<?, ?>) readField(activity, "thumbnailWaiting")).isEmpty());
+            ChatEngine.Entry arrived = photoEntry(false, ChatEnvelope.Expiry.HOUR_1, jpeg(800, 600, Color.rgb(53, 92, 190)), 800, 600, null, null, "DELIVERED", -10_000);
+            PhotoTile[] next = new PhotoTile[1];
+            scenario.onActivity(activity -> {
+                // The signed settings arrive after the screen was built, and switch photos off.
+                setField(activity, "remote", remoteSettings(EnumSet.of(RemoteSettings.Flag.PHOTOS), null, null));
+                next[0] = new PhotoTile(activity, new Ui(activity), arrived, 8);
+                invoke(activity, "bindThumbnail", new Class<?>[]{ChatEngine.Entry.class, PhotoTile.class}, arrived, next[0]);
+                assertTrue("Nothing is asked for", ((Map<?, ?>) readField(activity, "thumbnailWaiting")).isEmpty());
+            });
+            android.os.SystemClock.sleep(1_000);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertNull("so nothing is decoded", thumbnailsOf(activity).get(arrived.id()));
+                assertFalse(next[0].drawn());
+            });
+        }
+    }
+
+    @Test public void photosSwitchedOffWhileAnAlbumIsOpenStopTheNextPhotoFromBeingDecoded() throws Exception {
+        signedInFixture(); conversationsFixture();
+        List<ChatEngine.Entry> three = albumOf(false, ChatEnvelope.Expiry.HOURS_24, 3, -30_000, "DELIVERED");
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> albumsOf(activity).size() == 1 && albumsOf(activity).get(0).tiles().stream().allMatch(PhotoTile::drawn));
+            scenario.onActivity(activity -> invoke(activity, "viewAlbum", new Class<?>[]{List.class, int.class}, three, 0));
+            awaitMainCondition(scenario, activity -> viewerOf(activity) != null && viewerOf(activity).isShowing() && !(boolean) readField(viewerOf(activity), "loading"));
+            Bitmap[] first = new Bitmap[1];
+            scenario.onActivity(activity -> first[0] = (Bitmap) readField(viewerOf(activity), "bitmap"));
+            scenario.onActivity(activity -> {
+                setField(activity, "remote", remoteSettings(EnumSet.of(RemoteSettings.Flag.PHOTOS), null, null));
+                invoke(viewerOf(activity), "move", new Class<?>[]{int.class}, 1);
+            });
+            awaitMainCondition(scenario, activity -> !(boolean) readField(viewerOf(activity), "loading"));
+            scenario.onActivity(activity -> {
+                assertEquals("The person who paged is told that photos are off", RemoteSettings.Flag.PHOTOS.refusal, readField(activity, "lastProblem"));
+                assertEquals("The next photo was not decoded", 0, viewerOf(activity).index());
+                assertSame("and the one on the screen stays", first[0], readField(viewerOf(activity), "bitmap"));
+                invoke(activity, "closePhoto");
+            });
+        }
+    }
+
+    @Test public void aPictureLeavesTheCacheWithoutBeingRecycledWhileTheActionsOfItsMessageStillShowIt() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        ChatEngine.Entry photo = photoEntry(false, ChatEnvelope.Expiry.HOUR_1, jpeg(800, 600, Color.rgb(46, 125, 94)), 800, 600, null, null, "DELIVERED", -30_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> tileOf(activity, photo.id()) != null && tileOf(activity, photo.id()).drawn());
+            int[] at = centreOf(scenario, activity -> tileOf(activity, photo.id()));
+            assertTrue(device.swipe(at[0], at[1], at[0], at[1], 200));
+            awaitOverlay(scenario);
+            scenario.onActivity(activity -> {
+                // The message goes (deleted for everyone, or it expires) while its actions are up: its picture leaves the cache, and the
+                // copy of the message in the actions must still be able to draw it.
+                thumbnailsOf(activity).remove(photo.id());
+                View shown = overlay(activity).getWindow().getDecorView();
+                Bitmap image = Bitmap.createBitmap(shown.getWidth(), shown.getHeight(), Bitmap.Config.ARGB_8888);
+                try { shown.draw(new Canvas(image)); }
+                finally { image.recycle(); }
+                // And when the screen is torn down, the actions go before the pictures do.
+                invoke(activity, "resetConversation");
+                assertNull(overlay(activity));
+            });
+        }
+    }
+
+    @Test public void anAlbumThatAnswersAMessageKeepsItsQuoteWhenAnotherPhotoOfItArrivesOrIsReactedTo() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry asked = entry(false, "Could you send the pictures?", null, ChatEnvelope.Expiry.HOUR_1, "READ", -50_000);
+        ChatEnvelope.Reference reference = new ChatEnvelope.Reference(asked.id(), "Could you send the pictures?", Boolean.FALSE);
+        UUID album = UUID.randomUUID();
+        ChatEngine.Entry first = photoEntry(false, ChatEnvelope.Expiry.HOURS_24, jpeg(800, 600, ALBUM_COLORS[0]), 800, 600, new ChatEnvelope.Album(album, 0, 2), reference, "DELIVERED", -20_000);
+        long created = first.expiresAt() - ChatEnvelope.Expiry.HOURS_24.milliseconds;
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> tileOf(activity, first.id()) != null && tileOf(activity, first.id()).drawn());
+            scenario.onActivity(activity -> assertEquals("The photo that answers a message shows what it answers", 1, quotesShowing(activity, "Could you send the pictures?")));
+            // The rest of the album arrives while the chat is open: the row is drawn afresh as the album, and still says what it answers.
+            ChatEngine.Entry second = photoEntry(false, ChatEnvelope.Expiry.HOURS_24, jpeg(800, 600, ALBUM_COLORS[1]), 800, 600, new ChatEnvelope.Album(album, 1, 2), null, "DELIVERED",
+                created - System.currentTimeMillis());
+            scenario.onActivity(activity -> invoke(activity, "refreshMessages", new Class<?>[]{ChatEngine.Peer.class}, peer));
+            awaitMainCondition(scenario, activity -> albumsOf(activity).size() == 1 && albumsOf(activity).get(0).tiles().size() == 2
+                && albumsOf(activity).get(0).tiles().stream().allMatch(PhotoTile::drawn));
+            AlbumView[] before = new AlbumView[1];
+            scenario.onActivity(activity -> {
+                before[0] = albumsOf(activity).get(0);
+                assertEquals("The album that grew still shows what it answers", 1, quotesShowing(activity, "Could you send the pictures?"));
+                // A reaction to the other photo draws the row afresh once more.
+                try { vault.transaction(() -> { write("entry/" + second.id(), engine.entry(second.id()).withReaction(true, ChatEnvelope.REACTIONS.iterator().next())); return null; }); }
+                catch (Exception failure) { throw new AssertionError(failure); }
+                invoke(activity, "refreshMessages", new Class<?>[]{ChatEngine.Peer.class}, peer);
+            });
+            awaitMainCondition(scenario, activity -> albumsOf(activity).size() == 1 && albumsOf(activity).get(0) != before[0]
+                && albumsOf(activity).get(0).tiles().stream().allMatch(PhotoTile::drawn));
+            scenario.onActivity(activity -> assertEquals("and so does the row drawn afresh for a reaction", 1, quotesShowing(activity, "Could you send the pictures?")));
+        }
+    }
+
+    private long quotesShowing(MainActivity activity, String words) {
+        return descendants(root(activity)).stream().filter(QuoteBlock.class::isInstance).filter(quote -> hasText(quote, words)).count();
+    }
+
+    @Test public void openingAPhotoAndClosingItLeavesTheChatWhereItWasWithItsPicturesStillDrawn() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        ChatEngine.Entry photo = photoEntry(false, ChatEnvelope.Expiry.HOUR_1, jpeg(800, 600, Color.rgb(46, 125, 94)), 800, 600, null, null, "DELIVERED", -400_000);
+        for (int index = 1; index <= 14; index++)
+            entry(index % 2 == 0, "Later " + index + " " + "words ".repeat(14), null, ChatEnvelope.Expiry.HOUR_1, "READ", -390_000 + index * 10_000L);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> tileOf(activity, photo.id()) != null && tileOf(activity, photo.id()).drawn());
+            // Away from the bottom, at the photo.
+            scenario.onActivity(activity -> ((ScrollView) readField(activity, "messageScroll")).scrollTo(0, 0));
+            awaitScrollSettled(scenario);
+            int[] before = new int[2]; Bitmap[] picture = new Bitmap[1];
+            scenario.onActivity(activity -> {
+                before[0] = ((ScrollView) readField(activity, "messageScroll")).getScrollY();
+                before[1] = (int) readField(activity, "conversationGeneration");
+                picture[0] = thumbnailsOf(activity).get(photo.id());
+                assertNotNull(picture[0]);
+                assertEquals("The photo is at the top, and the chat is not at the bottom", 0, before[0]);
+            });
+            int[] at = centreOf(scenario, activity -> tileOf(activity, photo.id()));
+            assertTrue(device.click(at[0], at[1]));
+            awaitMainCondition(scenario, activity -> readField(activity, "photoViewer") != null && !(boolean) readField(activity, "busy"));
+            scenario.onActivity(activity -> invoke(activity, "closePhoto"));
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            android.os.SystemClock.sleep(600);
+            scenario.onActivity(activity -> {
+                assertEquals("The screen was not drawn again", before[1], (int) readField(activity, "conversationGeneration"));
+                assertEquals("so the chat is where it was", before[0], ((ScrollView) readField(activity, "messageScroll")).getScrollY());
+                assertTrue("with the picture still drawn", tileOf(activity, photo.id()).drawn());
+                assertSame("and not decoded again", picture[0], thumbnailsOf(activity).get(photo.id()));
+            });
+        }
+    }
+
+    // ---- Several photos sent together as an album (0.7.0) ----
+
+    private static final int[] ALBUM_COLORS = {Color.rgb(46, 125, 94), Color.rgb(53, 92, 190), Color.rgb(200, 60, 60),
+        Color.rgb(230, 160, 30), Color.rgb(120, 60, 170), Color.rgb(30, 160, 170)};
+
+    private List<ChatEngine.Entry> albumOf(boolean outgoing, ChatEnvelope.Expiry expiry, int count, long offset, String state) throws Exception {
+        UUID album = UUID.randomUUID();
+        List<ChatEngine.Entry> members = new ArrayList<>();
+        for (int index = 0; index < count; index++)
+            members.add(photoEntry(outgoing, expiry, jpeg(800, 600, ALBUM_COLORS[index]), 800, 600, new ChatEnvelope.Album(album, index, count), null, state, offset));
+        return members;
+    }
+
+    private List<AlbumView> albumsOf(MainActivity activity) { return albumsIn(root(activity)); }
+
+    private static List<AlbumView> albumsIn(View view) {
+        List<AlbumView> albums = new ArrayList<>();
+        for (View each : descendants(view)) if (each instanceof AlbumView album) albums.add(album);
+        return albums;
+    }
+
+    private static boolean near(int actual, int expected) {
+        return Math.abs(Color.red(actual) - Color.red(expected)) < 30 && Math.abs(Color.green(actual) - Color.green(expected)) < 30
+            && Math.abs(Color.blue(actual) - Color.blue(expected)) < 30;
+    }
+
+    private PhotoViewer viewerOf(MainActivity activity) { return (PhotoViewer) readField(activity, "photoViewer"); }
+
+    // The viewer is a window of its own (and a secure one, so a screenshot of the screen is black); this draws that window by itself.
+    private void viewerSnapshot(ActivityScenario<MainActivity> scenario, String name) {
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        scenario.onActivity(activity -> {
+            View shown = viewerOf(activity).getWindow().getDecorView();
+            Bitmap image = Bitmap.createBitmap(shown.getWidth(), shown.getHeight(), Bitmap.Config.ARGB_8888);
+            shown.draw(new Canvas(image));
+            File folder = new File(context.getExternalFilesDir(null), "ui-qa"); assertTrue(folder.isDirectory() || folder.mkdirs());
+            try (FileOutputStream output = new FileOutputStream(new File(folder, name + ".png"))) { assertTrue(image.compress(Bitmap.CompressFormat.PNG, 100, output)); }
+            catch (IOException failure) { throw new AssertionError(failure); }
+            finally { image.recycle(); }
+        });
+    }
+
+    private static View byDescription(View root, String description) {
+        for (View view : descendants(root)) if (view.getContentDescription() != null && description.contentEquals(view.getContentDescription())) return view;
+        return null;
+    }
+
+    // A drag across the viewer whose times are its own: how fast it is does not depend on how fast the emulator injects touches just then.
+    private void dragAcrossViewer(ActivityScenario<MainActivity> scenario, float fromX, float toX, float y, long milliseconds) {
+        scenario.onActivity(activity -> {
+            PhotoViewer viewer = viewerOf(activity);
+            long down = android.os.SystemClock.uptimeMillis();
+            int steps = 8;
+            for (int step = 0; step <= steps; step++) {
+                int action = step == 0 ? MotionEvent.ACTION_DOWN : step == steps ? MotionEvent.ACTION_UP : MotionEvent.ACTION_MOVE;
+                MotionEvent event = MotionEvent.obtain(down, down + milliseconds * step / steps, action, fromX + (toX - fromX) * step / steps, y, 0);
+                viewer.dispatchTouchEvent(event);
+                event.recycle();
+            }
+        });
+    }
+
+    private boolean viewerShows(MainActivity activity, int index, int color) {
+        PhotoViewer viewer = viewerOf(activity);
+        if (viewer == null || !viewer.isShowing() || viewer.index() != index || !(viewer.image().getDrawable() instanceof android.graphics.drawable.BitmapDrawable drawable)) return false;
+        Bitmap bitmap = drawable.getBitmap();
+        return bitmap != null && !bitmap.isRecycled() && near(bitmap.getPixel(4, 4), color);
+    }
+
+    private View memberRow(MainActivity activity, UUID id) {
+        for (Object row : ((Map<?, ?>) readField(activity, "messageRows")).values())
+            for (Object member : (List<?>) readField(row, "members")) if (((ChatEngine.Entry) member).id().equals(id)) return (View) readField(row, "alignment");
+        return null;
+    }
+
+    private static final Class<?>[] ALBUM_SEND = {ChatEngine.Peer.class, List.class, ChatEnvelope.Expiry.class, ChatEnvelope.Reference.class};
+
+    @Test public void photosSentTogetherAreOneCollageOfTheRightShapeAndTheFourthTileSaysHowManyAreBehindIt() throws Exception {
+        signedInFixture(); conversationsFixture();
+        List<ChatEngine.Entry> two = albumOf(true, ChatEnvelope.Expiry.HOURS_24, 2, -90_000, "READ");
+        List<ChatEngine.Entry> three = albumOf(false, ChatEnvelope.Expiry.HOURS_12, 3, -80_000, "DELIVERED");
+        List<ChatEngine.Entry> four = albumOf(false, ChatEnvelope.Expiry.HOURS_24, 4, -70_000, "DELIVERED");
+        List<ChatEngine.Entry> six = albumOf(false, ChatEnvelope.Expiry.HOURS_24, 6, -60_000, "DELIVERED");
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> { List<AlbumView> albums = albumsOf(activity); return albums.size() == 4 && albums.stream().allMatch(album -> album.tiles().stream().allMatch(PhotoTile::drawn)); });
+            scenario.onActivity(activity -> {
+                List<AlbumView> albums = albumsOf(activity);
+                assertEquals("An album is as many tiles as it has photos, to a square of four", List.of(2, 3, 4, 4), albums.stream().map(album -> album.tiles().size()).toList());
+                assertEquals(List.of(2, 3, 4, 6), albums.stream().map(AlbumView::count).toList());
+                View list = root(activity);
+                int width = Math.min(dpPx(240), Math.max(dpPx(120), list.getWidth() - list.getPaddingLeft() - list.getPaddingRight() - dpPx(80)));
+                for (AlbumView album : albums) {
+                    AlbumLayout.Plan plan = AlbumLayout.plan(album.count(), width, dpPx(2));
+                    assertEquals(plan.width(), album.getLayoutParams().width);
+                    assertEquals(plan.height(), album.getLayoutParams().height);
+                    for (int index = 0; index < album.tiles().size(); index++) {
+                        PhotoTile tile = album.tiles().get(index); AlbumLayout.Tile place = plan.tiles().get(index);
+                        assertEquals(place.left(), tile.getLeft()); assertEquals(place.top(), tile.getTop());
+                        assertEquals(place.width(), tile.getWidth()); assertEquals(place.height(), tile.getHeight());
+                    }
+                }
+                List<PhotoTile> pair = albums.get(0).tiles(), trio = albums.get(1).tiles();
+                assertEquals("Two stand side by side", pair.get(0).getTop(), pair.get(1).getTop());
+                assertTrue(pair.get(0).getLeft() < pair.get(1).getLeft());
+                assertEquals("Three are one tall tile beside two small ones", albums.get(1).getLayoutParams().height, trio.get(0).getHeight());
+                assertTrue(trio.get(2).getTop() > trio.get(1).getTop() && trio.get(1).getLeft() == trio.get(2).getLeft() && trio.get(1).getLeft() > trio.get(0).getLeft());
+                for (int index = 0; index < 3; index++)
+                    for (PhotoTile tile : albums.get(index).tiles()) assertNull("There is no veil unless there are more than four photos", tile.moreText());
+                assertEquals("Six photos show +3 on the fourth tile: the fourth, fifth and sixth are behind it", "+3", albums.get(3).tiles().get(3).moreText().toString());
+                for (int index = 0; index < 3; index++) assertNull(albums.get(3).tiles().get(index).moreText());
+                List<List<ChatEngine.Entry>> all = List.of(two, three, four, six);
+                for (int album = 0; album < 4; album++)
+                    for (int index = 0; index < albums.get(album).tiles().size(); index++) {
+                        PhotoTile tile = albums.get(album).tiles().get(index);
+                        assertEquals("Each tile is the photo that was sent in that place", all.get(album).get(index).id(), tile.entry().id());
+                        assertTrue("and shows that picture", near(tile.bitmap().getPixel(2, 2), ALBUM_COLORS[index]));
+                    }
+                assertEquals("The seven messages and the four albums are eleven rows", 11, ((Map<?, ?>) readField(activity, "messageRows")).size());
+                assertFalse("The photos are pictures, not rows of text", hasText(activity, "Photo"));
+                for (List<ChatEngine.Entry> album : List.of(three, four, six))
+                    for (ChatEngine.Entry member : album) assertEquals("Every photo of an album that is drawn is read, even those behind the +3", "READ", engine.entry(member.id()).state());
+            });
+            snapshot(scenario, "131-albums-in-chat");
+        }
+    }
+
+    @Test public void touchingAPhotoOfAnAlbumOpensItThereAndTheOthersAreReachedByTheArrowsOrASwipe() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        List<ChatEngine.Entry> six = albumOf(false, ChatEnvelope.Expiry.HOURS_24, 6, -60_000, "DELIVERED");
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> albumsOf(activity).size() == 1 && albumsOf(activity).get(0).tiles().stream().allMatch(PhotoTile::drawn));
+            // The tile with the +3 on it opens the fourth photo, and the count says where it is.
+            int[] at = centreOf(scenario, activity -> albumsOf(activity).get(0).tiles().get(3));
+            assertTrue(device.click(at[0], at[1]));
+            awaitMainCondition(scenario, activity -> viewerShows(activity, 3, ALBUM_COLORS[3]));
+            scenario.onActivity(activity -> {
+                View screen = viewerOf(activity).getWindow().getDecorView();
+                assertEquals("4 / 6", text(byDescription(screen, "Photo 4 of 6")));
+                assertNotNull(byDescription(screen, "Previous photo")); assertNotNull(byDescription(screen, "Next photo"));
+                assertEquals(6, viewerOf(activity).count());
+            });
+            viewerSnapshot(scenario, "132-album-viewer");
+            scenario.onActivity(activity -> byDescription(viewerOf(activity).getWindow().getDecorView(), "Next photo").performClick());
+            awaitMainCondition(scenario, activity -> viewerShows(activity, 4, ALBUM_COLORS[4]));
+            // A swipe from the right edge to the left goes to the next, and the last has no next.
+            int width = InstrumentationRegistry.getInstrumentation().getTargetContext().getResources().getDisplayMetrics().widthPixels;
+            int height = InstrumentationRegistry.getInstrumentation().getTargetContext().getResources().getDisplayMetrics().heightPixels;
+            dragAcrossViewer(scenario, width * 4 / 5f, width / 5f, height / 2f, 80);
+            awaitMainCondition(scenario, activity -> viewerShows(activity, 5, ALBUM_COLORS[5]));
+            scenario.onActivity(activity -> {
+                View screen = viewerOf(activity).getWindow().getDecorView();
+                assertEquals("There is nothing after the last photo", View.GONE, byDescription(screen, "Next photo").getVisibility());
+                assertEquals(View.VISIBLE, byDescription(screen, "Previous photo").getVisibility());
+            });
+            dragAcrossViewer(scenario, width / 5f, width * 4 / 5f, height / 2f, 80);
+            awaitMainCondition(scenario, activity -> viewerShows(activity, 4, ALBUM_COLORS[4]));
+            // A photo that is gone is not shown, and the one on the screen stays, and the viewer can still be used afterwards.
+            scenario.onActivity(activity -> { try { engine.erase(six.get(3), "delete"); } catch (Exception failure) { throw new AssertionError(failure); } });
+            scenario.onActivity(activity -> byDescription(viewerOf(activity).getWindow().getDecorView(), "Previous photo").performClick());
+            android.os.SystemClock.sleep(1_500);
+            scenario.onActivity(activity -> assertTrue("The photo that is gone is not shown", viewerShows(activity, 4, ALBUM_COLORS[4])));
+            scenario.onActivity(activity -> byDescription(viewerOf(activity).getWindow().getDecorView(), "Next photo").performClick());
+            awaitMainCondition(scenario, activity -> viewerShows(activity, 5, ALBUM_COLORS[5]));
+            scenario.onActivity(activity -> invoke(activity, "closePhoto"));
+            scenario.onActivity(activity -> assertNull(viewerOf(activity)));
+        }
+    }
+
+    @Test public void aLongPressOnAPhotoOfAnAlbumIsAboutThatPhotoAndASwipeRepliesToTheFirstOne() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        List<ChatEngine.Entry> three = albumOf(true, ChatEnvelope.Expiry.HOURS_24, 3, -10_000, "DELIVERED");
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> albumsOf(activity).size() == 1 && albumsOf(activity).get(0).tiles().stream().allMatch(PhotoTile::drawn));
+            for (int pressed : new int[]{2, 0, 1}) {
+                int[] at = centreOf(scenario, activity -> albumsOf(activity).get(0).tiles().get(pressed));
+                assertTrue(device.swipe(at[0], at[1], at[0], at[1], 200));
+                awaitOverlay(scenario);
+                scenario.onActivity(activity -> {
+                    List<AlbumView> shown = albumsIn(overlay(activity).getWindow().getDecorView());
+                    assertEquals("The actions show the whole album, where it was", 1, shown.size());
+                    assertEquals(3, shown.get(0).tiles().size());
+                });
+                if (pressed == 2) overlaySnapshot(scenario, "133-album-actions");
+                tapAction(scenario, "Reply");
+                scenario.onActivity(activity -> assertEquals("What is offered is for the photo that was pressed", three.get(pressed).id(), ((ChatEngine.Entry) readField(activity, "pendingReplyTo")).id()));
+                clearReply(scenario);
+            }
+            // A drag to the right across the album replies to its first photo, and opens nothing.
+            int[] middle = centreOf(scenario, activity -> albumsOf(activity).get(0));
+            assertTrue(device.swipe(middle[0], middle[1], middle[0] + dpPx(150), middle[1], 20));
+            awaitMainCondition(scenario, activity -> readField(activity, "pendingReplyTo") != null);
+            scenario.onActivity(activity -> {
+                assertEquals(three.get(0).id(), ((ChatEngine.Entry) readField(activity, "pendingReplyTo")).id());
+                assertNull("It did not open the album", viewerOf(activity));
+            });
+        }
+    }
+
+    @Test public void aSendOfSeveralPhotosIsDrawnAsTheCollageItWillBeAndIsReplacedByItsMessagesOnceAllAreStored() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        ChatEngine.Entry asked = entry(false, "Could you send the pictures?", null, ChatEnvelope.Expiry.HOUR_1, "READ", -50_000);
+        ChatEnvelope.Reference reference = new ChatEnvelope.Reference(asked.id(), "Could you send the pictures?", Boolean.FALSE);
+        List<ChatEngine.Incoming> incoming = new ArrayList<>(); List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(incoming, outgoing);
+        List<byte[]> pictures = new ArrayList<>();
+        for (int index = 0; index < 6; index++) pictures.add(jpeg(800, 600, ALBUM_COLORS[index]));
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                assertTrue((boolean) invoke(activity, "enqueueAlbum", ALBUM_SEND, peer, pictures, ChatEnvelope.Expiry.HOURS_24, reference));
+                List<AlbumView> albums = albumsOf(activity);
+                assertEquals("As soon as it is sent, the album is on the screen as the collage it will be", 1, albums.size());
+                assertEquals(4, albums.get(0).tiles().size());
+                assertEquals("+3", albums.get(0).tiles().get(3).moreText().toString());
+                assertTrue("with the pictures that were chosen", albums.get(0).tiles().stream().allMatch(PhotoTile::drawn));
+                assertNotNull(text(root(activity), "Sending 0/6"));
+                assertEquals("and the reply it answers", 1, descendants((View) readField(activity, "messages")).stream().filter(QuoteBlock.class::isInstance).count());
+            });
+            awaitMainCondition(scenario, activity -> outgoing.size() == 6);
+            awaitMainCondition(scenario, activity -> ((List<?>) readField(activity, "pendingSends")).isEmpty() && albumsOf(activity).size() == 1
+                && albumsOf(activity).get(0).tiles().stream().allMatch(tile -> tile.entry() != null && tile.drawn()));
+            List<ChatEnvelope> wire = new ArrayList<>();
+            for (ChatEngine.Send sent : outgoing) wire.add(decryptControl(remote, sent));
+            UUID album = wire.get(0).image().album().id();
+            for (int index = 0; index < 6; index++) {
+                ChatEnvelope.Album place = wire.get(index).image().album();
+                assertEquals("One album", album, place.id());
+                assertEquals("in the order they were chosen", index, place.index());
+                assertEquals(6, place.total());
+                assertNull("A photo carries no text", wire.get(index).text());
+                assertEquals("Only the first photo carries the reply", index == 0, wire.get(index).reference() != null);
+            }
+            assertEquals("Six messages of their own", 6, wire.stream().map(ChatEnvelope::id).distinct().count());
+            assertEquals("and of one lifetime, so that the album goes at once", 1, wire.stream().map(ChatEnvelope::expiresAt).distinct().count());
+            scenario.onActivity(activity -> {
+                List<ChatEngine.Entry> stored = engine.entries(peerId).stream().filter(entry -> entry.image()).toList();
+                assertEquals(6, stored.size());
+                for (ChatEngine.Entry entry : stored) assertEquals(album, entry.photo().album().id());
+                assertFalse("The sending row has gone", hasText(activity, "Sending"));
+                assertEquals("The album is what is shown, in one row (with the question it answers)", 2, ((Map<?, ?>) readField(activity, "messageRows")).size());
+                assertEquals("and keeps the pictures that were just seen, without decoding them again", 6, thumbnailsOf(activity).size());
+                assertEquals(1, descendants((View) readField(activity, "messages")).stream().filter(QuoteBlock.class::isInstance).count());
+            });
+            snapshot(scenario, "134-album-sent");
+        }
+    }
+
+    @Test public void severalPhotosSentViewOnceAreMessagesOfTheirOwnWithNoPictureAndNoAlbum() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        List<ChatEngine.Incoming> incoming = new ArrayList<>(); List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(incoming, outgoing);
+        List<byte[]> pictures = new ArrayList<>();
+        for (int index = 0; index < 3; index++) pictures.add(jpeg(800, 600, ALBUM_COLORS[index]));
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                assertTrue((boolean) invoke(activity, "enqueueAlbum", ALBUM_SEND, peer, pictures, ChatEnvelope.Expiry.VIEW_ONCE, null));
+                assertTrue("While they are sent there is no picture of them", tilesOf(activity).isEmpty() && albumsOf(activity).isEmpty());
+                assertEquals("Three messages are waiting", 3, ((List<?>) readField(activity, "pendingSends")).size());
+            });
+            awaitMainCondition(scenario, activity -> outgoing.size() == 3);
+            awaitMainCondition(scenario, activity -> ((List<?>) readField(activity, "pendingSends")).isEmpty());
+            for (ChatEngine.Send sent : outgoing) assertNull("Nothing about an album goes with a view-once photo", decryptControl(remote, sent).image().album());
+            awaitMainCondition(scenario, activity -> descendants(root(activity)).stream().filter(view -> view instanceof TextView label && "View-once message".contentEquals(label.getText())).count() == 3);
+            scenario.onActivity(activity -> {
+                List<ChatEngine.Entry> stored = engine.entries(peerId);
+                assertEquals(3, stored.size());
+                for (ChatEngine.Entry entry : stored) { assertEquals(ChatEnvelope.Expiry.VIEW_ONCE, entry.expiry()); assertNull(entry.album()); }
+                assertTrue("They are rows of text, with no thumbnail and no collage", tilesOf(activity).isEmpty() && albumsOf(activity).isEmpty());
+                assertEquals("Three rows, one for each", 3, ((Map<?, ?>) readField(activity, "messageRows")).size());
+            });
+        }
+    }
+
+    @Test public void aSendThatStopsHalfWayKeepsWhatWentAndAFreshTryGoesOnFromTheNextPhoto() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        List<ChatEngine.Incoming> incoming = new ArrayList<>(); List<ChatEngine.Send> outgoing = new ArrayList<>();
+        // The contact cannot be looked up once two of the photos have gone: the third cannot be sent, and nothing of it is kept.
+        failLookupsAfterSends = 2;
+        plainTransport(incoming, outgoing);
+        List<byte[]> pictures = new ArrayList<>();
+        for (int index = 0; index < 5; index++) pictures.add(jpeg(800, 600, ALBUM_COLORS[index]));
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> assertTrue((boolean) invoke(activity, "enqueueAlbum", ALBUM_SEND, peer, pictures, ChatEnvelope.Expiry.HOURS_24, null)));
+            awaitMainCondition(scenario, activity -> hasText(activity, "Not sent: 2 of 5 went"));
+            scenario.onActivity(activity -> {
+                assertEquals(2, outgoing.size());
+                assertEquals("Two are stored, and the others are not", 2, engine.entries(peerId).size());
+                assertEquals("They are not drawn on their own: the sending row stands for the album", 1, albumsOf(activity).size());
+                assertTrue(albumsOf(activity).get(0).tiles().stream().allMatch(tile -> tile.entry() == null));
+                assertEquals(1, ((List<?>) readField(activity, "pendingSends")).size());
+            });
+            snapshot(scenario, "135-album-not-sent");
+            failLookupsAfterSends = -1;
+            scenario.onActivity(activity -> assertTrue(byDescription(root(activity), "Retry send").performClick()));
+            awaitMainCondition(scenario, activity -> outgoing.size() == 5);
+            awaitMainCondition(scenario, activity -> ((List<?>) readField(activity, "pendingSends")).isEmpty() && albumsOf(activity).size() == 1
+                && albumsOf(activity).get(0).tiles().stream().allMatch(tile -> tile.entry() != null));
+            List<ChatEnvelope> wire = new ArrayList<>();
+            for (ChatEngine.Send sent : outgoing) wire.add(decryptControl(remote, sent));
+            assertEquals("No photo went twice and none was skipped", List.of(0, 1, 2, 3, 4), wire.stream().map(envelope -> envelope.image().album().index()).toList());
+            assertEquals(1, wire.stream().map(envelope -> envelope.image().album().id()).distinct().count());
+            scenario.onActivity(activity -> assertEquals(5, engine.entries(peerId).size()));
+        }
+    }
+
+    @Test public void photosChosenTogetherArePreviewedTogetherAndOneThatCannotBeUsedDoesNotStopTheOthers() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        List<ChatEngine.Incoming> incoming = new ArrayList<>(); List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(incoming, outgoing);
+        File folder = new File(context.getCacheDir(), "album-test"); assertTrue(folder.isDirectory() || folder.mkdirs());
+        List<Uri> chosen = new ArrayList<>();
+        try {
+            for (int index = 0; index < 3; index++) {
+                File file = new File(folder, "photo" + index + ".jpg");
+                try (FileOutputStream output = new FileOutputStream(file)) { output.write(jpeg(1200, 900, ALBUM_COLORS[index])); }
+                chosen.add(Uri.fromFile(file));
+                if (index == 0) {
+                    File broken = new File(folder, "broken.jpg");
+                    try (FileOutputStream output = new FileOutputStream(broken)) { output.write("this is not a picture".getBytes(StandardCharsets.UTF_8)); }
+                    chosen.add(Uri.fromFile(broken));
+                }
+            }
+            try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+                scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+                awaitMessages(scenario);
+                scenario.onActivity(activity -> { setField(activity, "selectedImages", new ArrayList<>(chosen)); invoke(activity, "importPendingImage"); });
+                awaitMainCondition(scenario, activity -> dialog(activity) != null && dialog(activity).isShowing() && hasText(dialog(activity).getWindow().getDecorView(), "Send 3 photos"));
+                scenario.onActivity(activity -> {
+                    View sheet = dialog(activity).getWindow().getDecorView();
+                    for (int index = 1; index <= 3; index++) assertNotNull("Every photo is shown before it is sent", byDescription(sheet, "Photo " + index + " of 3"));
+                    assertTrue(hasText(sheet, "They arrive together, as one album."));
+                    assertEquals("The one that could not be used is said to have been left out", "One photo could not be used.", readField(activity, "lastNotice"));
+                });
+                snapshot(scenario, "136-album-preview");
+                scenario.onActivity(activity -> dialog(activity).getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).performClick());
+                awaitMainCondition(scenario, activity -> outgoing.size() == 3);
+                List<ChatEnvelope> wire = new ArrayList<>();
+                for (ChatEngine.Send sent : outgoing) wire.add(decryptControl(remote, sent));
+                assertEquals(List.of(0, 1, 2), wire.stream().map(envelope -> envelope.image().album().index()).toList());
+                assertTrue(wire.stream().allMatch(envelope -> envelope.image().album().total() == 3));
+                scenario.onActivity(activity -> assertNull("The preview's pictures are let go", dialog(activity) != null && dialog(activity).isShowing() ? "still showing" : null));
+            }
+        } finally {
+            File[] left = folder.listFiles();
+            if (left != null) for (File file : left) assertTrue(file.delete());
+            assertTrue(folder.delete());
+        }
+    }
+
+    @Test public void onePhotoChosenIsPreviewedWholeAsItAlwaysWasAndOneThatCannotBeUsedIsReportedAsBefore() throws Exception {
+        signedInFixture(); conversationsFixture();
+        File folder = new File(context.getCacheDir(), "single-test"); assertTrue(folder.isDirectory() || folder.mkdirs());
+        try {
+            File good = new File(folder, "photo.jpg"), broken = new File(folder, "broken.jpg");
+            try (FileOutputStream output = new FileOutputStream(good)) { output.write(jpeg(1200, 900, ALBUM_COLORS[0])); }
+            try (FileOutputStream output = new FileOutputStream(broken)) { output.write("this is not a picture".getBytes(StandardCharsets.UTF_8)); }
+            try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+                scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+                awaitMessages(scenario);
+                scenario.onActivity(activity -> { setField(activity, "selectedImages", new ArrayList<>(List.of(Uri.fromFile(good)))); invoke(activity, "importPendingImage"); });
+                awaitMainCondition(scenario, activity -> dialog(activity) != null && dialog(activity).isShowing() && hasText(dialog(activity).getWindow().getDecorView(), "Send photo"));
+                scenario.onActivity(activity -> { assertTrue("The chosen list is taken", ((List<?>) readField(activity, "selectedImages")).isEmpty()); dialog(activity).dismiss(); });
+                // One photo alone that cannot be used is reported, and nothing is previewed.
+                scenario.onActivity(activity -> { setField(activity, "selectedImages", new ArrayList<>(List.of(Uri.fromFile(broken)))); invoke(activity, "importPendingImage"); });
+                awaitMainCondition(scenario, activity -> !(boolean) readField(activity, "busy"));
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+                scenario.onActivity(activity -> assertTrue("Nothing is previewed", dialog(activity) == null || !dialog(activity).isShowing()));
+            }
+        } finally {
+            File[] left = folder.listFiles();
+            if (left != null) for (File file : left) assertTrue(file.delete());
+            assertTrue(folder.delete());
+        }
+    }
+
+    @Test public void photosChosenBeyondWhatOneSendTakesAreCutAndTheNumberLeftOutIsSaid() throws Exception {
+        signedInFixture(); conversationsFixture();
+        File folder = new File(context.getCacheDir(), "over-test"); assertTrue(folder.isDirectory() || folder.mkdirs());
+        List<Uri> chosen = new ArrayList<>();
+        try {
+            for (int index = 0; index < Albums.MAX_SENT + 2; index++) {
+                File file = new File(folder, "photo" + index + ".jpg");
+                try (FileOutputStream output = new FileOutputStream(file)) { output.write(jpeg(400, 300, ALBUM_COLORS[index % ALBUM_COLORS.length])); }
+                chosen.add(Uri.fromFile(file));
+            }
+            try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+                scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+                awaitMessages(scenario);
+                scenario.onActivity(activity -> invoke(activity, "imagesChosen", new Class<?>[]{List.class}, new ArrayList<>(chosen)));
+                awaitMainCondition(scenario, activity -> dialog(activity) != null && dialog(activity).isShowing()
+                    && hasText(dialog(activity).getWindow().getDecorView(), "Send " + Albums.MAX_SENT + " photos"));
+                scenario.onActivity(activity -> {
+                    assertEquals("What a send takes is kept, and the rest is said to be left out", "Only " + Albums.MAX_SENT + " photos go at once.", readField(activity, "lastNotice"));
+                    assertEquals("The count is used up, and does not carry into the next choice", 0, readField(activity, "imagesLeftOut"));
+                    assertTrue(((List<?>) readField(activity, "selectedImages")).isEmpty());
+                    dialog(activity).dismiss();
+                });
+            }
+        } finally {
+            File[] left = folder.listFiles();
+            if (left != null) for (File file : left) assertTrue(file.delete());
+            assertTrue(folder.delete());
+        }
+    }
+
+    @Test public void photosSentAsAnAlbumToAGroupCarryTheirPlaceAndTheRelaySeesNoneOfIt() throws Exception {
+        signedInFixture();
+        UUID groupId = UUID.randomUUID(), epoch = UUID.randomUUID(), album = UUID.randomUUID();
+        SignalClient recipient = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        recipient.verifyPeer(userId, engine.groupSignal().publicIdentity());
+        engine.groupSignal().verifyPeer(peerId, recipient.publicIdentity());
+        peer = new ChatEngine.Peer(peerId, peerDevice, Base64.getEncoder().encodeToString(recipient.publicIdentity()), "friend", "friend", null);
+        GroupChat.Snapshot snapshot = new GroupChat.Snapshot(groupId, userId, 2, epoch, false, List.of(
+            new GroupChat.Member(userId, deviceId, Base64.getEncoder().encodeToString(engine.groupSignal().publicIdentity()), "alex", null, "ACTIVE", 0),
+            new GroupChat.Member(peerId, peerDevice, peer.identityKey(), "friend", null, "ACTIVE", 0)));
+        vault.transaction(() -> {
+            write("contact/" + peerId, peer); write("group/" + groupId, new GroupChat.Conversation(snapshot, "Private launch", null));
+            write("group-title/" + groupId, "Private launch"); write("group-allowed/" + groupId, snapshot.roster().members()); return null;
+        });
+        List<GroupChat.ControlSend> controls = new ArrayList<>(); List<GroupChat.Send> messages = new ArrayList<>();
+        ((RelayApi) readField(engine, "api")).close();
+        setField(engine, "api", syntheticApi(chain -> {
+            okhttp3.Request request = chain.request();
+            String path = request.url().encodedPath();
+            if (path.equals("/groups/" + groupId) && request.method().equals("GET")) return syntheticResponse(request, 200, snapshot);
+            if (path.endsWith("/keys")) {
+                try { return syntheticResponse(request, 200, List.of(new GroupChat.Claimed(peerId, recipient.generatePreKey(Instant.now())))); }
+                catch (Exception failure) { throw new IOException("Synthetic prekey fixture failed"); }
+            }
+            okio.Buffer buffer = new okio.Buffer(); request.body().writeTo(buffer); String body = buffer.readUtf8();
+            assertFalse("The relay is not told which photos belong together", body.contains(album.toString()));
+            if (path.endsWith("/controls")) {
+                controls.addAll(RelayApi.JSON.fromJson(body, GroupChat.Controls.class).packets()); return syntheticResponse(request, 200, Map.of());
+            }
+            assertTrue(path.endsWith("/messages"));
+            GroupChat.Send message = RelayApi.JSON.fromJson(body, GroupChat.Send.class); messages.add(message);
+            return syntheticResponse(request, 200, new GroupChat.Status(message.id(), message.expiresAt(), 1, 0, 0, "QUEUED"));
+        }));
+        long created = System.currentTimeMillis();
+        for (int index = 0; index < 3; index++) {
+            UUID id = UUID.randomUUID();
+            createFixtureKey(AndroidVault.contentAlias(created + ChatEnvelope.Expiry.HOURS_24.milliseconds, id, userId));
+            engine.groups().send(groupId, null, jpeg(800, 600, ALBUM_COLORS[index]), ChatEnvelope.Expiry.HOURS_24, new ChatEnvelope.Album(album, index, 3), id, created, () -> { });
+        }
+        assertEquals(3, messages.size());
+        SignalGroup receiving = new SignalGroup(new DeviceSecurityTest.MemoryVault(), groupId, epoch, peerId);
+        for (GroupChat.ControlSend packet : controls) {
+            byte[] plaintext = recipient.decrypt(userId, new SignalClient.Packet(packet.type(), packet.ciphertext()));
+            try {
+                GroupChat.ControlBody body = RelayApi.JSON.fromJson(new String(plaintext, StandardCharsets.UTF_8), GroupChat.ControlBody.class);
+                if (body.kind().equals("KEY")) receiving.accept(userId, body.distribution());
+            } finally { Arrays.fill(plaintext, (byte) 0); }
+        }
+        for (int index = 0; index < 3; index++) {
+            byte[] plaintext = receiving.decrypt(userId, messages.get(index).ciphertext());
+            try {
+                ChatEnvelope.Attachment image = RelayApi.JSON.fromJson(new String(plaintext, StandardCharsets.UTF_8), GroupEnvelope.class).content().image();
+                assertEquals("Each photo says where it belongs", album, image.album().id());
+                assertEquals(index, image.album().index()); assertEquals(3, image.album().total());
+                assertEquals("and how it is shaped", 800, image.width()); assertEquals(600, image.height());
+            } finally { Arrays.fill(plaintext, (byte) 0); }
+        }
+        List<ChatEngine.Entry> stored = engine.entries(groupId);
+        assertEquals(3, stored.size());
+        assertTrue("What was sent is kept with its place", stored.stream().allMatch(entry -> entry.album() != null && entry.album().id().equals(album) && entry.photo().width() == 800));
+        List<Albums.Row> rows = Albums.rows(stored, true);
+        assertEquals("and is one album when it is drawn", 1, rows.size());
+        assertTrue(rows.get(0).album()); assertEquals(3, rows.get(0).members().size());
+    }
+
+    @Test public void aSendIsRefusedWhenItHasMorePhotosThanTheRelayTakesInAMinuteOrNoneAtAll() throws Exception {
+        signedInFixture(); conversationsFixture();
+        List<byte[]> seven = new ArrayList<>();
+        for (int index = 0; index < Albums.MAX_SENT + 1; index++) seven.add(new byte[]{1, 2, 3});
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                assertFalse((boolean) invoke(activity, "enqueueAlbum", ALBUM_SEND, peer, seven, ChatEnvelope.Expiry.HOURS_24, null));
+                assertFalse((boolean) invoke(activity, "enqueueAlbum", ALBUM_SEND, peer, new ArrayList<byte[]>(), ChatEnvelope.Expiry.HOURS_24, null));
+                assertTrue(((List<?>) readField(activity, "pendingSends")).isEmpty());
+            });
+        }
+    }
+
+    @Test public void photosSwitchedOffMakeAnAlbumPlainRowsOfTextAndNothingIsDecoded() throws Exception {
+        signedInFixture(); conversationsFixture();
+        List<ChatEngine.Entry> three = albumOf(false, ChatEnvelope.Expiry.HOURS_24, 3, -30_000, "DELIVERED");
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                setField(activity, "remote", remoteSettings(EnumSet.of(RemoteSettings.Flag.PHOTOS), null, null));
+                setField(activity, "selectedPeer", peerId); inject(activity);
+            });
+            awaitMessages(scenario);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertTrue("No collage and no picture", albumsOf(activity).isEmpty() && tilesOf(activity).isEmpty());
+                assertEquals("Each photo is a row of text, with nothing decoded", 0, thumbnailsOf(activity).size());
+                assertEquals(10, ((Map<?, ?>) readField(activity, "messageRows")).size());
+                for (ChatEngine.Entry member : three) assertEquals("and none is read", "DELIVERED", engine.entry(member.id()).state());
+            });
+        }
+    }
+
+    @Test public void touchingTheQuoteOfAPhotoThatIsInAnAlbumGoesToTheAlbum() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        List<ChatEngine.Entry> three = albumOf(false, ChatEnvelope.Expiry.HOURS_24, 3, -300_000, "DELIVERED");
+        for (int index = 1; index <= 14; index++)
+            entry(index % 2 == 0, "Later " + index + " " + "words ".repeat(14), null, ChatEnvelope.Expiry.HOUR_1, "READ", -290_000 + index * 10_000L);
+        entryQuoting(true, "That one is lovely", new ChatEnvelope.Reference(three.get(2).id(), QuoteBlock.PHOTO, Boolean.FALSE), -10_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitScrollSettled(scenario);
+            int[] at = centreOfQuote(scenario, "That one is lovely");
+            assertTrue(device.click(at[0], at[1]));
+            awaitMainCondition(scenario, activity -> readField(activity, "quoteFlashRow") != null);
+            scenario.onActivity(activity -> {
+                assertSame("The album the photo is in is the one that is lit up", memberRow(activity, three.get(2).id()), readField(activity, "quoteFlashRow"));
+                assertNull("Nothing was said about it being gone", readField(activity, "lastNotice"));
+            });
+        }
+    }
+
+    // ---- Emoji, big emoji, and the faces typed with keys that become them (0.7.0) ----
+
+    private static final String SMILE = "\uD83D\uDE42", GRIN = "\uD83D\uDE04", LAUGH = "\uD83D\uDE06", WINK = "\uD83D\uDE09", CRY = "\uD83D\uDE22",
+        GASP = "\uD83D\uDE2E", HEART = "\u2764\uFE0F", BROKEN = "\uD83D\uDC94";
+
+    private EditText composerOf(MainActivity activity) { return (EditText) readField(activity, "composer"); }
+
+    private void pressSend(MainActivity activity) {
+        ((View) descendants(root(activity)).stream().filter(view -> "Send".contentEquals(String.valueOf(view.getContentDescription()))).findFirst().orElseThrow()).performClick();
+    }
+
+    /** Types as a keyboard does: a piece at a time, at the cursor, through the connection that the field gives to the keyboard. */
+    private static void typeInto(EditText field, String text) {
+        android.view.inputmethod.InputConnection keyboard = field.onCreateInputConnection(new android.view.inputmethod.EditorInfo());
+        for (int index = 0; index < text.length(); ) {
+            int length = Character.charCount(text.codePointAt(index));
+            assertTrue(keyboard.commitText(text.substring(index, index + length), 1));
+            index += length;
+        }
+    }
+
+    /** What a keyboard does for its delete key when it asks the field to take back the character before the cursor. */
+    private static void deleteBefore(EditText field) {
+        assertTrue(field.onCreateInputConnection(new android.view.inputmethod.EditorInfo()).deleteSurroundingText(1, 0));
+    }
+
+    private static void pickFrom(EmojiPanel panel, int position) {
+        panel.grid().getOnItemClickListener().onItemClick(panel.grid(), null, position, position);
+    }
+
+    private float sp(MainActivity activity, float size) {
+        return android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, size, activity.getResources().getDisplayMetrics());
+    }
+
+    @Test public void aFaceBecomesItsEmojiWhenTheSpaceAfterItIsTypedAndNotBefore() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                EditText composer = composerOf(activity);
+                typeInto(composer, "ok :)");
+                assertEquals("Until the word is over a face is a face, so that a stretched one can still be typed", "ok :)", composer.getText().toString());
+                typeInto(composer, " ");
+                assertEquals("ok " + SMILE + " ", composer.getText().toString());
+                assertEquals("The cursor is after the space, where the next word goes", composer.length(), composer.getSelectionStart());
+                typeInto(composer, ":D");
+                assertEquals("ok " + SMILE + " :D", composer.getText().toString());
+                typeInto(composer, "\n");
+                assertEquals("A new line ends the word as a space does", "ok " + SMILE + " " + GRIN + "\n", composer.getText().toString());
+                typeInto(composer, "love <3! ");
+                assertEquals("A mark after the face does not stop it and stays", "ok " + SMILE + " " + GRIN + "\nlove " + HEART + "! ", composer.getText().toString());
+                typeInto(composer, "xD ;) </3 :'( :o ");
+                assertEquals("ok " + SMILE + " " + GRIN + "\nlove " + HEART + "! " + LAUGH + " " + WINK + " " + BROKEN + " " + CRY + " " + GASP + " ", composer.getText().toString());
+                assertEquals(composer.length(), composer.getSelectionStart());
+            });
+            snapshot(scenario, "133-faces-typed");
+        }
+    }
+
+    @Test public void textThatOnlyHasTheKeysOfAFaceInItOrIsStretchedIsNotChanged() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                EditText composer = composerOf(activity);
+                for (String typed : new String[]{"10:30 ", "std::cout ", "http://x.y ", ":))) ", ":(( ", "<333 ", ":DDD ", "ok:) ", "a:D ", ":Dog ", "8) ", "B) ", "x<3 ", "(:) ", "xd ", "t_t "}) {
+                    composer.setText("");
+                    typeInto(composer, typed);
+                    assertEquals(typed + "is left as it was typed", typed, composer.getText().toString());
+                }
+            });
+        }
+    }
+
+    @Test public void aFaceTypedInTheMiddleOfATextIsChangedAndTheCursorStaysWhereItWas() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                EditText composer = composerOf(activity);
+                composer.setText("ab cd"); composer.setSelection(3);
+                typeInto(composer, ":D");
+                assertEquals("The word is not over: it is :Dcd for now", "ab :Dcd", composer.getText().toString());
+                typeInto(composer, " ");
+                assertEquals("ab " + GRIN + " cd", composer.getText().toString());
+                assertEquals("The cursor is after the space that was typed", 6, composer.getSelectionStart());
+                assertEquals(6, composer.getSelectionEnd());
+                typeInto(composer, "x");
+                assertEquals("ab " + GRIN + " xcd", composer.getText().toString());
+            });
+        }
+    }
+
+    @Test public void deleteJustAfterTheChangeBringsTheFaceBackAndLeavesItAloneWhileAnyOtherDeleteJustDeletes() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                EditText composer = composerOf(activity);
+                typeInto(composer, "ok :) ");
+                assertEquals("ok " + SMILE + " ", composer.getText().toString());
+                deleteBefore(composer);
+                assertEquals("The face is back as it was typed and the space stays deleted", "ok :)", composer.getText().toString());
+                assertEquals("with the cursor after it", 5, composer.getSelectionStart());
+                typeInto(composer, " ");
+                assertEquals("A face that was brought back is not changed again", "ok :) ", composer.getText().toString());
+                deleteBefore(composer); deleteBefore(composer);
+                assertEquals("and the next deletes are ordinary ones", "ok :", composer.getText().toString());
+
+                // After anything else is typed, delete only deletes.
+                composer.setText("");
+                typeInto(composer, "hi :D ");
+                typeInto(composer, "x");
+                deleteBefore(composer);
+                assertEquals("hi " + GRIN + " ", composer.getText().toString());
+                deleteBefore(composer);
+                assertEquals("The emoji stays an emoji", "hi " + GRIN, composer.getText().toString());
+
+                // In the middle of a text the face goes back where the emoji was.
+                composer.setText("a c"); composer.setSelection(2);
+                typeInto(composer, "<3");
+                typeInto(composer, " ");
+                assertEquals("a " + HEART + " c", composer.getText().toString());
+                deleteBefore(composer);
+                assertEquals("a <3c", composer.getText().toString());
+                assertEquals(4, composer.getSelectionStart());
+
+                // The delete key that the emoji panel has is a key event, and does the same.
+                composer.setText("");
+                typeInto(composer, "yes ;) ");
+                assertEquals("yes " + WINK + " ", composer.getText().toString());
+                composer.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL));
+                composer.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL));
+                assertEquals("yes ;)", composer.getText().toString());
+            });
+        }
+    }
+
+    @Test public void aFaceBroughtBackIsNotChangedAgainWhenTheTextIsPutBackAsADraft() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                EditText composer = composerOf(activity);
+                typeInto(composer, "ok :) ");
+                deleteBefore(composer);
+                typeInto(composer, " ");
+                assertEquals("ok :) ", composer.getText().toString());
+                invoke(activity, "render");
+                assertEquals("The draft comes back as it was, not as it would be if it were typed again", "ok :) ", composerOf(activity).getText().toString());
+            });
+        }
+    }
+
+    @Test public void aFaceStillInTheTextWhenTheMessageIsSentIsChangedAndOneBroughtBackIsNot() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(new ArrayList<>(), outgoing);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> { typeInto(composerOf(activity), "see you :D"); pressSend(activity); });
+            awaitMainCondition(scenario, activity -> outgoing.size() == 1);
+            assertEquals("The face at the end, with no space after it, is changed as the message is sent", "see you " + GRIN, decryptControl(remote, outgoing.get(0)).text());
+            scenario.onActivity(activity -> { composerOf(activity).setText("a :) b ;) c :/ 10:30"); pressSend(activity); });
+            awaitMainCondition(scenario, activity -> outgoing.size() == 2);
+            assertEquals("Faces in a text that was pasted are changed, and nothing else is", "a " + SMILE + " b " + WINK + " c \uD83D\uDE15 10:30", decryptControl(remote, outgoing.get(1)).text());
+            scenario.onActivity(activity -> {
+                typeInto(composerOf(activity), "keep :) ");
+                deleteBefore(composerOf(activity));
+                assertEquals("keep :)", composerOf(activity).getText().toString());
+                pressSend(activity);
+            });
+            awaitMainCondition(scenario, activity -> outgoing.size() == 3);
+            assertEquals("A face that was brought back is sent as it is", "keep :)", decryptControl(remote, outgoing.get(2)).text());
+            scenario.onActivity(activity -> { assertEquals("The field is empty again", 0, composerOf(activity).length()); });
+        }
+    }
+
+    @Test public void aFaceAtTheVeryEndOfAFullMessageIsChangedWithoutTheLimitSayingAnythingAndAFaceAloneIsSentAsABareEmoji() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        List<ChatEngine.Send> outgoing = new ArrayList<>();
+        plainTransport(new ArrayList<>(), outgoing);
+        String full = "x ".repeat(2047);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                composerOf(activity).setText(full + ":)");
+                assertEquals(4096, composerOf(activity).length());
+                pressSend(activity);
+            });
+            awaitMainCondition(scenario, activity -> outgoing.size() == 1);
+            String sent = decryptControl(remote, outgoing.get(0)).text();
+            assertEquals(full + SMILE, sent);
+            assertEquals("It is no longer than it was", 4096, sent.length());
+            scenario.onActivity(activity -> assertNull("The limit did not have anything to say", readField(activity, "lastNotice")));
+            scenario.onActivity(activity -> { typeInto(composerOf(activity), ":*"); pressSend(activity); });
+            awaitMainCondition(scenario, activity -> outgoing.size() == 2);
+            assertEquals("\uD83D\uDE18", decryptControl(remote, outgoing.get(1)).text());
+            awaitMainCondition(scenario, activity -> hasText(activity, "\uD83D\uDE18"));
+            scenario.onActivity(activity -> {
+                TextView body = (TextView) text(root(activity), "\uD83D\uDE18");
+                assertEquals("What was typed as a face is drawn as one emoji alone is", sp(activity, 48), body.getTextSize(), 0.5f);
+            });
+        }
+    }
+
+    @Test public void theEmojiButtonBringsUpThePanelAndBackBringsItDownWithoutLeavingTheChat() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                ImageButton button = (ImageButton) readField(activity, "emojiControl");
+                EmojiPanel panel = (EmojiPanel) readField(activity, "emojiPanel");
+                assertEquals("The panel is not there until it is asked for", View.GONE, panel.getVisibility());
+                assertEquals("and what the phone can draw is not worked out while the chat is opened", -1, panel.tab());
+                assertTrue(panel.shown().isEmpty());
+                assertEquals("Emoji", String.valueOf(button.getContentDescription()));
+                button.performClick();
+            });
+            awaitMainCondition(scenario, activity -> (boolean) readField(activity, "emojiShown"));
+            snapshot(scenario, "134-emoji-panel");
+            scenario.onActivity(activity -> {
+                ImageButton button = (ImageButton) readField(activity, "emojiControl");
+                EmojiPanel panel = (EmojiPanel) readField(activity, "emojiPanel");
+                assertEquals(View.VISIBLE, panel.getVisibility());
+                assertEquals("The button now offers the keyboard", "Keyboard", String.valueOf(button.getContentDescription()));
+                assertTrue("as tall as a keyboard", panel.getLayoutParams().height >= (int) (240 * activity.getResources().getDisplayMetrics().density));
+                assertEquals("Smileys are the first thing there is before anything has been used", 1, panel.tab());
+                assertEquals(1 + Emoji.CATEGORIES.size(), panel.tabs().size());
+                button.performClick();
+                assertEquals(View.GONE, panel.getVisibility());
+                assertEquals("Emoji", String.valueOf(button.getContentDescription()));
+                assertFalse((boolean) readField(activity, "emojiShown"));
+                button.performClick();
+                assertEquals(View.VISIBLE, panel.getVisibility());
+                activity.getOnBackPressedDispatcher().onBackPressed();
+                assertEquals("Back closes the panel first", View.GONE, panel.getVisibility());
+                assertNotNull("and stays in the chat", readField(activity, "composer"));
+                assertEquals("Emoji", String.valueOf(button.getContentDescription()));
+            });
+        }
+    }
+
+    @Test public void anEmojiChosenGoesInAtTheCursorInPlaceOfWhatIsSelectedIsRememberedAndTheDeleteKeyTakesBackAWholeEmoji() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                EditText composer = composerOf(activity);
+                EmojiPanel panel = (EmojiPanel) readField(activity, "emojiPanel");
+                @SuppressWarnings("unchecked") List<String> recent = (List<String>) readField(activity, "recentEmoji");
+                ((View) readField(activity, "emojiControl")).performClick();
+                panel.select(1);
+                List<String> smileys = new ArrayList<>(panel.shown());
+                assertTrue("The phone can draw a good many of them", smileys.size() >= 20);
+                pickFrom(panel, 0); pickFrom(panel, 1);
+                assertEquals(smileys.get(0) + smileys.get(1), composer.getText().toString());
+                assertEquals("What was chosen is remembered, the last first", List.of(smileys.get(1), smileys.get(0)), recent);
+                panel.select(0);
+                assertEquals("and is what the first tab offers", List.of(smileys.get(1), smileys.get(0)), panel.shown());
+                composer.setText("hello world"); composer.setSelection(6, 11);
+                pickFrom(panel, 0);
+                assertEquals("What was selected is replaced", "hello " + smileys.get(1), composer.getText().toString());
+                assertEquals(composer.length(), composer.getSelectionStart());
+                composer.setSelection(5);
+                pickFrom(panel, 1);
+                assertEquals("An emoji goes in at the cursor", "hello" + smileys.get(0) + " " + smileys.get(1), composer.getText().toString());
+                assertEquals(6 + smileys.get(0).length() - 1, composer.getSelectionStart());
+
+                // The key at the corner of the panel takes back one whole emoji at a time, however many characters it is made of.
+                String family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67", flag = "\uD83C\uDDEE\uD83C\uDDF3", tone = "\uD83D\uDC4D\uD83C\uDFFD";
+                composer.setText("ab"); composer.setSelection(2);
+                for (String emoji : new String[]{family, flag, tone}) {
+                    invoke(activity, "insertEmoji", new Class<?>[]{String.class}, emoji);
+                    assertEquals("ab" + emoji, composer.getText().toString());
+                    panel.eraseKey().performClick();
+                    assertEquals("One press takes back all of it", "ab", composer.getText().toString());
+                }
+                panel.eraseKey().performClick();
+                assertEquals("and then the letters, one by one", "a", composer.getText().toString());
+            });
+        }
+    }
+
+    @Test public void whatWasUsedLatelyIsBoundedHasNoRepeatsAndIsForgottenWhenTheAppIsLocked() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                EmojiPanel panel = (EmojiPanel) readField(activity, "emojiPanel");
+                @SuppressWarnings("unchecked") List<String> recent = (List<String>) readField(activity, "recentEmoji");
+                for (int index = 0; index < 30; index++) panel.used(new String(Character.toChars(0x1F600 + index)));
+                assertEquals(EmojiPanel.RECENT_MAX, recent.size());
+                assertEquals("The last used is first", new String(Character.toChars(0x1F600 + 29)), recent.get(0));
+                String again = new String(Character.toChars(0x1F600 + 20));
+                panel.used(again);
+                assertEquals("Using one again moves it up and does not repeat it", EmojiPanel.RECENT_MAX, recent.size());
+                assertEquals(again, recent.get(0));
+                assertEquals(1, recent.stream().filter(again::equals).count());
+                invoke(activity, "hideContent");
+                assertTrue("It is forgotten when the content is hidden", recent.isEmpty());
+                assertNull(readField(activity, "emojiPanel"));
+            });
+        }
+    }
+
+    @Test public void anEmojiThatWouldNotFitInTheMessageIsRefusedWholeAndSaysSoAndOneThatFitsReplacesWhatIsSelected() throws Exception {
+        signedInFixture(); conversationsFixture();
+        String family = "\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67";
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> {
+                EditText composer = composerOf(activity);
+                composer.setText("a".repeat(4090)); composer.setSelection(4090);
+                invoke(activity, "insertEmoji", new Class<?>[]{String.class}, family);
+                assertEquals("Eight characters of emoji do not fit in six: none of it goes in, and not a part of it", 4090, composer.length());
+                assertEquals(String.format(Locale.getDefault(), "A message can have up to %,d characters.", 4096), readField(activity, "lastNotice"));
+                invoke(activity, "insertEmoji", new Class<?>[]{String.class}, SMILE);
+                assertEquals("One that fits goes in", 4092, composer.length());
+                assertEquals(4092, composer.getSelectionStart());
+                composer.setSelection(0, 4092);
+                invoke(activity, "insertEmoji", new Class<?>[]{String.class}, family);
+                assertEquals("Replacing what is selected makes room, so it fits", family, composer.getText().toString());
+                assertEquals(family.length(), composer.getSelectionStart());
+                assertEquals(family.length(), composer.getSelectionEnd());
+            });
+        }
+    }
+
+    private boolean keyboardUp(MainActivity activity) {
+        androidx.core.view.WindowInsetsCompat insets = androidx.core.view.ViewCompat.getRootWindowInsets(root(activity));
+        return insets != null && insets.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime());
+    }
+
+    private int[] centreOnScreen(View view) {
+        int[] at = new int[2];
+        view.getLocationOnScreen(at);
+        at[0] += view.getWidth() / 2; at[1] += view.getHeight() / 2;
+        return at;
+    }
+
+    // With the phone's own keyboard: the panel takes its place and gives it back, and the two are never on the screen together.
+    @Test public void withARealKeyboardUpTheEmojiButtonSwapsItForThePanelAndBackAndTheTwoAreNeverThereTogether() throws Exception {
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        // The emulator counts as having a hardware keyboard, which keeps the on-screen one down unless it is told otherwise.
+        String before = device.executeShellCommand("settings get secure show_ime_with_hard_keyboard").trim();
+        device.executeShellCommand("settings put secure show_ime_with_hard_keyboard 1");
+        try {
+            signedInFixture(); conversationsFixture();
+            try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+                scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+                awaitMessages(scenario);
+                int[][] composerAt = new int[1][];
+                scenario.onActivity(activity -> composerAt[0] = centreOnScreen(composerOf(activity)));
+                assertTrue(device.click(composerAt[0][0] + 60, composerAt[0][1]));
+                boolean[] together = new boolean[1];
+                StringBuilder timeline = new StringBuilder();
+                String[] lastState = {""};
+                // Watches every frame for both being up at once, for as long as the test runs, and keeps what it saw for the failure message.
+                scenario.onActivity(activity -> new Runnable() {
+                    @Override public void run() {
+                        EmojiPanel panel = (EmojiPanel) readField(activity, "emojiPanel");
+                        boolean visible = panel != null && panel.getVisibility() == View.VISIBLE, up = keyboardUp(activity);
+                        if (visible && up) together[0] = true;
+                        String state = (visible ? "panel " : "") + (up ? "keyboard " : "") + ((boolean) readField(activity, "emojiPending") ? "pending" : "");
+                        if (!state.equals(lastState[0])) { lastState[0] = state; timeline.append(android.os.SystemClock.uptimeMillis() % 100_000).append(' ').append(state.trim()).append(" | "); }
+                        if (!activity.isFinishing()) new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(this, 16);
+                    }
+                }.run());
+                try { awaitMainCondition(scenario, this::keyboardUp); }
+                catch (AssertionError none) { org.junit.Assume.assumeTrue("This emulator brought up no keyboard", false); }
+                int[] keyboardHeight = new int[1];
+                scenario.onActivity(activity -> keyboardHeight[0] = (int) readField(activity, "keyboardHeight"));
+                assertTrue("The height of the keyboard was noted", keyboardHeight[0] > 0);
+
+                int[][] buttonAt = new int[1][];
+                scenario.onActivity(activity -> buttonAt[0] = centreOnScreen((View) readField(activity, "emojiControl")));
+                assertTrue(device.click(buttonAt[0][0], buttonAt[0][1]));
+                awaitMainCondition(scenario, activity -> (boolean) readField(activity, "emojiShown"));
+                awaitMainCondition(scenario, activity -> !keyboardUp(activity));
+                scenario.onActivity(activity -> {
+                    EmojiPanel panel = (EmojiPanel) readField(activity, "emojiPanel");
+                    assertEquals(View.VISIBLE, panel.getVisibility());
+                    assertTrue("The panel is as tall as the keyboard was, so that the chat does not jump", panel.getLayoutParams().height >= keyboardHeight[0]);
+                    assertEquals("Keyboard", String.valueOf(((View) readField(activity, "emojiControl")).getContentDescription()));
+                });
+                snapshot(scenario, "137-emoji-after-keyboard");
+
+                // The button gives the keyboard back, and the panel goes.
+                scenario.onActivity(activity -> buttonAt[0] = centreOnScreen((View) readField(activity, "emojiControl")));
+                assertTrue(device.click(buttonAt[0][0], buttonAt[0][1]));
+                awaitMainCondition(scenario, activity -> !(boolean) readField(activity, "emojiShown") && keyboardUp(activity));
+                scenario.onActivity(activity -> assertEquals(View.GONE, ((EmojiPanel) readField(activity, "emojiPanel")).getVisibility()));
+
+                // And touching the field with the panel up brings the keyboard back as well.
+                scenario.onActivity(activity -> buttonAt[0] = centreOnScreen((View) readField(activity, "emojiControl")));
+                assertTrue(device.click(buttonAt[0][0], buttonAt[0][1]));
+                awaitMainCondition(scenario, activity -> (boolean) readField(activity, "emojiShown") && !keyboardUp(activity));
+                scenario.onActivity(activity -> composerAt[0] = centreOnScreen(composerOf(activity)));
+                assertTrue(device.click(composerAt[0][0] + 60, composerAt[0][1]));
+                awaitMainCondition(scenario, activity -> !(boolean) readField(activity, "emojiShown") && keyboardUp(activity));
+                assertFalse("The panel and the keyboard were never on the screen at the same moment: " + timeline, together[0]);
+            }
+        } finally {
+            device.executeShellCommand("settings put secure show_ime_with_hard_keyboard " + (before.equals("null") || before.isEmpty() ? "0" : before));
+        }
+    }
+
+    @Test public void oneToThreeEmojiAreDrawnLargeAndWithoutABubbleAndAnythingElseKeepsItsBubbleAndItsActions() throws Exception {
+        signedInFixture(); conversationsFixture();
+        String one = "\uD83D\uDE00", two = one + "\uD83D\uDE02", three = two + "\uD83D\uDC4D", four = three + "\uD83D\uDD25", mixed = "ok " + one, answer = "\uD83D\uDE2E";
+        entry(true, one, null, ChatEnvelope.Expiry.HOUR_1, "READ", -50_000);
+        entry(false, two, null, ChatEnvelope.Expiry.HOUR_1, "READ", -45_000);
+        entry(true, three, null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -40_000);
+        entry(false, four, null, ChatEnvelope.Expiry.HOUR_1, "READ", -35_000);
+        entry(true, mixed, null, ChatEnvelope.Expiry.HOUR_1, "READ", -30_000);
+        entryQuoting(false, answer, new ChatEnvelope.Reference(UUID.randomUUID(), "Coffee at 4?", Boolean.FALSE), -20_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitScrollSettled(scenario);
+            scenario.onActivity(activity -> {
+                for (Map.Entry<String, Integer> bare : Map.of(one, 48, two, 40, three, 34).entrySet()) {
+                    TextView body = (TextView) text(root(activity), bare.getKey());
+                    assertEquals("The fewer, the larger", sp(activity, bare.getValue()), body.getTextSize(), 0.5f);
+                    assertNull("and with no bubble", ((View) body.getParent()).getBackground());
+                }
+                for (String other : new String[]{four, mixed, answer}) {
+                    TextView body = (TextView) text(root(activity), other);
+                    assertEquals("Four, or any text, or a reply, is an ordinary message", sp(activity, 13), body.getTextSize(), 0.5f);
+                    assertNotNull(((View) body.getParent()).getBackground());
+                }
+            });
+            snapshot(scenario, "135-big-emoji");
+            // A bare emoji has its actions as any message has.
+            scenario.onActivity(activity -> assertTrue(((View) holderOf(activity, one).getParent()).performLongClick()));
+            awaitOverlay(scenario);
+            scenario.onActivity(activity -> { assertTrue(overlay(activity).isShowing()); overlay(activity).dismiss(); });
+        }
+    }
+
+    @Test public void anEmojiInAGroupIsBareWhenItIsYoursAndKeepsItsBubbleWhenItIsSomeoneElses() throws Exception {
+        signedInFixture(); conversationsFixture();
+        UUID groupId = UUID.randomUUID(), epoch = UUID.randomUUID();
+        GroupChat.Snapshot snapshot = new GroupChat.Snapshot(groupId, userId, 1, epoch, false, List.of(
+            new GroupChat.Member(userId, deviceId, Base64.getEncoder().encodeToString(engine.groupSignal().publicIdentity()), "alex", null, "ACTIVE", 0),
+            new GroupChat.Member(peerId, peerDevice, peer.identityKey(), "friend", null, "ACTIVE", 0)));
+        long created = System.currentTimeMillis() - 60_000, deadline = created + ChatEnvelope.Expiry.HOUR_1.milliseconds;
+        String fromThem = "\uD83D\uDE00", fromMe = "\uD83D\uDE02";
+        vault.transaction(() -> { write("group/" + groupId, new GroupChat.Conversation(snapshot, "Private launch", null)); return null; });
+        for (boolean outgoing : new boolean[]{false, true}) {
+            UUID id = UUID.randomUUID();
+            createFixtureKey(AndroidVault.contentAlias(deadline, id, userId));
+            ChatEnvelope envelope = new ChatEnvelope(1, id, outgoing ? userId : peerId, outgoing ? deviceId : peerDevice, outgoing ? peerId : userId, outgoing ? peerDevice : deviceId,
+                created, deadline, ChatEnvelope.Expiry.HOUR_1, outgoing ? fromMe : fromThem, null);
+            ChatEngine.Entry entry = new ChatEngine.Entry(id, groupId, deadline, ChatEnvelope.Expiry.HOUR_1, outgoing, false, "DELIVERED", userId, epoch, 1, outgoing ? userId : peerId);
+            vault.transaction(() -> {
+                write("entry/" + id, entry);
+                byte[] content = RelayApi.JSON.toJson(new ChatEngine.Content(envelope, null)).getBytes(StandardCharsets.UTF_8);
+                try { vault.put("body/" + id, vault.seal(AndroidVault.contentAlias(deadline, id, userId), content)); }
+                finally { Arrays.fill(content, (byte) 0); }
+                return null;
+            });
+        }
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", groupId); inject(activity); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> hasText(root(activity), fromThem) && hasText(root(activity), fromMe));
+            scenario.onActivity(activity -> {
+                TextView theirs = (TextView) text(root(activity), fromThem), mine = (TextView) text(root(activity), fromMe);
+                assertEquals("What someone else wrote keeps its bubble, which has their name above the text", sp(activity, 13), theirs.getTextSize(), 0.5f);
+                assertNotNull(((View) theirs.getParent()).getBackground());
+                LinearLayout bubble = (LinearLayout) theirs.getParent();
+                assertTrue("with the sender's name before the text", bubble.indexOfChild(theirs) > 0 && bubble.getChildAt(0) instanceof TextView name && name.length() > 0);
+                assertEquals("What you wrote is drawn as it is in any chat", sp(activity, 48), mine.getTextSize(), 0.5f);
+                assertNull(((View) mine.getParent()).getBackground());
+            });
         }
     }
 

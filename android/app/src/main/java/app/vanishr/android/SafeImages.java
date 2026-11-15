@@ -132,4 +132,38 @@ final class SafeImages {
         if (bitmap == null) throw new IOException("Invalid image");
         return bitmap;
     }
+
+    /** The width and height of a picture, read from its header alone, or null when it is not one. */
+    static int[] bounds(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) return null;
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
+        return options.outWidth > 0 && options.outHeight > 0 ? new int[]{options.outWidth, options.outHeight} : null;
+    }
+
+    /**
+     * A picture for a chat: no longer than {@code edge} on its longer side. It is decoded with a sample size, so the picture is never
+     * held at full size, and it is held to the same limits as {@link #display}.
+     */
+    static Bitmap thumbnail(byte[] bytes, int edge) throws IOException {
+        if (bytes == null || bytes.length > ImageCipher.MAX_IMAGE_BYTES || edge <= 0) throw new IOException("Invalid image size");
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0 || (long) bounds.outWidth * bounds.outHeight > 4_000_000)
+            throw new IOException("Invalid image dimensions");
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        int longer = Math.max(bounds.outWidth, bounds.outHeight);
+        options.inSampleSize = 1;
+        while (longer / (options.inSampleSize * 2) >= edge) options.inSampleSize *= 2;
+        Bitmap decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
+        if (decoded == null) throw new IOException("Invalid image");
+        int side = Math.max(decoded.getWidth(), decoded.getHeight());
+        if (side <= edge) return decoded;
+        float scale = edge / (float) side;
+        Bitmap scaled = Bitmap.createScaledBitmap(decoded, Math.max(1, Math.round(decoded.getWidth() * scale)), Math.max(1, Math.round(decoded.getHeight() * scale)), true);
+        if (scaled != decoded) decoded.recycle();
+        return scaled;
+    }
 }

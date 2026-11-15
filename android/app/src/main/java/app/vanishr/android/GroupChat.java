@@ -447,6 +447,12 @@ final class GroupChat {
     }
 
     void send(UUID groupId,String text,byte[] image,ChatEnvelope.Expiry expiry,UUID id,long createdAt,Runnable stored) throws Exception {
+        send(groupId,text,image,expiry,null,id,createdAt,stored);
+    }
+
+    /** {@code album} says that this photo is one of several sent together: never for text, and never for a view-once photo. */
+    void send(UUID groupId,String text,byte[] image,ChatEnvelope.Expiry expiry,ChatEnvelope.Album album,UUID id,long createdAt,Runnable stored) throws Exception {
+        if (album!=null && (image==null || expiry==ChatEnvelope.Expiry.VIEW_ONCE || !album.valid())) throw new IllegalArgumentException("Invalid album");
         engine.safety().refresh();
         engine.purge();
         Snapshot current=api().call("GET",path(groupId),null,Snapshot.class); snapshot(current);
@@ -457,10 +463,13 @@ final class GroupChat {
         long deadline=Math.addExact(createdAt,expiry.milliseconds);
         UUID mediaId=image==null ? null : UUID.randomUUID();
         ImageCipher.EncryptedImage encrypted=image==null ? null : ImageCipher.encrypt(mediaId,image);
-        ChatEnvelope content=new ChatEnvelope(1,id,user(),engine.account().deviceId(),groupId,current.epoch(),createdAt,deadline,expiry.wire(),text,
-                encrypted==null ? null : new ChatEnvelope.Attachment(mediaId,encrypted.key(),encrypted.nonce(),"image/jpeg"));
+        int[] size=image==null ? null : SafeImages.bounds(image);
+        ChatEnvelope.Attachment attachment=encrypted==null ? null : new ChatEnvelope.Attachment(mediaId,encrypted.key(),encrypted.nonce(),"image/jpeg",
+                size==null ? 0 : size[0],size==null ? 0 : size[1],album);
+        ChatEnvelope content=new ChatEnvelope(1,id,user(),engine.account().deviceId(),groupId,current.epoch(),createdAt,deadline,expiry.wire(),text,attachment);
         GroupEnvelope envelope=new GroupEnvelope(1,groupId,current.epoch(),current.revision(),content);
-        ChatEngine.Entry entry=new ChatEngine.Entry(id,groupId,deadline,expiry,true,image!=null,"PENDING",user(),current.epoch(),current.revision(),user());
+        ChatEngine.Entry entry=new ChatEngine.Entry(id,groupId,deadline,expiry,true,image!=null,"PENDING",user(),current.epoch(),current.revision(),user())
+                .withPhoto(ChatEngine.PhotoInfo.of(attachment,null));
         try {
             envelope.verify(groupId,current.epoch(),current.revision(),id,user(),engine.account().deviceId(),expiry.wire(),deadline,mediaId,Instant.now());
             vault.transaction(() -> {
@@ -542,7 +551,8 @@ final class GroupChat {
                     }
                     byte[] image=imageCiphertext==null ? null : ImageCipher.decrypt(message.mediaId(),imageCiphertext,envelope.content().image().key(),envelope.content().image().nonce());
                     ChatEngine.Entry entry=new ChatEngine.Entry(message.id(),message.groupId(),message.expiresAt(),
-                            ChatEnvelope.Expiry.received(message.expiry(),envelope.content().sentAt(),envelope.content().expiresAt()),false,image!=null,"DELIVERED",user(),message.epoch(),message.revision(),sender.userId());
+                            ChatEnvelope.Expiry.received(message.expiry(),envelope.content().sentAt(),envelope.content().expiresAt()),false,image!=null,"DELIVERED",user(),message.epoch(),message.revision(),sender.userId())
+                            .withPhoto(ChatEngine.PhotoInfo.of(envelope.content().image(),null));
                     try { engine.storeContent(entry,new ChatEngine.Content(envelope.content(),image)); } finally { if (image!=null) Arrays.fill(image,(byte)0); }
                     write("entry/"+entry.id(),entry); acknowledge(entry,"delivered");
                     vault.put("seen/"+entry.id(),Long.toString(entry.expiresAt()).getBytes(StandardCharsets.US_ASCII));

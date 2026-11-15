@@ -1,7 +1,88 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-11-14 UTC. This is a development foundation,
+Evidence refreshed on Windows, 2026-11-15 UTC. This is a development foundation,
 not a production security assessment or independent audit.
+
+## Release 0.7.0 / Photos in the chat, albums, emoji and typed faces (Play bundle only, 2026-11-15)
+
+Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#photos-in-the-chat-albums-emoji-and-typed-faces-070). Commit: the one that holds this record. The owner asked
+for what other messengers do with photos and emoji: a photo drawn in the chat as a small picture that opens when touched; a view-once photo
+not drawn, only opened when touched; several photos sent at once as a square collage with "+3" on the fourth when there are six; several
+view-once photos as rows with no picture; an emoji panel; and faces typed with keys (":D", ":)", "<3") turned into emoji, adding "what you
+think yourself". **The Google Play bundle is not uploaded anywhere** (the owner uploads it). **The website and the direct-download APK are
+still 0.6.9** (see the entry below); a direct 0.7.0 has not been cut.
+
+- **Changed.** An image's `Attachment` carries an optional width, height and album (an id, the photo's place and the count; at most 30
+  photos, sizes to 16,384, checked in `verify()`; an invalid album is shown alone and never refused). `ChatEngine.Entry` carries a
+  `PhotoInfo` (the size, the album, and a flag that the photo answers a message) so that a chat is laid out without decrypting its photos;
+  `ChatEngine.send` and `GroupChat.send` take an album. New classes: `Albums` (which photos make one row), `AlbumLayout`, `AlbumView`,
+  `PhotoTile`, `PhotoThumbnails` (the in-memory cache), `Emoji`, `EmojiPanel`, `Emoticons`, `EmoticonWatcher`; `PhotoViewer` pages through an
+  album. `MainActivity`: pictures decoded on the reader lane, albums as one row, choosing up to six photos (`PickMultipleVisualMedia`),
+  `enqueueAlbum`/`dispatchAlbum` (one photo at a time, resumable from the next one), the emoji panel, large emoji and typed faces.
+  Version 0.7.0 / code 52 in `build.gradle`. No relay change, no new permission and no new network call.
+- **How "one row" was read.** Several photos sent as view-once are one "View once" row each, because each is opened on its own and is gone
+  once it has been. A single row that opens several view-once photos would be a different feature; the owner should say if that is what
+  was meant.
+- **A photo drawn is a photo read.** The sender's "read" tick for a photo comes when the picture is drawn, as in other messengers; a
+  view-once photo is read only when it is opened. This changes when the tick appears, and is written down in the threat model.
+- **Tests added.** JVM (48): `ChatEnvelopeTest` +3 (client-core, 19), `PhotoAlbumJsonTest` 4, `AlbumLayoutTest` 7, `AlbumsTest` 13,
+  `EmojiTest` 11, `EmoticonsTest` 10. Emulator (41, `ScreenFlowTest`): photos drawn as pictures (shape from the stated size or from the
+  picture, view-once left alone, read when drawn, photos switched off, a sent photo drawn at once, the pictures going with their messages
+  and when the screen is hidden); albums (the collage of two, three, four and six with "+3", the viewer's arrows, swipe and counter, a long
+  press and a swipe on a photo of an album, the quote of an album's photo, expiry, a send of several as an album and as separate view-once
+  rows, a send that stops half-way and goes on from the next photo, a seventh refused, several chosen and previewed together, more than six
+  chosen and cut with a notice, an album sent to a group, an album that answers a message keeping its quote); the emoji panel (up, down,
+  back, at the cursor, over a selection, whole or not at all at the limit, recents bounded and forgotten, the real keyboard handing over);
+  large emoji; typed faces; and the cases found by the second reading (below).
+- **What the runs showed.**
+  - The first full run on the new code (363 tests) had 19 failures. Most were cold-boot jitter of the emulator and passed when run again;
+    three were real adaptations of older tests to photos being pictures now (a helper treats "Photo" as the first `PhotoTile`; an album's
+    swipe is made as a deterministic drag). One failure is the old `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`.
+  - The emulator wedged once on a run of about 7,000 seconds and was restarted with `-wipe-data`; it was wiped once more because a run that
+    was stopped left its temporary screen lock set. The wipe loses nothing: the test app is installed afresh by every run.
+  - A test with the real keyboard failed on a loaded emulator, with the emoji panel up before the keyboard had gone. The panel waited a
+    fixed 0.45 seconds; it now waits for the keyboard to report that it has gone, up to 1.5 seconds (`Emoji.panelMayShow`, with a JVM test).
+  - A full run died once at its 107th test with "Input dispatching timed out" in an account-backup test that closes its screen, a test that
+    does not touch anything new, that passed in the run before and in three repeats afterwards: it was an emulator stall, and the run was
+    repeated whole. A test that waited for a message to be gone before it was drawn (and then purged it before its deadline) failed once in
+    a slow run; it now waits for the message to be on the screen first.
+- **A second reading.** An automated code-review agent read the whole change and then the fixes (three passes). It found: (1) the words a
+  photo reply quotes were kept on the record that lists the message, outside the message's own key (now a flag, the words are read from the
+  sealed message, and a test reads the stored record); (2) the "photos are turned off" notice was raised while a chat was only being drawn;
+  (3) a picture stayed in memory after its message expired, and a decode that finished after its message had gone was cached; (4) a switch
+  that came while a chat or an album was open did not stop further decoding; (5) the copy of a message in its actions could draw a bitmap
+  that the cache had recycled (a crash); (6) an album that answers a message lost its quote when another photo of it arrived or one was
+  reacted to; (7) opening a photo drew the whole chat again (every picture decoded again and the list back at the bottom), which only a
+  view-once message needs. All seven were real and fixed, and each has a test that fails without the fix. The third pass found nothing.
+- **Mutations, all caught (32).** Each applied beside others that other tests catch, built, run and restored (the files checked by hash
+  afterwards): the album joining rules, their state and deadline, the "+N", the layouts, the view-once and photos-off rules, the read mark,
+  the emoji count and size, the panel's limits and recent list, the face rules and the delete (20, in the first round); and after the second
+  reading the quote read for a photo reply, the notice raised only on request, the removal of a picture at expiry, the guard on a late
+  decode, the stop on decoding once photos are off (for the chat and for the album), a picture that is not recycled while the actions show
+  it, the actions closed before the pictures, the group album's place, the notice of more than six, the cut to six, the wait of the
+  keyboard hand-over, the quote kept when a row is drawn afresh and the chat not drawn again after a photo is opened (12).
+- **Full emulator suite: 374 tests (333 before, plus 41), 3 failures and 2 skips in the last run**, which was on the final code, on an
+  emulator that had been wiped and started afresh (30 minutes). The failures are `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`
+  (unchanged since 0.6.3) and two chat-list swipe tests whose result depends on the timing of injected touches
+  (`aShortOrSlowOrUpwardPullLeavesTheRowAtRestAndOnePastHalfwayStays`, `blockUserFromTheSwipeAsksFirstAndTakesTheMuteAndTheContactWithIt`),
+  each of which passed in three repeats on their own straight afterwards, on an emulator that was still busy (its load did not fall). The
+  skips need a device with no screen lock and an opt-in for the live relay. The complete runs before it, of the same code but for a test
+  that now waits for its message to be drawn and three lint-only edits, had the known failure and nothing else (372 tests, after the first
+  five fixes of the second reading), and the known failure and that one test (374 tests). Three complete runs are not three clean runs:
+  the emulator slows over a long session, and which gesture or timing test then fails is not the same twice.
+- **The gate.** `verify.ps1 -Android` passed: client-core **38** tests (BackupCipherTest 6, ChatEnvelopeTest 19, SignalRuntimeTest 13), relay
+  **114** (2 skipped, the live-relay opt-in), the Android unit tests, debug lint **0 errors / 18 warnings** (the same as before; the first
+  lint of the new code found five more, which were fixed: two labels now use `String.format`, one suppression with its reason), the script
+  suites (21 release-configuration, 25 over-the-air settings, 15 admin identity tests) and the checks of the committed settings and
+  certificate files. The gate ran before those lint-only edits; lint and the 120 Android unit tests were run again on the final code.
+  **The signed settings file expires 2026-12-01 (15.9 days left at the time of the gate; see the entry below).**
+- **Google Play bundle.** Built from the clean tree after this commit; its size, hash and checks are recorded in the commit that follows.
+- **What this does not show.** A physical phone or a real finger (the touches are injected); a screen reader in use; keyboards other than the
+  emulator's, and faces typed through a keyboard that works on text it is still composing; the emoji drawn by another phone's fonts; an
+  Android version other than the emulator's (the hand-over between keyboard and panel may time differently); a release (R8) build run on
+  a device (only the QA build was run; the keep rules cover the new records, and the build's mapping was read); the relay's own limit on
+  an album sent to a group (6 photos a minute for the whole group); how it feels to the owner, and whether "one row" for several view-once
+  photos is what was meant; whether Google Play accepts the bundle; and an install from Play.
 
 ## Release 0.6.10 / Touching a quote goes to the message (Play bundle only, 2026-11-14)
 

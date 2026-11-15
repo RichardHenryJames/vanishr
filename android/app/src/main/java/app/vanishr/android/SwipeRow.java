@@ -123,6 +123,10 @@ final class SwipeRow extends LinearLayout {
         super.onDetachedFromWindow();
     }
 
+    /** Where on the screen the current (or last) touch began, so that the long press can tell which part of a bubble was pressed. */
+    float pressX() { return startX; }
+    float pressY() { return startY; }
+
     private void begin(MotionEvent event) {
         removeCallbacks(press);
         startX = event.getRawX(); startY = event.getRawY();

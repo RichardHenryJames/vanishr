@@ -108,6 +108,43 @@ class ChatEnvelopeTest {
         assertThrows(SecurityException.class, () -> verify(control("SOMETHING_ELSE", new ChatEnvelope.Action(UUID.randomUUID(), null, null))));
     }
 
+    private void verifyPhoto(ChatEnvelope.Attachment photo) {
+        ChatEnvelope envelope = new ChatEnvelope(1, id, sender, senderDevice, recipient, recipientDevice, now.toEpochMilli(), deadline,
+            ChatEnvelope.Expiry.HOUR_1, null, photo);
+        envelope.verify(id, sender, senderDevice, recipient, recipientDevice, ChatEnvelope.Expiry.HOUR_1, deadline, photo.id(), now);
+    }
+
+    private ChatEnvelope.Attachment photo(int width, int height, ChatEnvelope.Album album) {
+        return new ChatEnvelope.Attachment(UUID.randomUUID(), new byte[32], new byte[12], "image/jpeg", width, height, album);
+    }
+
+    @Test void aPhotoMayStateItsSizeAndBeOneOfAnAlbumAndAnEarlierShapeIsStillAPhoto() {
+        assertDoesNotThrow(() -> verifyPhoto(photo(1600, 1200, new ChatEnvelope.Album(UUID.randomUUID(), 0, 6))));
+        ChatEnvelope.Attachment earlier = new ChatEnvelope.Attachment(UUID.randomUUID(), new byte[32], new byte[12], "image/jpeg");
+        assertEquals(0, earlier.width()); assertEquals(0, earlier.height()); assertNull(earlier.album());
+        assertDoesNotThrow(() -> verifyPhoto(earlier));
+    }
+
+    @Test void theSizeAPhotoStatesIsRangeCheckedBecauseItDecidesHowMuchRoomIsKept() {
+        for (int[] size : new int[][]{{-1, 100}, {100, -1}, {ChatEnvelope.MAX_PHOTO_EDGE + 1, 100}, {100, ChatEnvelope.MAX_PHOTO_EDGE + 1}})
+            assertThrows(SecurityException.class, () -> verifyPhoto(photo(size[0], size[1], null)), size[0] + " x " + size[1]);
+        assertDoesNotThrow(() -> verifyPhoto(photo(ChatEnvelope.MAX_PHOTO_EDGE, ChatEnvelope.MAX_PHOTO_EDGE, null)));
+        assertDoesNotThrow(() -> verifyPhoto(photo(0, 0, null)));
+    }
+
+    @Test void anAlbumThatMakesNoSenseIsNotRefusedButIsNotAnAlbum() {
+        UUID album = UUID.randomUUID();
+        assertTrue(new ChatEnvelope.Album(album, 0, 2).valid());
+        assertTrue(new ChatEnvelope.Album(album, ChatEnvelope.MAX_ALBUM - 1, ChatEnvelope.MAX_ALBUM).valid());
+        for (ChatEnvelope.Album bad : new ChatEnvelope.Album[]{new ChatEnvelope.Album(null, 0, 2), new ChatEnvelope.Album(album, 0, 1),
+                new ChatEnvelope.Album(album, 0, 0), new ChatEnvelope.Album(album, 0, ChatEnvelope.MAX_ALBUM + 1), new ChatEnvelope.Album(album, -1, 3),
+                new ChatEnvelope.Album(album, 3, 3), new ChatEnvelope.Album(album, 9, 3)}) {
+            assertFalse(bad.valid(), bad.toString());
+            // What the other side says about a group of photos must never stop the photo from arriving.
+            assertDoesNotThrow(() -> verifyPhoto(photo(100, 100, bad)));
+        }
+    }
+
     @Test void aControlActionMustNameATarget() {
         assertThrows(SecurityException.class, () -> verify(control(ChatEnvelope.DELETE, new ChatEnvelope.Action(null, null, null))));
         assertThrows(SecurityException.class, () -> verify(control(ChatEnvelope.DELETE, null)));

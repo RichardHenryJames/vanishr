@@ -635,6 +635,113 @@ phone or a real finger; a screen reader in use; the tint on a phone with a diffe
 expects; and a quote that is longer than three lines in a script that takes more bytes per character (the 160-byte cap is unchanged, so
 such a quote is shown cut earlier).
 
+## Photos in the chat, albums, emoji and typed faces (0.7.0)
+
+**No relay change, no new permission and no new network call.** The wire gains optional fields only (below), so an earlier app and this one
+read each other's messages: an earlier app shows the photos of an album one after the other, as it always did, and shows an emoji as text.
+
+What changed on the screen. A photo that is not view-once is drawn in the chat as a picture (a thumbnail), as other messengers do, and touching
+it opens it full screen as before. Photos sent together arrive as one album, drawn as a square of up to four pictures with "+N" on the fourth
+when there are more than four, and the viewer pages through them. A view-once photo is as it was: a row of text, nothing decoded and nothing
+marked read until it is opened (photos sent together as view-once are separate messages, one each). Emoji come from a panel that takes the
+keyboard's place, one to three emoji sent alone are drawn large and without a bubble, and faces typed with keys (":)", "<3") become the emoji
+they stand for.
+
+- **A picture exists in memory only.** The thumbnail is decrypted on the reader lane from the encrypted store when its row is drawn, decoded
+  with a sample size (never at full size) to at most 640 pixels on its longer side, and held in an in-memory cache (`PhotoThumbnails`, at most
+  24 MB, least recently used first). It is never written to a file, a picture cache or the gallery, and the decrypted bytes are overwritten as
+  soon as the picture is made. It leaves the cache when its message goes: deleted or cleared (when the list is brought up to date), or expired
+  (at the next quarter-second tick, with its row); and a decode that is still running when its message goes is dropped, not cached. All of
+  them go when the content is hidden, which `onPause` does as soon as the app leaves the screen. A picture that leaves the cache while the
+  message is alive is let go and not recycled, because something else on the screen may still be drawing it (the copy of the message that
+  its actions show): the runtime frees it when nothing does. When the screen is torn down, the actions are closed first and the pictures
+  that are left are recycled. Every window keeps `FLAG_SECURE` and the overlay protection; the viewer is the one of 0.6.0. The official
+  admin's save option is unchanged: only that account can keep a photo's bytes, and in an album only the photo being shown.
+- **What a photo's record holds, and where a reply's quote lives.** The record that lists a photo (it is kept under the vault's key, not the
+  message's own, so that a chat can be laid out without decrypting every photo) holds numbers and flags only: the size, the album place, and
+  that the photo answers a message. What it answers is words, and words stay in the sealed message, which is unreadable once its own key is
+  deleted at expiry. The list reads the quote from the sealed message for a photo that answers one (the one case where a photo's sealed
+  message is opened to lay the list out; its picture is overwritten at once), as it does for the words of a text. A first version kept the
+  quote's words on the record, which is what a second reader of the code caught; a test now reads the stored record of a photo reply and
+  finds none of the words.
+- **A photo drawn is a photo read.** As in other messengers, the sender's "read" tick for a photo now comes when the picture is drawn in the
+  chat, not when it is touched. A view-once photo is still read only when it is opened. When the signed settings switch photos off (`PHOTOS`)
+  a photo is a plain "Photo" row as before: nothing is decoded and nothing is marked read. A switch that arrives while a chat is open stops
+  every picture that has not been decoded yet, and the paging of an open album; pictures already on the screen stay until the app leaves
+  the screen. While a chat is only being drawn nothing is said about the switch (a first version raised the "turned off" notice on every
+  refresh); the notice comes when a person touches a photo or pages an album.
+- **The wire.** An image's `Attachment` carries an optional `width` and `height` (0 from an earlier app) and an optional `album` (an id chosen
+  at random for each album, the photo's place in it and how many there are). All of it is inside the Signal ciphertext, so the relay sees the
+  same uploads as before (one per photo) and learns nothing new; the receiving side learns what the sender chose to say, which photos belong
+  together. The numbers are the sender's word. Sizes are checked to 0 to 16,384 and used only to give a tile its shape: a false figure bends one
+  tile and does nothing else, because the picture is decoded from its own bytes under the limits that always applied (2 MiB and 4 million pixels).
+  An album whose count is outside 2 to 30 or whose place is outside its count is treated as no album: the photo is shown alone and never refused.
+- **What may be an album.** Photos are joined only when they share an album id, were sent in the same direction by the same sender, are not
+  view-once and carry a valid album. A forged id can therefore gather only the forger's own photos, and in a group two senders never merge.
+  An album is drawn from the photos that are present: one that expired or was deleted just leaves it, and the "+N" counts those still there.
+  Its delivery state is the lowest of its photos' and its deadline the earliest.
+- **Six at a time.** The relay takes 6 media uploads per device per minute, so one send is at most 6 photos, and the app refuses a seventh
+  before starting rather than failing half-way. A send that stops half-way (offline, a refusal) keeps the photos that went and says so ("Not
+  sent: 2 of 5 went"); trying again goes on from the next photo. Only the first photo of an album carries a reply's quote. Several photos sent
+  as view-once are sent one by one, each its own message.
+- **Forward.** A photo of an album that is forwarded goes as one new photo to the conversations chosen; the album is not forwarded as a whole.
+- **Emoji are offered from the phone's own fonts.** The panel is built in code from ranges of Unicode, and an emoji the phone cannot draw is
+  not offered (`Paint.hasGlyph`), so there are no empty boxes. Nothing is downloaded, and the only thing kept is the list of what was used
+  lately (at most 24), in memory, dropped with the rest of the content when the app leaves the screen. The panel is a view inside the app's
+  window and not a window of its own, so the screenshot protection covers it. A message that is one to three emoji is drawn large and bare;
+  that is drawing only, and the message is the same text on the wire. A reply (it has its quote), a view-once message and what a group member
+  wrote (it has the sender's name) keep their bubble.
+- **Faces typed with keys.** ":)", ":D", "<3" and some twenty more become their emoji when the space or the new line after them is typed, and
+  once more when the message is sent, for any that remain. This is a change of the text in the field, made on the phone; nothing is sent
+  anywhere, and the message is plain text with an emoji in it. Only a word of its own counts: "10:30", "http://x", "std::cout", "ok:)",
+  ":Dog", "<333" and ":)))" are left alone, and "8)" and "B)" are not faces at all. One press of delete straight after a change brings the
+  face back as it was typed and leaves it alone from then on, so a face can still be sent as text; a saved draft that is put back is not
+  changed. An emoji is never longer than its face, so a change cannot push a message past the 4,096-character limit, and an emoji chosen in the
+  panel that would not fit is refused whole, with the same notice as typing gives.
+- **The keyboard and the panel are never up together.** The panel takes the keyboard's place: touching the button asks the keyboard to go,
+  and the panel comes up once the keyboard says that it has gone (through the window insets). A phone that is slow to take the keyboard
+  away is waited for, up to 1.5 seconds; one that never says so does not hold the panel back for longer than that. A first version of this
+  waited 0.45 seconds, and a test on a loaded emulator caught the panel coming up with the keyboard still showing; the wait was lengthened
+  and made to follow the keyboard's own report.
+- **More than six photos chosen at once** (the older way of choosing files does not keep to the number asked for) are cut to the first six,
+  and the phone says "Only 6 photos go at once." instead of dropping them without a word.
+
+**Verified, and not.** JVM tests cover the wire (the optional width, height and album, an album's validity, an earlier app's JSON with
+none of them), the grouping of photos into albums (view-once, broken and other senders' photos never join; the lowest state and the
+earliest deadline stand for the album), the collage layouts and their "+N", what counts as one to three emoji, the face table and its
+word rules, and the keyboard hand-over's wait. Emulator tests (synthetic accounts, a relay stand-in, touches injected as a finger would,
+and the emulator's own keyboard) cover: a photo drawn as a picture, with its shape from the stated size or from the picture itself, a
+view-once photo staying a row of text with nothing decoded and nothing read, a photo marked read when it is drawn, the pictures going
+with their messages (deleted, expired while the chat is open, and a decode that finishes after its message has gone) and when the screen
+is hidden, the stored record of a photo reply holding none of the words it quotes while the chat still shows them, and photos switched off
+leaving rows of text with nothing decoded, saying nothing while the chat is drawn and saying so when a photo is touched, and, when the
+switch comes while a chat or an album is open, no further picture being decoded; a picture leaving the cache while the actions of its
+message are up without the actions drawing a recycled one; a photo sent being
+drawn at once from its preview and keeping the quote of a reply; albums of two, three, four and six photos drawn as the collage ("+3"
+on the fourth of six), the viewer paging through them (arrows, a swipe, the counter), a long press and a swipe on a photo of an album,
+the quote of an album's photo going to the album, and an album ageing out; the choosing of several photos (previewed together, one that
+cannot be used not stopping the others, more than six cut and said so), a send of several as an album and as separate view-once rows,
+a seventh refused before anything is sent, and a send that stops half-way keeping what went and a retry going on from the next photo
+with none sent twice; an album sent to a group, whose place and shape travel inside the encrypted message with nothing of it in what
+the relay stand-in is sent; the emoji panel (up and down, back, a tab, at the cursor, over a selection, whole or not at all at the limit,
+the list of what was used lately bounded and forgotten when locked, and the real keyboard handing over to it and back); one to three
+emoji drawn large and bare and anything else keeping its bubble, in a chat and in a group; and typed faces (changed at the space and
+at the send, in the middle of a text, left alone where they are part of something else, and one delete bringing the face back).
+Thirty-two mutations of that logic (the album joining rules and their state and deadline, the "+N", the layouts, the view-once and
+photos-off rules, the read mark, the emoji count and size, the panel's limits and recent list, the face rules and the delete, and then,
+after the second reading, the quote being read for a photo reply, the notice raised only on request, the removal of a picture at expiry,
+the guard on a decode that finishes late, the stop on decoding once photos are off for a chat and for an album, the picture that is not
+recycled while the actions show it, the actions closed before the pictures, the group album's place, the notice of more than six, the
+cut to six and the keyboard hand-over's wait) were each caught by the tests built for them. Not demonstrated: a physical phone or a real
+finger; a screen reader in use; keyboards other
+than the emulator's, and faces typed through a keyboard that works on text it is still composing; the emoji drawn by another phone's
+fonts (the panel offers what the phone can draw, so it differs); an Android version other than the emulator's, where the hand-over
+between the keyboard and the panel may time differently (the app supports Android 9 and later); a release (R8) build run on a device
+(the keep rules cover the new records, but only the QA build was run); the relay's own limit on an album sent to a group (it allows
+6 photos a minute for the whole group, so an album of six can be held back when anyone else sent a photo in that minute: a photo the
+relay refuses stays queued on the phone and goes on a later sync, as any group message does, which was read in the code and not run
+for an album); and whether it feels as the owner expects.
+
 ## Account erasure, blocks and safety reports
 
 Account erasure requires a fresh account-only password/Google sign-in, never a

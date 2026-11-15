@@ -54,7 +54,11 @@ final class ChatEngine implements AutoCloseable {
     record Outbox(Send message, byte[] media) { }
     record Status(UUID id, String state, long expiresAt) { }
     record Entry(UUID id, UUID peerId, long expiresAt, ChatEnvelope.Expiry expiry, boolean outgoing, boolean image, String state, UUID keyOwner,
-                 UUID groupEpoch, long groupRevision, UUID senderId, boolean edited, String reactionMine, String reactionTheirs) {
+                 UUID groupEpoch, long groupRevision, UUID senderId, boolean edited, String reactionMine, String reactionTheirs, PhotoInfo photo) {
+        Entry(UUID id, UUID peerId, long expiresAt, ChatEnvelope.Expiry expiry, boolean outgoing, boolean image, String state, UUID keyOwner,
+              UUID groupEpoch, long groupRevision, UUID senderId, boolean edited, String reactionMine, String reactionTheirs) {
+            this(id,peerId,expiresAt,expiry,outgoing,image,state,keyOwner,groupEpoch,groupRevision,senderId,edited,reactionMine,reactionTheirs,null);
+        }
         Entry(UUID id, UUID peerId, long expiresAt, ChatEnvelope.Expiry expiry, boolean outgoing, boolean image, String state, UUID keyOwner,
               UUID groupEpoch, long groupRevision, UUID senderId) {
             this(id,peerId,expiresAt,expiry,outgoing,image,state,keyOwner,groupEpoch,groupRevision,senderId,false,null,null);
@@ -65,12 +69,27 @@ final class ChatEngine implements AutoCloseable {
         Entry(UUID id, UUID peerId, long expiresAt, ChatEnvelope.Expiry expiry, boolean outgoing, boolean image, String state) {
             this(id, peerId, expiresAt, expiry, outgoing, image, state, null);
         }
-        Entry withState(String state) { return new Entry(id, peerId, expiresAt, expiry, outgoing, image, state, keyOwner,groupEpoch,groupRevision,senderId,edited,reactionMine,reactionTheirs); }
-        Entry withEdited() { return new Entry(id, peerId, expiresAt, expiry, outgoing, image, state, keyOwner,groupEpoch,groupRevision,senderId,true,reactionMine,reactionTheirs); }
+        Entry withState(String state) { return new Entry(id, peerId, expiresAt, expiry, outgoing, image, state, keyOwner,groupEpoch,groupRevision,senderId,edited,reactionMine,reactionTheirs,photo); }
+        Entry withEdited() { return new Entry(id, peerId, expiresAt, expiry, outgoing, image, state, keyOwner,groupEpoch,groupRevision,senderId,true,reactionMine,reactionTheirs,photo); }
+        /** What the list needs to lay a photo out, kept on the entry so that no photo has to be decrypted to know its size or album. */
+        Entry withPhoto(PhotoInfo photo) { return new Entry(id, peerId, expiresAt, expiry, outgoing, image, state, keyOwner,groupEpoch,groupRevision,senderId,edited,reactionMine,reactionTheirs,photo); }
         /** {@code mine} is this phone's own reaction; otherwise the conversation's other party's. A null emoji removes it. */
         Entry withReaction(boolean mine, String emoji) {
             return new Entry(id, peerId, expiresAt, expiry, outgoing, image, state, keyOwner,groupEpoch,groupRevision,senderId,edited,
-                    mine ? emoji : reactionMine, mine ? reactionTheirs : emoji);
+                    mine ? emoji : reactionMine, mine ? reactionTheirs : emoji, photo);
+        }
+        /** The album this photo belongs to, or null: a photo that is not part of one, a view-once photo, or an album that makes no sense. */
+        ChatEnvelope.Album album() { return photo == null || !image || expiry == ChatEnvelope.Expiry.VIEW_ONCE || photo.album() == null || !photo.album().valid() ? null : photo.album(); }
+    }
+    /**
+     * The size a photo says it has (0 when unknown, as for a message from an earlier app), the album it says it is in, and whether it is a
+     * reply. A photo is not decrypted when a chat is listed, so what the list needs to lay it out is kept here: numbers and a flag, never
+     * words. What a reply quotes is message content, so it stays in the sealed message with the rest of the words and is read from there.
+     */
+    record PhotoInfo(int width, int height, ChatEnvelope.Album album, boolean quotes) {
+        PhotoInfo(int width, int height, ChatEnvelope.Album album) { this(width, height, album, false); }
+        static PhotoInfo of(ChatEnvelope.Attachment attachment, ChatEnvelope.Reference reference) {
+            return attachment == null ? null : new PhotoInfo(attachment.width(), attachment.height(), attachment.album(), reference != null);
         }
     }
     record Content(ChatEnvelope envelope, byte[] image) { }
@@ -622,6 +641,13 @@ final class ChatEngine implements AutoCloseable {
     }
 
     void send(Peer peer, String text, byte[] image, ChatEnvelope.Expiry expiry, ChatEnvelope.Reference reference, UUID id, long createdAt, Runnable stored) throws Exception {
+        send(peer, text, image, expiry, reference, null, id, createdAt, stored);
+    }
+
+    /** {@code album} says that this photo is one of several sent together: never for text, and never for a view-once photo. */
+    void send(Peer peer, String text, byte[] image, ChatEnvelope.Expiry expiry, ChatEnvelope.Reference reference, ChatEnvelope.Album album,
+              UUID id, long createdAt, Runnable stored) throws Exception {
+        if (album != null && (image == null || expiry == ChatEnvelope.Expiry.VIEW_ONCE || !album.valid())) throw new IllegalArgumentException("Invalid album");
         safety.requireAllowed(peer.userId());
         safety.refresh();
         safety.requireAllowed(peer.userId());
@@ -646,11 +672,13 @@ final class ChatEngine implements AutoCloseable {
         Instant now = Instant.now();
         UUID mediaId = image == null ? null : UUID.randomUUID();
         ImageCipher.EncryptedImage encryptedImage = image == null ? null : ImageCipher.encrypt(mediaId, image);
-        ChatEnvelope.Attachment attachment = encryptedImage == null ? null : new ChatEnvelope.Attachment(mediaId, encryptedImage.key(), encryptedImage.nonce(), "image/jpeg");
+        int[] size = image == null ? null : SafeImages.bounds(image);
+        ChatEnvelope.Attachment attachment = encryptedImage == null ? null : new ChatEnvelope.Attachment(mediaId, encryptedImage.key(), encryptedImage.nonce(),
+            "image/jpeg", size == null ? 0 : size[0], size == null ? 0 : size[1], album);
         ChatEnvelope envelope = new ChatEnvelope(1, id, account.userId(), account.deviceId(), peer.userId(), peer.deviceId(),
             createdAt, expiresAt, expiry.wire(), image == null ? text : null, attachment, null, reference, null);
         envelope.verify(id, account.userId(), account.deviceId(), peer.userId(), peer.deviceId(), expiry.wire(), expiresAt, mediaId, now);
-        Entry entry = new Entry(id, peer.userId(), expiresAt, expiry, true, image != null, "PENDING", account.userId());
+        Entry entry = new Entry(id, peer.userId(), expiresAt, expiry, true, image != null, "PENDING", account.userId()).withPhoto(PhotoInfo.of(attachment, reference));
         try {
             // Only once the send is certain to be stored, so a send that fails earlier never costs anyone an old message.
             if (!makeRoom(image == null ? 0 : image.length * 2L)) throw new CapacityReached();
@@ -1108,7 +1136,8 @@ final class ChatEngine implements AutoCloseable {
                     byte[] image = imageCiphertext == null ? null : ImageCipher.decrypt(message.mediaId(), imageCiphertext,
                             envelope.image().key(), envelope.image().nonce());
                     Entry entry = new Entry(message.id(), message.senderId(), message.expiresAt(),
-                            ChatEnvelope.Expiry.received(message.expiry(), envelope.sentAt(), envelope.expiresAt()), false, image != null, "DELIVERED", account.userId());
+                            ChatEnvelope.Expiry.received(message.expiry(), envelope.sentAt(), envelope.expiresAt()), false, image != null, "DELIVERED", account.userId())
+                            .withPhoto(PhotoInfo.of(envelope.image(), envelope.reference()));
                     try { storeContent(entry, new Content(envelope, image)); }
                     finally { if (image != null) Arrays.fill(image, (byte) 0); }
                     write("entry/" + message.id(), entry);

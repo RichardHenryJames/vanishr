@@ -35,7 +35,24 @@ public record ChatEnvelope(int version, UUID id, UUID senderId, UUID senderDevic
         }
     }
 
-    public record Attachment(UUID id, byte[] key, byte[] nonce, String mimeType) { }
+    /**
+     * The photo of an image message. {@code width} and {@code height} (0 when an earlier app sent it) tell a screen how much room to
+     * keep for it before it is decoded, and {@code album} says it is one of several photos sent together. Both are optional: an earlier
+     * app reads neither and shows each photo of an album as a photo of its own, and this one shows a message from an earlier app as a
+     * photo of its own with the room worked out when it has been decoded.
+     */
+    public record Attachment(UUID id, byte[] key, byte[] nonce, String mimeType, int width, int height, Album album) {
+        public Attachment(UUID id, byte[] key, byte[] nonce, String mimeType) { this(id, key, nonce, mimeType, 0, 0, null); }
+    }
+
+    /** One of {@code total} photos sent together; {@code index} counts from zero, in the order the sender chose. */
+    public record Album(UUID id, int index, int total) {
+        /** What the sender says is not trusted: an album that does not make sense is shown as a photo of its own, never refused. */
+        public boolean valid() { return id != null && total >= 2 && total <= MAX_ALBUM && index >= 0 && index < total; }
+    }
+
+    /** The most photos one album may claim, and the longest side a photo may claim to have. */
+    public static final int MAX_ALBUM = 30, MAX_PHOTO_EDGE = 16_384;
 
     /** What an ordinary message optionally quotes: a short, self-contained copy, not a live link, because the quoted message can
      * expire or be deleted before the reply is read. {@code ownMessage} says whether the quoted message was written by whoever sends
@@ -93,7 +110,8 @@ public record ChatEnvelope(int version, UUID id, UUID senderId, UUID senderDevic
                     throw new SecurityException("Invalid encrypted text message");
             } else if (text != null || !Objects.equals(image.id(), mediaId) || image.id() == null
                     || image.key() == null || image.key().length != 32 || image.nonce() == null || image.nonce().length != 12
-                    || !("image/jpeg".equals(image.mimeType()) || "image/png".equals(image.mimeType()))) {
+                    || !("image/jpeg".equals(image.mimeType()) || "image/png".equals(image.mimeType()))
+                    || image.width() < 0 || image.height() < 0 || image.width() > MAX_PHOTO_EDGE || image.height() > MAX_PHOTO_EDGE) {
                 throw new SecurityException("Invalid encrypted image descriptor");
             }
             return;
