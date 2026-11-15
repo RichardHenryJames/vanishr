@@ -20,17 +20,18 @@ because each is opened on its own). The composer has an emoji panel that takes t
 drawn large and without a bubble; and faces typed with keys (":)", ":D", "<3" and some twenty more) become their emoji when the next
 space is typed, and one press of delete brings the face back. The pictures exist in memory only and are dropped when the app leaves the
 screen. The album's place and the picture's size travel inside the encrypted message, so an earlier app shows the photos one after the
-other as it always did. **It is a Google Play bundle only so far:** the website and the direct-download APK are still 0.6.9 until a
-direct release is published. No relay change, no new permission and no new network call. Emulator tests only: no physical phone, no
+other as it always did. **The direct-download APK and the website carry 0.7.0 since 2026-11-15** (Vercel deployment
+`dpl_9LXipderuJDMXhQG76SrNssNZncx`, public release verified); the Google Play bundle is built but not uploaded yet (the owner uploads it).
+No relay change, no new permission and no new network call. Emulator tests only: no physical phone, no
 Google Play install. See the [threat model](docs/THREAT-MODEL.md#photos-in-the-chat-albums-emoji-and-typed-faces-070) and the
-[verification](docs/VERIFICATION.md#release-070--photos-in-the-chat-albums-emoji-and-typed-faces-play-bundle-only-2026-11-15).
+[verification](docs/VERIFICATION.md#release-070--photos-in-the-chat-albums-emoji-and-typed-faces-2026-11-15).
 
 Release **0.6.10/code 51** makes the quote inside a reply behave as it does in other messengers: touching it goes to the message that was
 quoted, brings it to the middle of the screen and tints its row for a moment (a message older than the ones loaded is looked for page by
 page; one that is gone, or that belongs to another chat, says so and moves nothing). It also makes the 4,096-character limit of a
 message say so, where text past it used to be dropped without a word, and its tests show that a long typed answer goes out and arrives
-whole (only the quote is a short copy). **It is a Google Play bundle only so far:** the website and the direct-download APK are still
-0.6.9 until a direct release is published. No relay change, no new permission, no change to the wire and no change to any security rule.
+whole (only the quote is a short copy). **It was a Google Play bundle only:** its changes are part of 0.7.0, above, which is also the direct
+download. No relay change, no new permission, no change to the wire and no change to any security rule.
 Emulator tests only: no physical phone, no Google Play install. See the
 [verification](docs/VERIFICATION.md#release-0610--touching-a-quote-goes-to-the-message-play-bundle-only-2026-11-14).
 

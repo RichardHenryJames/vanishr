@@ -3,14 +3,14 @@
 Evidence refreshed on Windows, 2026-11-15 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
-## Release 0.7.0 / Photos in the chat, albums, emoji and typed faces (Play bundle only, 2026-11-15)
+## Release 0.7.0 / Photos in the chat, albums, emoji and typed faces (2026-11-15)
 
 Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#photos-in-the-chat-albums-emoji-and-typed-faces-070). Commit `f26d0ee`. The owner asked
 for what other messengers do with photos and emoji: a photo drawn in the chat as a small picture that opens when touched; a view-once photo
 not drawn, only opened when touched; several photos sent at once as a square collage with "+3" on the fourth when there are six; several
 view-once photos as rows with no picture; an emoji panel; and faces typed with keys (":D", ":)", "<3") turned into emoji, adding "what you
-think yourself". **The Google Play bundle is not uploaded anywhere** (the owner uploads it). **The website and the direct-download APK are
-still 0.6.9** (see the entry below); a direct 0.7.0 has not been cut.
+think yourself". **The Google Play bundle is not uploaded anywhere** (the owner uploads it). **The direct-download APK and the website were
+published on 2026-11-15**, at the owner's request, after the Play bundle (see "Direct release and website" at the end of this entry).
 
 - **Changed.** An image's `Attachment` carries an optional width, height and album (an id, the photo's place and the count; at most 30
   photos, sizes to 16,384, checked in `verify()`; an invalid album is shown alone and never refused). `ChatEngine.Entry` carries a
@@ -88,16 +88,52 @@ still 0.6.9** (see the entry below); a direct 0.7.0 has not been cut.
 - **What this does not show.** A physical phone or a real finger (the touches are injected); a screen reader in use; keyboards other than the
   emulator's, and faces typed through a keyboard that works on text it is still composing; the emoji drawn by another phone's fonts; an
   Android version other than the emulator's (the hand-over between keyboard and panel may time differently); a release (R8) build run on
-  a device (only the QA build was run; the keep rules cover the new records, and the build's mapping was read); the relay's own limit on
+  a device (only the QA build was run for the tests; the release APK of the direct release was installed and started on the emulator, with no
+  account, so none of the new screens were used in it; the keep rules cover the new records, and the build's mapping was read); the relay's own limit on
   an album sent to a group (6 photos a minute for the whole group); how it feels to the owner, and whether "one row" for several view-once
   photos is what was meant; whether Google Play accepts the bundle; and an install from Play.
+
+**Direct release and website (0.7.0 / code 52, 2026-11-15)**
+
+The owner asked whether the download site on Vercel carried 0.7.0 too, and for it to be published if not (the website and the direct APK were
+still 0.6.9). The relay needed no change (nothing in this release uses a new relay API), so it was not touched; its health was checked before
+the APK was built (`{"status":"up"}`).
+
+- **Build and stage** (from `fd1c2bb`, tree clean; it differs from `f26d0ee`, which the Play bundle was built from, only in this file; the notices
+  were regenerated and left the tree unchanged): signed APK **44,700,450 bytes**, SHA-256
+  `ff4e0128719435f634d2e5102a8313a8c13a4693e718cadba8b8dc097c697e79`, version 0.7.0 / code 52, min API 28, target API 36, the same 15
+  permissions as 0.6.9's APK (compared with `aapt2 dump permissions`: no difference), the same certificate as every release since 0.6.0
+  (SHA-256 `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`); the staged APK is byte-identical to the built one.
+  `.tools\vercel-download-0.7.0`: 33 files / 61,086,730 bytes (limit 99,000,000), recorded in `.tools\distribution-audit-0.7.0.json`.
+  The content audit of the source ZIP (509 entries, 218 of them dependency sources; 291 source files byte-identical to the commit and none
+  different), the stage and the stored APK bytes searched for nine private values by value and for the script's secret patterns: no findings.
+  The settings file and the admin certificate in the stage are identical to the committed ones. Only `.vercel\project.json` was copied from the
+  0.6.9 stage (IDs checked, no `.env*` file).
+- **In-place upgrade, before anything was published.** On the dedicated test emulator (wiped and started afresh), the 0.6.9 APK (the hash the
+  feed had published, `4965def4…`) was installed and started, then the staged 0.7.0 APK was installed over it with `adb install -r`, no
+  uninstall: version code 50 to 52, `firstInstallTime` unchanged, the same signing certificate (a different one would have refused the
+  update), the app running afterwards (a new process, on its main screen), an empty crash buffer and no fatal exception. The account was a
+  fresh install, so this does not show that an account's stored chats survive the update.
+- **Vercel.** Deployment `dpl_9LXipderuJDMXhQG76SrNssNZncx` (production, READY); the live feed served 0.6.9 / 50 before, so 52 is no
+  downgrade. The deployment alone did not move the canonical domain, so `vanishr-download.vercel.app` was moved to it explicitly
+  (`vercel alias set`), as in 0.6.8 and 0.6.9.
+- **Public verification** (`.tools\public-release-verification-0.7.0.json`). The canonical feed reports 0.7.0 / 52 with `no-store`; all 32
+  audited files fetched anonymously (`vercel.json` is not served) are byte-identical (HTTP 200); the public APK is byte-identical to the staged
+  one and has the original certificate; 22 private or missing paths return 404; security headers pass; the signed settings file (sequence 1)
+  and the admin identity certificate (sequence 3) are live and identical to the committed files (the settings file still expires on
+  **2026-12-01**, 15.8 days away at the check, and needs renewing before then); no problems. The home page and `/android/` name 0.7.0 and the
+  download link is `vanishr-0.7.0.apk`, which is served as an attachment with the right type and length; the earlier `vanishr-0.6.9.apk` is no
+  longer served (404), as after earlier releases.
+- **What this does not show.** The in-app "Check for updates" banner on an older direct-download app (the emulator had no account), a physical
+  phone, and a browser download of the APK. The **screenshots on the home page** are still the drawings of the 0.3.3 app and were not redrawn
+  for this release, so they do not show photos as pictures, albums or the emoji panel.
 
 ## Release 0.6.10 / Touching a quote goes to the message (Play bundle only, 2026-11-14)
 
 Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#touching-the-quote-in-a-reply-and-a-limit-that-says-so-0610). Commit `61f2d2b`. The owner
 said the quote in a reply "does nothing when tapped" and asked for it to work as in WhatsApp, and said that a reply was "trimmed". **The
 Google Play bundle is not uploaded anywhere** (the owner uploads it). **The website and the direct-download APK are still 0.6.9** (published
-on 2026-11-14, see the entry below); a direct 0.6.10 has not been cut.
+on 2026-11-14, see the entry below); a direct 0.6.10 has not been cut (its changes went out in the direct 0.7.0 of 2026-11-15).
 
 - **Changed.** `QuoteBlock.opens` makes the quote a control (a ripple, and "Go to the quoted message" as the screen-reader action).
   `MainActivity.jumpToQuoted` finds the row of the quoted message in the conversation, or, when it is not among the loaded pages, checks on
