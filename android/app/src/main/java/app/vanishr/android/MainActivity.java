@@ -59,13 +59,12 @@ public final class MainActivity extends AppCompatActivity {
     private static final int MUTED = Ui.MUTED;
     private Ui design;
     private final Handler ui = new Handler(Looper.getMainLooper());
+    // Let queued image results recycle themselves even when ordinary UI callbacks are cleared.
+    private final Handler imagesReady = new Handler(Looper.getMainLooper());
     private final ScheduledExecutorService work = Executors.newSingleThreadScheduledExecutor();
-    // Reads that only prepare what the screen shows. They never queue behind a sync or an upload on the work lane,
-    // and run at background priority so they cannot compete with touch handling for the CPU.
-    private final ExecutorService reader = Executors.newSingleThreadExecutor(task -> new Thread(() -> {
-        android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
-        task.run();
-    }, "vanishr-reader"));
+    private final ExecutorService reader = backgroundLane("vanishr-reader");
+    private final ExecutorService previewReader = backgroundLane("vanishr-previews");
+    private final ExecutorService imageWork = backgroundLane("vanishr-image-import");
     private final ScheduledExecutorService photoWork = Executors.newSingleThreadScheduledExecutor();
     private final ExecutorService updateWork = Executors.newSingleThreadExecutor();
     // Gallery writes for the admin's "save photo"; kept off every other lane so a save never delays a sync or a screen read.
@@ -74,6 +73,7 @@ public final class MainActivity extends AppCompatActivity {
     private final java.util.concurrent.atomic.AtomicInteger waitingActions = new java.util.concurrent.atomic.AtomicInteger();
     private final java.util.concurrent.atomic.AtomicBoolean syncQueued = new java.util.concurrent.atomic.AtomicBoolean();
     private final java.util.concurrent.atomic.AtomicBoolean syncRequested = new java.util.concurrent.atomic.AtomicBoolean();
+    private final java.util.concurrent.atomic.AtomicBoolean receivedRefreshPosted = new java.util.concurrent.atomic.AtomicBoolean();
     private boolean checkingUpdates;
     private AppUpdates.Release availableUpdate;
     // Signed settings from the download site (a notice, switches that can only turn a feature off, a hint at a newer version).
@@ -171,6 +171,9 @@ public final class MainActivity extends AppCompatActivity {
     private Toast noticeToast;
     // The long-press overlay of the message actions, kept apart from the sheets so that closing the screen closes it too.
     private MessageActions messageOverlay;
+    // Keep a saved choice over a reader snapshot that started before the commit. It is dropped once the reader sees it.
+    private record ReactionChoice(String emoji, long deadline, boolean saving) { }
+    private final Map<UUID, ReactionChoice> reactionChoices = new HashMap<>();
     private void updateReplyStrip() {
         if (replyStrip == null) return;
         replyStrip.setVisibility(pendingReplyTo == null ? View.GONE : View.VISIBLE);
@@ -206,7 +209,9 @@ public final class MainActivity extends AppCompatActivity {
     }
     private static final class MessageRow {
         ChatEngine.Entry entry;
+        Albums.Row item;
         final View alignment;
+        final LinearLayout holder;
         final TextView body;
         final TextView sender;
         final ImageView receipt;
@@ -217,24 +222,30 @@ public final class MainActivity extends AppCompatActivity {
         // The photos this row draws (none for a text row), and the messages whose pictures they are.
         final java.util.List<PhotoTile> tiles = new ArrayList<>();
         final java.util.List<UUID> photoIds = new ArrayList<>();
-        // The messages the row stands for (more than one only for an album, in the order they are drawn), and the album itself.
-        final java.util.List<ChatEngine.Entry> members = new ArrayList<>();
         AlbumView album;
-        MessageRow(ChatEngine.Entry entry, View alignment, TextView body, TextView sender, ImageView receipt, TextView groupReceipt) {
-            this.entry = entry; this.alignment = alignment; this.body = body; this.sender = sender; this.receipt = receipt; this.groupReceipt = groupReceipt;
+        View chip;
+        String shownMine, shownTheirs, reactionPeerName;
+        MessageRow(Albums.Row item, View alignment, Bubble bubble) {
+            this.item = item; this.alignment = alignment; this.holder = bubble.holder; this.body = bubble.body;
+            this.sender = bubble.sender; this.receipt = bubble.receipt; this.groupReceipt = bubble.groupReceipt;
         }
         void clear() { body.setText(""); for (PhotoTile tile : tiles) tile.clear(); }
-        boolean holds(UUID id) {
-            for (ChatEngine.Entry member : members) if (member.id().equals(id)) return true;
-            return false;
-        }
+        boolean holds(UUID id) { return item.holds(id); }
     }
     // The pictures drawn in the chat, in memory only, and the tiles that are waiting for one that is being decoded.
     private final PhotoThumbnails thumbnails = new PhotoThumbnails();
     private final Map<UUID, java.util.List<PhotoTile>> thumbnailWaiting = new HashMap<>();
-    private java.util.List<ChatEngine.Peer> shownPeers = java.util.List.of();
-    private java.util.List<GroupChat.Conversation> shownGroups = java.util.List.of();
-    private long shownAdminDirectory;
+    private LinearLayout homeLayout;
+    private UUID homeOwner;
+    private String homeOwnerName;
+    private record ChatListContents(java.util.List<ChatEngine.Peer> peers, java.util.List<GroupChat.Conversation> groups,
+                                    Set<UUID> muted, long directory) {
+        static ChatListContents read(ChatEngine current) {
+            return new ChatListContents(current.peers(), current.groups().conversations(), current.mutedChats(), current.onboarding().generation());
+        }
+    }
+    private ChatListContents shownChats;
+    private Map<UUID, Long> shownUnread = Map.of();
     private ImageButton sendControl;
     // The most characters of a message: what the field takes, and what an edit takes.
     private static final int MESSAGE_LIMIT = 4096;
@@ -368,7 +379,7 @@ public final class MainActivity extends AppCompatActivity {
     }
     private java.util.List<Uri> selectedImages = new ArrayList<>();
     private int imagesLeftOut;
-    private byte[] cameraImage;
+    private Bitmap cameraImage;
     private final BroadcastReceiver pushRefresh = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) { registerPush(); }
     };
@@ -382,6 +393,10 @@ public final class MainActivity extends AppCompatActivity {
             resumeAfterPhoneUnlock();
             refreshProfileAvatars();
             refreshContactStatus();
+            if (!reactionChoices.isEmpty()) {
+                long now = System.currentTimeMillis();
+                reactionChoices.values().removeIf(choice -> choice.deadline() <= now);
+            }
             pendingSends.removeIf(pending -> {
                 if (pending.expiresAt() > System.currentTimeMillis()) return false;
                 if (pending.row != null && pending.row.getParent() instanceof ViewGroup parent) parent.removeView(pending.row);
@@ -394,11 +409,11 @@ public final class MainActivity extends AppCompatActivity {
                 boolean[] album = {false};
                 messageRows.values().removeIf(row -> {
                     if (row.entry.expiresAt() > now) return false;
-                    if (row.members.size() > 1) album[0] = true;
+                    if (row.item.album()) album[0] = true;
                     messages.removeView(row.alignment); row.clear();
                     // The picture of what has expired goes with it, and a decode still running for it is not kept. The rest of an album
                     // keeps its own pictures for when the album is drawn again.
-                    for (ChatEngine.Entry member : row.members) {
+                    for (ChatEngine.Entry member : row.item.members()) {
                         if (member.expiresAt() > now) continue;
                         thumbnails.remove(member.id()); thumbnailWaiting.remove(member.id());
                     }
@@ -425,7 +440,7 @@ public final class MainActivity extends AppCompatActivity {
             @Override public void handleOnBackPressed() {
                 if ((emojiShown || emojiPending) && emojiPanel != null && emojiPanel.isAttachedToWindow()) { hideEmoji(false); return; }
                 if (selectedPeer == null && rowSwipes.closeOpen()) return;
-                if (selectedPeer != null && engine != null) { selectedPeer = null; render(); }
+                if (selectedPeer != null && engine != null) navigateChat(null);
                 else { hideContent(); finish(); }
             }
         });
@@ -531,18 +546,19 @@ public final class MainActivity extends AppCompatActivity {
         long request = avatar.request;
         long photoGeneration = current.photos().generation();
         int generation = screenGeneration;
-        onReader(() -> {
+        previewReader.execute(() -> {
             byte[] photo = null;
             Bitmap decoded = null;
             try {
-                if (!resumed || engine != current || screenGeneration != generation) return;
-                photo = own ? current.photos().own() : current.photos().contact(avatar.userId);
-                long deadline = own ? Long.MAX_VALUE : current.photos().expiresAt(avatar.userId);
+                if (!resumed || engine != current || screenGeneration != generation || current.photos().generation() != photoGeneration) return;
+                ProfilePhotos.Cached cached = own ? null : current.photos().contactAvatar(avatar.userId);
+                photo = own ? current.photos().own() : cached == null ? null : cached.photo();
+                long deadline = own ? Long.MAX_VALUE : cached == null ? 0 : cached.expiresAt();
                 if (photo != null && deadline > System.currentTimeMillis()) decoded = SafeImages.displayProfilePhoto(photo);
                 Bitmap result = decoded;
-                ui.post(() -> {
+                imagesReady.post(() -> {
                     if (!resumed || engine != current || screenGeneration != generation || avatar.request != request
-                            || !avatar.frame.isAttachedToWindow() || current.photos().generation() != photoGeneration
+                            || !retainsAvatar(avatar) || current.photos().generation() != photoGeneration
                             || deadline <= System.currentTimeMillis()) {
                         if (result != null) result.recycle();
                         return;
@@ -554,12 +570,12 @@ public final class MainActivity extends AppCompatActivity {
                 });
                 decoded = null;
             } catch (Exception failure) {
-                ui.post(() -> {
+                imagesReady.post(() -> {
                     if (!resumed || engine != current || screenGeneration != generation || avatar.request != request
-                            || !avatar.frame.isAttachedToWindow()) return;
+                            || !retainsAvatar(avatar)) return;
                     if (failure instanceof GeneralSecurityException || failure instanceof SecurityException) {
                         hideContent(); storageFailure(failure);
-                    } else problem("Profile photo is unavailable. Try again from My profile.");
+                    } else if (avatar.frame.isAttachedToWindow()) problem("Profile photo is unavailable. Try again from My profile.");
                 });
             } finally {
                 if (photo != null) Arrays.fill(photo, (byte) 0);
@@ -572,12 +588,24 @@ public final class MainActivity extends AppCompatActivity {
         if (!resumed || engine == null) return;
         long current = engine.photos().generation();
         photoAvatars.removeIf(avatar -> {
-            if (!avatar.frame.isAttachedToWindow()) { avatar.clear(); return true; }
+            if (!retainsAvatar(avatar)) { avatar.clear(); return true; }
             if (shownPhotoGeneration != current) bindProfileAvatar(avatar);
             else if (avatar.bitmap != null && avatar.expiresAt <= System.currentTimeMillis()) avatar.clear();
             return false;
         });
         shownPhotoGeneration = current;
+    }
+
+    private boolean retainsAvatar(PhotoAvatar avatar) {
+        return avatar.frame.isAttachedToWindow() || isHomeAvatar(avatar);
+    }
+
+    private boolean isHomeAvatar(PhotoAvatar avatar) {
+        if (homeLayout == null) return false;
+        for (View view = avatar.frame; view != null; view = view.getParent() instanceof View parent ? parent : null) {
+            if (view == homeLayout) return true;
+        }
+        return false;
     }
 
     private void clearProfileAvatars() {
@@ -587,7 +615,7 @@ public final class MainActivity extends AppCompatActivity {
 
     private void title(String name, boolean back) {
         LinearLayout heading = horizontal();
-        if (back) heading.addView(icon(android.R.drawable.ic_media_previous, "Back", () -> { selectedPeer = null; render(); }));
+        if (back) heading.addView(icon(android.R.drawable.ic_media_previous, "Back", () -> navigateChat(null)));
         if ("vanishr".equals(name)) heading.addView(design.logo(36));
         TextView title = design.text(name, 26, 800, INK);
         title.setGravity(Gravity.CENTER_VERTICAL);
@@ -605,7 +633,29 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void storageState() {
+        clearHome();
         chatScreen = false;
+        if (storageError == null && googleAttempt == null && !completingGoogle) {
+            if (root.findViewById(R.id.startup_progress) != null) return;
+            screenPadding(0);
+            root.removeAllViews();
+            LinearLayout center = vertical();
+            center.setGravity(Gravity.CENTER);
+            center.addView(design.logo(80), new LinearLayout.LayoutParams(dp(80), dp(80)));
+            var progress = new com.google.android.material.progressindicator.LinearProgressIndicator(this);
+            progress.setId(R.id.startup_progress);
+            progress.setContentDescription(getString(R.string.opening_vanishr));
+            progress.setTrackThickness(dp(4));
+            progress.setTrackCornerRadius(dp(2));
+            progress.setIndicatorColor(GREEN);
+            progress.setTrackColor(Ui.LINE);
+            progress.setIndeterminate(true);
+            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(dp(132), -2);
+            size.topMargin = dp(18);
+            center.addView(progress, size);
+            root.addView(center, new LinearLayout.LayoutParams(-1, 0, 1));
+            return;
+        }
         screenPadding(20);
         root.removeAllViews();
         title("vanishr", false);
@@ -617,8 +667,7 @@ public final class MainActivity extends AppCompatActivity {
         if (storageError == null) center.addView(new ProgressBar(this), new LinearLayout.LayoutParams(dp(40), dp(40)));
         else center.addView(design.symbol(R.drawable.ic_circle_alert, 40, Ui.ERROR));
         center.addView(design.spacer(20));
-        String progress = googleAttempt != null || completingGoogle ? "Signing in with Google..." : notificationOpen != null ? "Opening chat..." : "Opening your chats...";
-        TextView message = design.text(storageError == null ? progress : storageError, 16, 500, MUTED);
+        TextView message = design.text(storageError == null ? "Signing in with Google..." : storageError, 16, 500, MUTED);
         message.setGravity(Gravity.CENTER);
         center.addView(message, new LinearLayout.LayoutParams(-1, -2));
         scroll.addView(center);
@@ -675,8 +724,10 @@ public final class MainActivity extends AppCompatActivity {
                     if (!resumed || isDestroyed() || generation != screenGeneration) { loaded.close(); return; }
                     loadingGeneration = -1;
                     engine = loaded;
-                    if (loaded.authenticated()) loaded.connect(this::queueSync);
                     render();
+                    if (loaded.authenticated()) work.execute(() -> {
+                        if (resumed && engine == loaded && generation == screenGeneration) loaded.connect(this::queueSync);
+                    });
                     showGoogleDeletionFailure();
                     if (accountDeletedNotice && loaded.account() == null) {
                         accountDeletedNotice = false;
@@ -725,15 +776,27 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void render() {
+        render(false);
+    }
+
+    private void navigateChat(UUID peer) {
+        if (peer != null) rowSwipes.closeOpen();
+        selectedPeer = peer;
+        render(true);
+    }
+
+    private void render(boolean keepHome) {
         if (!resumed) return;
         ChatEngine current = engine;
         if (current == null) { storageState(); return; }
         String draft = composer != null && Objects.equals(composerPeer, selectedPeer) ? composer.getText().toString() : "";
         resetConversation();
+        ChatEngine.Account owner = current.account();
+        if (!keepHome || owner == null || !Objects.equals(homeOwner, owner.userId())
+                || !current.authenticated() || current.safety().deletionPending() || !current.safety().termsAccepted(PlayPolicy.VERSION)) clearHome();
         root.removeAllViews();
-        messages = null; messageScroll = null; composer = null; connection = null; conversationName = null; conversationUsername = null; actionError = null; contactRows = null; contactSearch = null;
+        messages = null; messageScroll = null; composer = null; connection = null; conversationName = null; conversationUsername = null; actionError = null;
         contactStatus = null;
-        homeConnection = null; unreadFilter = null;
         screenPadding(20);
         shownEntries = java.util.List.of();
         if (current.safety().deletionPending()) { pendingDeletionScreen(); return; }
@@ -749,7 +812,8 @@ public final class MainActivity extends AppCompatActivity {
         current.presence().foreground(true);
         ChatEngine.Peer peer = conversationPeer(selectedPeer);
         current.presence().conversation(peer != null && current.groups().get(peer.userId()) == null ? peer.userId() : null);
-        if (peer == null) contactsScreen(); else conversation(peer);
+        if (peer == null) { selectedPeer = null; contactsScreen(); }
+        else conversation(peer);
         if (composer != null && !draft.isEmpty()) {
             restoringDraft = true;
             try { composer.setText(draft); composer.setSelection(composer.length()); }
@@ -1130,6 +1194,20 @@ public final class MainActivity extends AppCompatActivity {
     private void contactsScreen() {
         chatScreen = false;
         screenPadding(0);
+        String displayName = engine.displayName();
+        if (homeLayout != null && !displayName.equals(homeOwnerName)) clearHome();
+        if (homeLayout != null) {
+            refreshProfileAvatars();
+            root.addView(homeLayout, new LinearLayout.LayoutParams(-1, -1));
+            updateContacts(ChatListContents.read(engine), engine.unreadCounts());
+            renderNotice();
+            homeStatus();
+            return;
+        }
+        homeOwner = engine.account().userId();
+        homeOwnerName = displayName;
+        homeLayout = vertical();
+        root.addView(homeLayout, new LinearLayout.LayoutParams(-1, -1));
         LinearLayout toolbar = horizontal(); toolbar.setPadding(dp(17), 0, dp(17), 0);
         toolbar.setContentDescription("Chats");
         LinearLayout brand = horizontal();
@@ -1143,12 +1221,12 @@ public final class MainActivity extends AppCompatActivity {
         ImageButton add = icon(R.drawable.ic_square_pen, "New conversation", this::newConversationDialog); add.setPadding(dp(10), dp(10), dp(10), dp(10));
         add.setBackground(design.feedback(Ui.PRIMARY, 7)); add.setColorFilter(Color.WHITE);
         LinearLayout.LayoutParams composeSize = new LinearLayout.LayoutParams(dp(40), dp(40)); composeSize.setMarginStart(dp(4)); toolbar.addView(add, composeSize);
-        View profile = profileAvatar(engine.account().userId(), engine.displayName(), 40, Ui.BLUE);
+        View profile = profileAvatar(homeOwner, displayName, 40, Ui.BLUE);
         profile.setContentDescription("My profile"); profile.setTooltipText("My profile"); profile.setFocusable(true);
         profile.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES); profile.setFilterTouchesWhenObscured(true);
         profile.setOnClickListener(view -> accountDialog());
         LinearLayout.LayoutParams profileSize = new LinearLayout.LayoutParams(dp(40), dp(40)); profileSize.setMarginStart(dp(7)); toolbar.addView(profile, profileSize);
-        root.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(60)));
+        homeLayout.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(60)));
         LinearLayout searchRow = horizontal(); searchRow.setGravity(Gravity.TOP); searchRow.setPadding(dp(17), dp(2), dp(17), dp(10));
         LinearLayout searchBox = horizontal(); searchBox.setPadding(dp(12), 0, dp(4), 0); searchBox.setBackground(design.background(Ui.SURFACE, 7, Ui.LINE));
         searchBox.addView(design.symbol(R.drawable.ic_search, 18, MUTED));
@@ -1162,18 +1240,18 @@ public final class MainActivity extends AppCompatActivity {
         searchRow.addView(searchBox, new LinearLayout.LayoutParams(0, dp(44), 1));
         unreadFilter = icon(R.drawable.ic_list_filter, "Unread chats", () -> { unreadOnly = !unreadOnly; renderContacts(); });
         LinearLayout.LayoutParams filterSize = new LinearLayout.LayoutParams(dp(44), dp(44)); filterSize.setMarginStart(dp(7)); searchRow.addView(unreadFilter, filterSize);
-        root.addView(searchRow, new LinearLayout.LayoutParams(-1, dp(56)));
+        homeLayout.addView(searchRow, new LinearLayout.LayoutParams(-1, dp(56)));
         noticeHost = vertical();
         // A notice can never take more than part of the space that is left, whatever it says: the chat list below it stays reachable.
         noticeArea = new BoundedScrollView(this, .4f);
         noticeArea.addView(noticeHost);
-        root.addView(noticeArea, new LinearLayout.LayoutParams(-1, -2));
+        homeLayout.addView(noticeArea, new LinearLayout.LayoutParams(-1, -2));
         renderNotice();
         ScrollView scroll = new ScrollView(this);
         rowSwipes = new SwipeActions.Group();
         closeRowsOnTouch(scroll);
         contactRows = vertical(); scroll.setFillViewport(true); scroll.addView(contactRows);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        homeLayout.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         renderContacts();
         contactSearch.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence value, int start, int count, int after) { }
@@ -1185,8 +1263,21 @@ public final class MainActivity extends AppCompatActivity {
         homeStatus();
     }
 
+    private void clearHome() {
+        if (homeLayout == null) return;
+        photoAvatars.removeIf(avatar -> {
+            if (!isHomeAvatar(avatar)) return false;
+            avatar.clear();
+            return true;
+        });
+        homeLayout = null; homeOwner = null; homeOwnerName = null; shownChats = null; shownUnread = Map.of();
+        contactRows = null; contactSearch = null; unreadLabels.clear();
+        homeConnection = null; unreadFilter = null; noticeHost = null; noticeArea = null;
+        rowSwipes = new SwipeActions.Group();
+    }
+
     private void homeStatus() {
-        if (homeConnection == null) return;
+        if (homeConnection == null || homeLayout.getParent() != root) return;
         homeConnection.setBackground(design.background(engine != null && engine.online && !busy ? Color.rgb(57, 164, 130) : MUTED, 3, 0));
         homeConnection.setContentDescription(statusText()); homeConnection.setTooltipText(statusText());
     }
@@ -1330,6 +1421,25 @@ public final class MainActivity extends AppCompatActivity {
 
     private void renderContacts() {
         if (contactRows == null || engine == null) return;
+        renderContacts(ChatListContents.read(engine), engine.unreadCounts());
+    }
+
+    private void updateContacts(ChatListContents contents, Map<UUID, Long> unreadCounts) {
+        if (contactRows == null || rowSwipes.active()) return;
+        if (!contents.equals(shownChats) || (unreadOnly && !unreadCounts.keySet().equals(shownUnread.keySet()))) {
+            renderContacts(contents, unreadCounts);
+            return;
+        }
+        for (var unread : unreadLabels.entrySet()) {
+            long count = unreadCounts.getOrDefault(unread.getKey(), 0L);
+            if (count == shownUnread.getOrDefault(unread.getKey(), 0L)) continue;
+            TextView badge = unread.getValue();
+            badge.setText(Long.toString(count)); badge.setVisibility(count == 0 ? View.GONE : View.VISIBLE);
+        }
+        shownUnread = unreadCounts;
+    }
+
+    private void renderContacts(ChatListContents contents, Map<UUID, Long> unreadCounts) {
         rowSwipes.begin();
         contactRows.removeAllViews(); unreadLabels.clear();
         if (unreadFilter != null) {
@@ -1338,13 +1448,8 @@ public final class MainActivity extends AppCompatActivity {
             androidx.core.view.ViewCompat.setStateDescription(unreadFilter, unreadOnly ? "Unread only" : "All chats");
         }
         String filter = contactSearch == null ? "" : contactSearch.getText().toString().toLowerCase(Locale.ROOT);
-        // One pass over the lists and the stored messages, however many chats there are.
-        java.util.List<GroupChat.Conversation> groups = engine.groups().conversations();
-        java.util.List<ChatEngine.Peer> peers = engine.peers();
-        Map<UUID, Long> unreadCounts = engine.unreadCounts();
-        java.util.Set<UUID> muted = engine.mutedChats();
-        shownPeers = peers; shownGroups = groups; shownAdminDirectory = engine.onboarding().generation();
-        for (GroupChat.Conversation group : groups) {
+        shownChats = contents; shownUnread = unreadCounts;
+        for (GroupChat.Conversation group : contents.groups()) {
             if (!group.name().toLowerCase(Locale.ROOT).contains(filter)) continue;
             long count = unreadCounts.getOrDefault(group.id(), 0L);
             if (unreadOnly && count == 0) continue;
@@ -1361,13 +1466,13 @@ public final class MainActivity extends AppCompatActivity {
                 GroupChat.Conversation current=engine.groups().get(group.id());
                 if (current==null) return;
                 if (engine.groups().invited(current)) groupInvitationDialog(current);
-                else { selectedPeer=group.id(); render(); }
+                else navigateChat(group.id());
             });
             row.setOnLongClickListener(view -> { groupInfo(group.id()); return true; });
             addChatRow(row);
         }
         java.util.Set<UUID> reviewing = engine.onboarding().changedContacts();
-        for (ChatEngine.Peer peer : peers) {
+        for (ChatEngine.Peer peer : contents.peers()) {
             if (!peer.name().toLowerCase(Locale.ROOT).contains(filter) && !peer.username().contains(filter)
                     && (peer.profileName() == null || !peer.profileName().toLowerCase(Locale.ROOT).contains(filter))) {
                 continue;
@@ -1377,7 +1482,7 @@ public final class MainActivity extends AppCompatActivity {
                 continue;
             }
             LinearLayout row = horizontal();
-            boolean quiet = muted.contains(peer.userId());
+            boolean quiet = contents.muted().contains(peer.userId());
             // Opaque, so that the actions behind the row do not show through while it moves.
             row.setMinimumHeight(dp(78)); row.setPadding(dp(18), dp(12), dp(18), dp(12)); row.setBackground(design.feedback(Ui.CANVAS, 0));
             row.addView(profileAvatar(peer.userId(), peer.name(), 46, design.avatarColor(peer.userId())));
@@ -1431,9 +1536,9 @@ public final class MainActivity extends AppCompatActivity {
         // A contact the relay now introduces with a different identity is looked at first; the chat opens once it has been accepted.
         if (current.onboarding().changed(peer.userId()) != null) { reviewIdentityDialog(peer); return; }
         try {
-            if (current.independentlyVerified(peer.userId()) || current.prepareSavedConversation(peer)) { selectedPeer = peer.userId(); render(); return; }
+            if (current.independentlyVerified(peer.userId()) || current.prepareSavedConversation(peer)) { navigateChat(peer.userId()); return; }
         } catch (Exception failure) { showFailure(failure); return; }
-        submit(() -> current.prepareConversation(peer), () -> { selectedPeer = peer.userId(); render(); });
+        submit(() -> current.prepareConversation(peer), () -> navigateChat(peer.userId()));
     }
 
     // The relay introduces a different identity for this saved contact, usually because they reinstalled Vanishr or changed phone. Nothing is
@@ -1541,7 +1646,7 @@ public final class MainActivity extends AppCompatActivity {
         GroupChat.Conversation group=engine.groups().get(peer.userId());
         shownConversationPeer = peer; shownConversationGroup = group;
         LinearLayout header = horizontal(); header.setMinimumHeight(dp(68)); header.setPadding(dp(10),dp(8),dp(10),dp(8)); header.setBackgroundColor(Ui.SURFACE);
-        header.addView(icon(R.drawable.ic_arrow_left, "Back", () -> { selectedPeer = null; render(); }));
+        header.addView(icon(R.drawable.ic_arrow_left, "Back", () -> navigateChat(null)));
         View avatar=group==null ? profileAvatar(peer.userId(),peer.name(),36,design.avatarColor(peer.userId())) : design.groupAvatar(36,Ui.BLUE);
         LinearLayout.LayoutParams avatarSize=new LinearLayout.LayoutParams(dp(36),dp(36)); avatarSize.setMarginStart(dp(8)); header.addView(avatar,avatarSize);
         LinearLayout identity = vertical(); identity.setPadding(dp(8), 0, dp(6), 0);
@@ -1573,6 +1678,7 @@ public final class MainActivity extends AppCompatActivity {
         }));
         root.addView(header); root.addView(design.divider());
         messageScroll = new ChatScroll(this);
+        messageScroll.setBackground(ChatWallpaper.create(this));
         messageScroll.setFillViewport(true); messageScroll.setClipToPadding(false);
         messageScroll.setOnScrollChangeListener((view, x, y, oldX, oldY) -> {
             if (y < oldY && y < dp(900)) loadOlderMessages(peer);
@@ -1796,6 +1902,11 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private boolean enqueueSend(ChatEngine.Peer peer, String text, byte[] image, ChatEnvelope.Expiry selectedExpiry, ChatEnvelope.Reference reference) {
+        return enqueueSend(peer, text, image, selectedExpiry, reference, null);
+    }
+
+    private boolean enqueueSend(ChatEngine.Peer peer, String text, byte[] image, ChatEnvelope.Expiry selectedExpiry,
+                                ChatEnvelope.Reference reference, Bitmap preview) {
         if (!resumed || engine == null || busy) return false;
         if (image != null && !allowed(RemoteSettings.Flag.IMAGES)) return false;
         GroupChat.Conversation group = shownConversationGroup;
@@ -1803,10 +1914,7 @@ public final class MainActivity extends AppCompatActivity {
         if (pendingSends.size() >= MAX_PENDING) { problem("Wait for a pending message before sending more."); return false; }
         PendingSend pending = new PendingSend(peer, text, image == null ? null : image.clone(), selectedExpiry, group == null ? reference : null);
         pending.group=group!=null;
-        if (image != null && selectedExpiry != ChatEnvelope.Expiry.VIEW_ONCE && photosOn()) {
-            try { pending.preview = SafeImages.thumbnail(image, PhotoThumbnails.EDGE); }
-            catch (java.io.IOException | RuntimeException failure) { pending.preview = null; }
-        }
+        pending.preview = preview;
         if (messages != null && peer.userId().equals(selectedPeer) && shownEntries.isEmpty()
                 && pendingSends.stream().noneMatch(value -> value.peer.userId().equals(selectedPeer))) messages.removeAllViews();
         pendingSends.add(pending);
@@ -1819,8 +1927,13 @@ public final class MainActivity extends AppCompatActivity {
     // Several photos, chosen together. In the 12 and 24 hour modes they are one album, drawn as one and sent one after another; a
     // view-once photo can only be opened by itself, so each of those is a message of its own (as in other messengers).
     private boolean enqueueAlbum(ChatEngine.Peer peer, java.util.List<byte[]> images, ChatEnvelope.Expiry selectedExpiry, ChatEnvelope.Reference reference) {
+        return enqueueAlbum(peer, images, selectedExpiry, reference, List.of());
+    }
+
+    private boolean enqueueAlbum(ChatEngine.Peer peer, java.util.List<byte[]> images, ChatEnvelope.Expiry selectedExpiry,
+                                 ChatEnvelope.Reference reference, List<Bitmap> previews) {
         if (images.isEmpty() || images.size() > Albums.MAX_SENT) return false;
-        if (images.size() == 1) return enqueueSend(peer, null, images.get(0), selectedExpiry, reference);
+        if (images.size() == 1) return enqueueSend(peer, null, images.get(0), selectedExpiry, reference, previews.isEmpty() ? null : previews.get(0));
         if (!resumed || engine == null || busy || !allowed(RemoteSettings.Flag.IMAGES)) return false;
         GroupChat.Conversation group = shownConversationGroup;
         if (group != null && (sendControl == null || !sendControl.isEnabled())) { problem("Group membership is being verified."); return false; }
@@ -1835,12 +1948,7 @@ public final class MainActivity extends AppCompatActivity {
         for (byte[] image : images) copies.add(image.clone());
         PendingSend pending = new PendingSend(peer, copies, selectedExpiry, group == null ? reference : null);
         pending.group = group != null;
-        if (photosOn()) {
-            for (int index = 0; index < images.size(); index++) {
-                try { pending.previews.set(index, SafeImages.thumbnail(images.get(index), PhotoThumbnails.EDGE)); }
-                catch (java.io.IOException | RuntimeException failure) { pending.previews.set(index, null); }
-            }
-        }
+        for (int index = 0; index < previews.size(); index++) pending.previews.set(index, previews.get(index));
         if (messages != null && peer.userId().equals(selectedPeer) && shownEntries.isEmpty()
                 && pendingSends.stream().noneMatch(value -> value.peer.userId().equals(selectedPeer))) messages.removeAllViews();
         pendingSends.add(pending);
@@ -2264,11 +2372,8 @@ public final class MainActivity extends AppCompatActivity {
         messageRefreshRequested = false;
         MessageLoad load = new MessageLoad(engine, conversationGeneration, peer, historyLimit);
         load.photosShown = photosOn();
-        messageRows.forEach((id, row) -> {
-            load.known.put(id, row.entry);
-            // The other photos of an album are known as well, so that a refresh does not take them for new ones or for ones to hide.
-            if (row.members.size() > 1) for (ChatEngine.Entry member : row.members) load.known.put(member.id(), member);
-        });
+        for (MessageRow row : messageRows.values())
+            for (ChatEngine.Entry member : row.item.members()) load.known.put(member.id(), member);
         onReader(() -> listMessages(load));
     }
 
@@ -2413,13 +2518,19 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private static boolean sameMessage(ChatEngine.Entry entry, ChatEngine.Entry previous) {
-        return previous != null && previous.equals(entry.withState(previous.state()));
+        if (previous == null) return false;
+        if (previous.equals(entry)) return true;
+        ChatEngine.Entry body = entry.withState(previous.state());
+        if (!Objects.equals(body.reactionMine(), previous.reactionMine())) body = body.withReaction(true, previous.reactionMine());
+        if (!Objects.equals(body.reactionTheirs(), previous.reactionTheirs())) body = body.withReaction(false, previous.reactionTheirs());
+        return previous.equals(body);
     }
 
     // A row is drawn afresh only when what it shows has changed: the message, or the photos of the album and their order.
     private static boolean sameRow(Albums.Row item, MessageRow row) {
-        if (!sameMessage(item.summary(), row.entry) || item.members().size() != row.members.size()) return false;
-        for (int index = 0; index < row.members.size(); index++) if (!sameMessage(item.members().get(index), row.members.get(index))) return false;
+        if (item.members().size() != row.item.members().size()) return false;
+        for (int index = 0; index < row.item.members().size(); index++)
+            if (!sameMessage(item.members().get(index), row.item.members().get(index))) return false;
         return true;
     }
 
@@ -2436,7 +2547,7 @@ public final class MainActivity extends AppCompatActivity {
     private MessageRow rowOf(UUID id) {
         MessageRow row = messageRows.get(id);
         if (row != null) return row;
-        for (MessageRow candidate : messageRows.values()) if (candidate.members.size() > 1 && candidate.holds(id)) return candidate;
+        for (MessageRow candidate : messageRows.values()) if (candidate.item.album() && candidate.holds(id)) return candidate;
         return null;
     }
 
@@ -2458,7 +2569,12 @@ public final class MainActivity extends AppCompatActivity {
 
     private void applyMessages(ChatEngine.Peer peer, java.util.List<ChatEngine.Entry> loaded,
                                Map<UUID, String> text, Map<UUID, String> senders, Map<UUID, ChatEnvelope.Reference> references) {
-        java.util.List<ChatEngine.Entry> entries = loaded.stream().filter(entry -> entry.expiresAt() > System.currentTimeMillis()).toList();
+        long now = System.currentTimeMillis();
+        java.util.List<ChatEngine.Entry> entries = loaded.stream().filter(entry -> entry.expiresAt() > now).toList();
+        if (!reactionChoices.isEmpty()) for (ChatEngine.Entry entry : entries) {
+            ReactionChoice choice = reactionChoices.get(entry.id());
+            if (choice != null && !choice.saving() && Objects.equals(choice.emoji(), entry.reactionMine())) reactionChoices.remove(entry.id());
+        }
         boolean atEnd = bottomScrollsPending > 0 || messageScroll == null
                 || messages.getHeight() - messageScroll.getScrollY() - messageScroll.getHeight() < dp(100);
         int position = messageScroll == null ? 0 : messageScroll.getScrollY();
@@ -2501,18 +2617,23 @@ public final class MainActivity extends AppCompatActivity {
             ordered.add(messageEmpty);
         }
         String previousDay = "";
+        var zone = java.time.ZoneId.systemDefault();
+        String today = java.time.LocalDate.now(zone).toString();
+        var dateFormat = java.time.format.DateTimeFormatter.ofPattern("MMM d", Locale.getDefault());
         Set<String> days = new HashSet<>();
         java.util.List<MessageRow> shownRows = new ArrayList<>();
+        boolean reactionsChanged = false;
         for (Albums.Row item : rows) {
             ChatEngine.Entry entry = item.summary(), first = item.first();
             long created = first.expiresAt() - first.expiry().milliseconds;
-            String day = java.time.Instant.ofEpochMilli(created).atZone(java.time.ZoneId.systemDefault()).toLocalDate().toString();
+            var dateValue = java.time.Instant.ofEpochMilli(created).atZone(zone).toLocalDate();
+            String day = dateValue.toString();
             if (!day.equals(previousDay)) {
                 TextView date = messageDates.computeIfAbsent(day, key -> {
                     TextView label = design.text("", 10, 500, MUTED);
                     label.setGravity(Gravity.CENTER); label.setPadding(0, 0, 0, dp(28)); return label;
                 });
-                String dateText = day.equals(java.time.LocalDate.now().toString()) ? "Today" : java.time.format.DateTimeFormatter.ofPattern("MMM d", Locale.getDefault()).format(java.time.LocalDate.parse(day));
+                String dateText = day.equals(today) ? "Today" : dateFormat.format(dateValue);
                 if (!dateText.contentEquals(date.getText())) date.setText(dateText);
                 ordered.add(date); days.add(day); previousDay = day;
             }
@@ -2528,7 +2649,9 @@ public final class MainActivity extends AppCompatActivity {
                 existing = messageRow(peer, item, text.get(first.id()), senders.get(first.id()), quote);
                 messageRows.put(first.id(), existing);
             }
+            existing.item = item;
             updateReceipt(existing, entry);
+            reactionsChanged |= updateReactionChip(peer, existing);
             String senderName = senders.get(first.id());
             if (existing.sender != null && senderName != null && !senderName.contentEquals(existing.sender.getText()))
                 existing.sender.setText(senderName);
@@ -2546,14 +2669,14 @@ public final class MainActivity extends AppCompatActivity {
             if (pending.row == null) appendPending(pending);
             if (pending.row != null) ordered.add(pending.row);
         }
-        boolean changed = messages.getChildCount() != ordered.size();
+        boolean changed = reactionsChanged || messages.getChildCount() != ordered.size();
         Set<View> wanted = new HashSet<>(ordered);
         for (int index = messages.getChildCount() - 1; index >= 0; index--) {
             if (!wanted.contains(messages.getChildAt(index))) { messages.removeViewAt(index); changed = true; }
         }
         for (int index = 0; index < ordered.size(); index++) {
             View row = ordered.get(index);
-            if (messages.indexOfChild(row) == index) continue;
+            if (messages.getChildAt(index) == row) continue;
             if (row.getParent() instanceof ViewGroup parent) parent.removeView(row);
             messages.addView(row, index); changed = true;
         }
@@ -2576,8 +2699,9 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void updateReceipt(MessageRow row, ChatEngine.Entry entry) {
-        if (row.entry != null && row.entry.state().equals(entry.state())) return;
+        ChatEngine.Entry previous = row.entry;
         row.entry = entry;
+        if (previous != null && previous.state().equals(entry.state())) return;
         if (row.receipt != null) {
             row.receipt.setImageResource(switch (entry.state()) { case "READ", "DELIVERED" -> R.drawable.ic_check_check; case "QUEUED" -> R.drawable.ic_check; default -> R.drawable.ic_clock_3; });
             row.receipt.setColorFilter(entry.state().equals("READ") ? Ui.BLUE : MUTED);
@@ -2593,11 +2717,10 @@ public final class MainActivity extends AppCompatActivity {
         final TextView sender;
         final ImageView receipt;
         final TextView groupReceipt;
-        final View chip;
         final java.util.List<PhotoTile> tiles;
         final AlbumView album;
-        Bubble(LinearLayout holder, TextView body, TextView sender, ImageView receipt, TextView groupReceipt, View chip, java.util.List<PhotoTile> tiles, AlbumView album) {
-            this.holder = holder; this.body = body; this.sender = sender; this.receipt = receipt; this.groupReceipt = groupReceipt; this.chip = chip; this.tiles = tiles; this.album = album;
+        Bubble(LinearLayout holder, TextView body, TextView sender, ImageView receipt, TextView groupReceipt, java.util.List<PhotoTile> tiles, AlbumView album) {
+            this.holder = holder; this.body = body; this.sender = sender; this.receipt = receipt; this.groupReceipt = groupReceipt; this.tiles = tiles; this.album = album;
         }
     }
 
@@ -2685,15 +2808,8 @@ public final class MainActivity extends AppCompatActivity {
             }
             LinearLayout holder = vertical(); holder.setClipChildren(false);
             holder.addView(row, new LinearLayout.LayoutParams(-2, -2));
-            View chip = reactionChip(peer, entry);
-            if (chip != null) {
-                // Half on the bubble and half below it, on the side that faces the middle of the screen, clear of the time and the ticks.
-                LinearLayout.LayoutParams hanging = new LinearLayout.LayoutParams(-2, -2);
-                hanging.gravity = entry.outgoing() ? Gravity.START : Gravity.END;
-                hanging.setMargins(dp(10), -dp(9), dp(10), 0);
-                holder.addView(chip, hanging);
-            }
-            return new Bubble(holder, body, sender, status, groupStatus, chip, tiles, collage);
+            if (!interactive) hangReactionChip(holder, reactionChip(peer, entry), entry.outgoing());
+            return new Bubble(holder, body, sender, status, groupStatus, tiles, collage);
     }
 
     // A photo of an album: touching it opens the album at that photo.
@@ -2732,7 +2848,8 @@ public final class MainActivity extends AppCompatActivity {
         waiting = new ArrayList<>(); waiting.add(tile);
         thumbnailWaiting.put(entry.id(), waiting);
         int generation = conversationGeneration;
-        onReader(() -> {
+        previewReader.execute(() -> {
+            if (!conversationCurrent(current, generation)) return;
             Bitmap decoded = null;
             try {
                 if (photosOn()) {
@@ -2742,11 +2859,12 @@ public final class MainActivity extends AppCompatActivity {
                 }
             } catch (Exception failure) { decoded = null; }
             Bitmap result = decoded;
-            ui.post(() -> {
+            imagesReady.post(() -> {
+                if (!conversationCurrent(current, generation)) { if (result != null) result.recycle(); return; }
                 java.util.List<PhotoTile> tiles = thumbnailWaiting.remove(entry.id());
                 if (result == null) return;
                 // Not kept for a message that has gone (deleted, expired, cleared) while it was being decoded, nor once photos are off.
-                if (tiles == null || !conversationCurrent(current, generation) || !photosOn()
+                if (tiles == null || !photosOn()
                         || entry.expiresAt() <= System.currentTimeMillis() || !photoDrawn(entry.id())) { result.recycle(); return; }
                 thumbnails.put(entry.id(), result);
                 for (PhotoTile each : tiles) {
@@ -2781,24 +2899,22 @@ public final class MainActivity extends AppCompatActivity {
             SwipeRow alignment = new SwipeRow(this, bubble.holder, oneToOne ? () -> replyTo(entry, text) : null);
             alignment.setGravity(entry.outgoing() ? Gravity.END : Gravity.START); alignment.setTag(item.summary().expiresAt());
             alignment.addView(bubble.holder, new LinearLayout.LayoutParams(-2, -2));
+            MessageRow result = new MessageRow(item, alignment, bubble);
             // The row takes the press, wherever on it the finger is. In an album, the photo under the finger is the one the actions are
             // for. The reactions on a message open the same actions.
             alignment.setOnLongClickListener(view -> {
                 ChatEngine.Entry target = entry;
                 if (bubble.album != null) {
                     int under = bubble.album.indexAt(alignment.pressX(), alignment.pressY());
-                    if (under >= 0 && under < item.members().size()) target = item.members().get(under);
+                    if (under >= 0 && under < result.item.members().size()) target = result.item.members().get(under);
                 }
-                messageActions(peer, target, text, senderName, reference, bubble.holder, item);
+                messageActions(peer, result, target.id());
                 return true;
             });
-            if (bubble.chip != null) bubble.chip.setOnClickListener(view -> messageActions(peer, reacted(item), text, senderName, reference, bubble.holder, item));
             if (oneToOne) androidx.core.view.ViewCompat.addAccessibilityAction(alignment, "Reply", (view, arguments) -> { replyTo(entry, text); return true; });
             LinearLayout.LayoutParams placement = new LinearLayout.LayoutParams(-1, -2); placement.setMargins(0, 0, 0, dp(14)); alignment.setLayoutParams(placement);
-            MessageRow result = new MessageRow(null, alignment, bubble.body, bubble.sender, bubble.receipt, bubble.groupReceipt);
             result.reference = reference;
             result.tiles.addAll(bubble.tiles);
-            result.members.addAll(item.members());
             result.album = bubble.album;
             for (PhotoTile tile : bubble.tiles) if (tile.entry() != null) result.photoIds.add(tile.entry().id());
             updateReceipt(result, item.summary());
@@ -2809,6 +2925,82 @@ public final class MainActivity extends AppCompatActivity {
     private static ChatEngine.Entry reacted(Albums.Row item) {
         for (ChatEngine.Entry member : item.members()) if (member.reactionMine() != null || member.reactionTheirs() != null) return member;
         return item.head();
+    }
+
+    private Albums.Row displayedReactions(Albums.Row item) {
+        if (reactionChoices.isEmpty()) return item;
+        List<ChatEngine.Entry> members = null;
+        ChatEngine.Entry first = item.first();
+        for (int index = 0; index < item.members().size(); index++) {
+            ChatEngine.Entry entry = item.members().get(index);
+            ReactionChoice choice = reactionChoices.get(entry.id());
+            if (choice == null || choice.deadline() <= System.currentTimeMillis() || Objects.equals(choice.emoji(), entry.reactionMine())) continue;
+            if (members == null) members = new ArrayList<>(item.members());
+            ChatEngine.Entry reacted = entry.withReaction(true, choice.emoji());
+            members.set(index, reacted);
+            if (entry.id().equals(first.id())) first = reacted;
+        }
+        return members == null ? item : new Albums.Row(first, members);
+    }
+
+    private void hangReactionChip(LinearLayout holder, View chip, boolean outgoing) {
+        if (chip == null) return;
+        LinearLayout.LayoutParams hanging = new LinearLayout.LayoutParams(-2, -2);
+        hanging.gravity = outgoing ? Gravity.START : Gravity.END;
+        hanging.setMargins(dp(10), -dp(9), dp(10), 0);
+        holder.addView(chip, hanging);
+    }
+
+    private boolean updateReactionChip(ChatEngine.Peer peer, MessageRow row) {
+        ChatEngine.Entry entry = displayedReactions(row.item).summary();
+        String mine = entry.reactionMine(), theirs = entry.reactionTheirs();
+        if (Objects.equals(mine, row.shownMine) && Objects.equals(theirs, row.shownTheirs)
+                && (theirs == null || peer.name().equals(row.reactionPeerName))) return false;
+        row.shownMine = mine; row.shownTheirs = theirs; row.reactionPeerName = peer.name();
+        if (row.chip != null) row.holder.removeView(row.chip);
+        row.chip = reactionChip(peer, entry);
+        if (row.chip != null) row.chip.setOnClickListener(view -> messageActions(peer, row, null));
+        hangReactionChip(row.holder, row.chip, entry.outgoing());
+        return true;
+    }
+
+    private void refreshReaction(ChatEngine.Peer peer, UUID message) {
+        if (!peer.userId().equals(selectedPeer) || messageScroll == null) return;
+        MessageRow row = rowOf(message);
+        if (row == null) return;
+        boolean atEnd = !messageScroll.canScrollVertically(1);
+        if (updateReactionChip(peer, row) && atEnd) followMessageAfterLayout();
+    }
+
+    private void reactToMessage(ChatEngine.Peer peer, ChatEngine.Entry entry, String emoji) {
+        ChatEngine current = engine;
+        if (!resumed || current == null || !peer.userId().equals(selectedPeer) || entry.expiresAt() <= System.currentTimeMillis()) return;
+        ReactionChoice previous = reactionChoices.get(entry.id());
+        if (previous != null && previous.saving()) { notice("Still saving your reaction. Try again in a moment."); return; }
+        ReactionChoice choice = new ReactionChoice(emoji, entry.expiresAt(), true);
+        reactionChoices.put(entry.id(), choice);
+        refreshReaction(peer, entry.id());
+        int generation = screenGeneration;
+        act(() -> {
+            if (!resumed || engine != current || generation != screenGeneration) return;
+            try {
+                current.react(entry, emoji, stored -> ui.post(() -> {
+                    if (!resumed || engine != current || generation != screenGeneration || reactionChoices.get(entry.id()) != choice) return;
+                    reactionChoices.put(entry.id(), new ReactionChoice(stored.reactionMine(), stored.expiresAt(), false));
+                }));
+            } catch (Exception failure) {
+                ui.post(() -> {
+                    if (!resumed || engine != current || generation != screenGeneration) return;
+                    if (reactionChoices.get(entry.id()) == choice) {
+                        if (previous == null) reactionChoices.remove(entry.id());
+                        else reactionChoices.put(entry.id(), previous);
+                        refreshReaction(peer, entry.id());
+                        refreshMessages(peer);
+                    }
+                    showFailure(failure);
+                });
+            }
+        });
     }
 
     // A quote is pulled out to the edge of the bubble it is in, as in a chat app, with a little room under it. It fills the bubble, and
@@ -2963,10 +3155,15 @@ public final class MainActivity extends AppCompatActivity {
 
     // The long press on a message: the chat dims, the message stays where it was with the reactions floating above it, and below it
     // comes what can be done with it. What is offered depends on the message and on whose it is.
-    private void messageActions(ChatEngine.Peer peer, ChatEngine.Entry entry, String text, String senderName, ChatEnvelope.Reference reference, View original, Albums.Row item) {
-        if (!resumed || engine == null || busy || original.getWidth() == 0 || original.getHeight() == 0) return;
+    private void messageActions(ChatEngine.Peer peer, MessageRow row, UUID target) {
+        View original = row.holder;
+        if (!resumed || engine == null || busy || !original.isAttachedToWindow() || original.getWidth() == 0 || original.getHeight() == 0) return;
         if (messageOverlay != null && messageOverlay.isShowing()) return;
+        Albums.Row item = displayedReactions(row.item);
+        ChatEngine.Entry entry = target == null ? reacted(item) : item.members().stream().filter(member -> member.id().equals(target)).findFirst().orElse(item.head());
         if (entry.expiresAt() <= System.currentTimeMillis()) return;
+        String text = row.body.getText().toString(), senderName = row.sender == null ? null : row.sender.getText().toString();
+        ChatEnvelope.Reference reference = row.reference;
         boolean oneToOne = entry.groupEpoch() == null;
         boolean viewOnce = entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE;
         boolean textual = !entry.image() && !viewOnce;
@@ -2984,10 +3181,10 @@ public final class MainActivity extends AppCompatActivity {
         // The copy is the whole message, an album as the album; what is offered is for the photo that was pressed.
         Bubble copy = messageBubble(peer, item, text, senderName, reference, false);
         for (PhotoTile tile : copy.tiles) if (tile.entry() != null) bindThumbnail(tile.entry(), tile);
-        updateReceipt(new MessageRow(null, copy.holder, copy.body, copy.sender, copy.receipt, copy.groupReceipt), item.summary());
+        updateReceipt(new MessageRow(item, copy.holder, copy), item.summary());
         MessageActions overlay = new MessageActions(this, design, copy.holder, bounds, entry.outgoing(),
                 oneToOne ? ChatEnvelope.REACTION_CHOICES : null, entry.reactionMine(),
-                emoji -> submit(() -> engine.react(entry, emoji), () -> refreshMessages(peer)), items);
+                emoji -> reactToMessage(peer, entry, emoji), items);
         original.setAlpha(0f);
         overlay.setOnDismissListener(dialog -> { original.setAlpha(1f); if (messageOverlay == overlay) messageOverlay = null; });
         messageOverlay = overlay;
@@ -3521,29 +3718,42 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void importProfilePhoto() {
-        if (!resumed || engine == null || busy || selectedProfilePhoto == null) return;
+        if (!resumed || engine == null || selectedProfilePhoto == null) return;
         Uri uri = selectedProfilePhoto; selectedProfilePhoto = null;
         UUID owner = profilePhotoOwner; profilePhotoOwner = null;
         ChatEngine current = engine;
         if (!current.authenticated() || !current.account().userId().equals(owner)) return;
         int generation = screenGeneration;
-        submit(() -> {
-            byte[] source = SafeImages.importImage(getContentResolver(), uri);
-            byte[] photo;
-            try { photo = SafeImages.profilePhoto(source); } finally { Arrays.fill(source, (byte) 0); }
-            ui.post(() -> {
-                if (!resumed || engine != current || generation != screenGeneration) { Arrays.fill(photo, (byte) 0); return; }
-                try { previewProfilePhoto(photo, owner); }
-                catch (java.io.IOException failure) { Arrays.fill(photo, (byte) 0); problem("Photo unavailable."); }
-            });
-        }, () -> { });
+        imageWork.execute(() -> {
+            if (!resumed || engine != current || generation != screenGeneration) return;
+            byte[] photo = null;
+            try {
+                byte[] source = SafeImages.importImage(getContentResolver(), uri);
+                try { photo = SafeImages.profilePhoto(source); } finally { Arrays.fill(source, (byte) 0); }
+                Bitmap preview = SafeImages.displayProfilePhoto(photo);
+                byte[] prepared = photo;
+                imagesReady.post(() -> {
+                    if (!resumed || engine != current || generation != screenGeneration) {
+                        Arrays.fill(prepared, (byte) 0); preview.recycle(); return;
+                    }
+                    try { previewProfilePhoto(prepared, preview, owner); }
+                    catch (RuntimeException failure) {
+                        Arrays.fill(prepared, (byte) 0); preview.recycle(); problem("Photo unavailable.");
+                    }
+                });
+                photo = null;
+            } catch (Exception failure) {
+                ui.post(() -> { if (resumed && engine == current && generation == screenGeneration) problem("Photo unavailable."); });
+            } finally { if (photo != null) Arrays.fill(photo, (byte) 0); }
+        });
     }
 
-    private void previewProfilePhoto(byte[] photo, UUID owner) throws java.io.IOException {
-        if (engine == null || !engine.authenticated() || !engine.account().userId().equals(owner)) { Arrays.fill(photo, (byte) 0); return; }
+    private void previewProfilePhoto(byte[] photo, Bitmap previewBitmap, UUID owner) {
+        if (engine == null || !engine.authenticated() || !engine.account().userId().equals(owner)) {
+            Arrays.fill(photo, (byte) 0); previewBitmap.recycle(); return;
+        }
         ChatEngine current = engine;
         dismissContent();
-        Bitmap previewBitmap = SafeImages.displayProfilePhoto(photo);
         displayedBitmap = previewBitmap;
         ImageView preview = new ImageView(this); preview.setImageBitmap(previewBitmap); preview.setAdjustViewBounds(true);
         preview.setMaxHeight(dp(256)); preview.setContentDescription("Profile photo preview");
@@ -4042,10 +4252,10 @@ public final class MainActivity extends AppCompatActivity {
                     GoogleSignIn.clear(this, cleared -> {
                         if (cleared) getSharedPreferences("preferences", MODE_PRIVATE).edit().putBoolean("google-reset-pending", false).apply();
                     });
-                    selectedPeer = null; signingUp = false; deviceReplacementRequired = false; shownPeers = java.util.List.of();
+                    selectedPeer = null; signingUp = false; deviceReplacementRequired = false;
                     loginPolicyApproved = false;
                     selectedImages = new ArrayList<>();
-                    if (cameraImage != null) Arrays.fill(cameraImage, (byte) 0);
+                    if (cameraImage != null) cameraImage.recycle();
                     cameraImage = null;
                     submit(current::logout, () -> {
                         hideContent();
@@ -4156,8 +4366,8 @@ public final class MainActivity extends AppCompatActivity {
         if (request == CAMERA && data.getExtras() != null) {
             Bitmap bitmap = (Bitmap) data.getExtras().get("data");
             if (bitmap != null) {
-                try { cameraImage = SafeImages.encode(bitmap); } catch (Exception failure) { problem("Photo unavailable."); }
-                finally { bitmap.recycle(); }
+                if (cameraImage != null && cameraImage != bitmap) cameraImage.recycle();
+                cameraImage = bitmap;
             }
         }
         if (engine == null) load(); else importPendingImage();
@@ -4166,63 +4376,88 @@ public final class MainActivity extends AppCompatActivity {
     // The photos that were chosen (or the one that was taken) are made safe to send one at a time. One that cannot be used does not stop
     // the others; one photo alone that cannot is reported as it always was. Several are previewed together, one is previewed whole.
     private void importPendingImage() {
+        ChatEngine current = engine;
+        if (!resumed || current == null) return;
         java.util.List<Uri> uris = selectedImages; selectedImages = new ArrayList<>();
         int leftOut = imagesLeftOut; imagesLeftOut = 0;
-        byte[] captured = cameraImage; cameraImage = null;
-        submit(() -> {
+        Bitmap captured = cameraImage; cameraImage = null;
+        ChatEngine.Peer peer = shownConversationPeer;
+        if (peer == null) { if (captured != null) captured.recycle(); return; }
+        if (captured == null && uris.isEmpty()) return;
+        int generation = conversationGeneration;
+        imageWork.execute(() -> {
             java.util.List<byte[]> images = new ArrayList<>();
             java.util.List<Bitmap> strip = new ArrayList<>();
             int unusable = 0;
-            if (captured != null) images.add(captured);
-            else for (Uri uri : uris) {
-                try { images.add(SafeImages.importImage(getContentResolver(), uri)); }
-                catch (Exception failure) { if (uris.size() == 1) throw failure; unusable++; }
-            }
-            try { if (images.size() > 1) for (byte[] image : images) strip.add(SafeImages.thumbnail(image, 320)); }
-            catch (Exception failure) {
-                for (Bitmap shown : strip) shown.recycle();
-                for (byte[] image : images) Arrays.fill(image, (byte) 0);
-                throw failure;
-            }
-            int skipped = unusable;
-            ui.post(() -> {
-                if (!resumed || engine == null || selectedPeer == null || images.isEmpty()) {
-                    for (byte[] image : images) Arrays.fill(image, (byte) 0);
-                    for (Bitmap shown : strip) shown.recycle();
-                    if (resumed && images.isEmpty() && skipped > 0) problem("Image unavailable.");
-                    return;
+            boolean posted = false;
+            try {
+                if (!conversationCurrent(current, generation)) return;
+                if (captured != null) images.add(SafeImages.encode(captured));
+                else for (Uri uri : uris) {
+                    if (!conversationCurrent(current, generation)) return;
+                    try { images.add(SafeImages.importImage(getContentResolver(), uri)); }
+                    catch (Exception failure) { if (uris.size() == 1) throw failure; unusable++; }
                 }
-                try {
-                    if (images.size() == 1) previewImage(images.get(0)); else previewImages(images, strip);
+                int edge = images.size() == 1 ? PhotoThumbnails.EDGE : 320;
+                for (byte[] image : images) {
+                    if (!conversationCurrent(current, generation)) return;
+                    strip.add(SafeImages.thumbnail(image, edge));
+                }
+                int skipped = unusable;
+                posted = imagesReady.post(() -> {
+                    if (!conversationCurrent(current, generation) || images.isEmpty()) {
+                        discardPreview(images, strip);
+                        if (conversationCurrent(current, generation)) problem("Image unavailable.");
+                        return;
+                    }
+                    try {
+                        if (images.size() == 1) previewImage(peer, images.get(0), strip.get(0));
+                        else previewImages(peer, images, strip);
+                    } catch (RuntimeException failure) {
+                        discardPreview(images, strip); problem("Image unavailable."); return;
+                    }
                     String said = skipped == 0 ? "" : skipped == 1 ? "One photo could not be used." : skipped + " photos could not be used.";
                     if (leftOut > 0) said = (said.isEmpty() ? "" : said + " ") + "Only " + Albums.MAX_SENT + " photos go at once.";
                     if (!said.isEmpty()) notice(said);
-                } catch (Exception failure) {
-                    for (byte[] image : images) Arrays.fill(image, (byte) 0);
-                    for (Bitmap shown : strip) shown.recycle();
-                    problem("Image unavailable.");
-                }
-            });
-        }, () -> { });
+                });
+            } catch (Exception failure) {
+                ui.post(() -> { if (conversationCurrent(current, generation)) problem("Image unavailable."); });
+            } finally {
+                if (captured != null) captured.recycle();
+                if (!posted) discardPreview(images, strip);
+            }
+        });
     }
 
-    private void previewImage(byte[] image) throws Exception {
-        displayedBitmap = SafeImages.display(image);
-        ImageView view = new ImageView(this); view.setImageBitmap(displayedBitmap); view.setAdjustViewBounds(true); view.setMaxHeight(dp(360)); view.setContentDescription("Image preview");
-        ChatEngine.Peer peer = Objects.requireNonNull(conversationPeer(selectedPeer));
+    private static void discardPreview(List<byte[]> images, List<Bitmap> previews) {
+        for (byte[] image : images) Arrays.fill(image, (byte) 0);
+        for (Bitmap preview : previews) preview.recycle();
+    }
+
+    private void previewImage(ChatEngine.Peer peer, byte[] image, Bitmap preview) {
+        ImageView view = new ImageView(this); view.setImageBitmap(preview); view.setAdjustViewBounds(true); view.setMaxHeight(dp(360)); view.setContentDescription("Image preview");
         ChatEnvelope.Expiry selectedExpiry = expiry;
-        openDialog = new SecureSheet.Builder(this).setTitle("Send photo").setView(view).setNegativeButton("Cancel", null)
+        boolean[] transferred = {false};
+        SecureSheet sheet = new SecureSheet.Builder(this).setTitle("Send photo").setView(view).setNegativeButton("Cancel", null)
                 .setPositiveButton("Send", (dialog, which) -> {
+                    if (transferred[0] || !peer.userId().equals(selectedPeer)) return;
+                    boolean keep = selectedExpiry != ChatEnvelope.Expiry.VIEW_ONCE && photosOn();
                     ChatEnvelope.Reference reference = pendingReplyTo == null ? null : new ChatEnvelope.Reference(pendingReplyTo.id(), pendingReplySnippet, pendingReplyTo.outgoing());
-                    if (enqueueSend(peer, null, image, selectedExpiry, reference)) { pendingReplyTo = null; pendingReplySnippet = null; updateReplyStrip(); }
+                    if (enqueueSend(peer, null, image, selectedExpiry, reference, keep ? preview : null)) {
+                        transferred[0] = keep;
+                        if (keep) view.setImageDrawable(null);
+                        pendingReplyTo = null; pendingReplySnippet = null; updateReplyStrip();
+                    }
                 }).create();
-        openDialog.setOnDismissListener(dialog -> { view.setImageDrawable(null); Arrays.fill(image, (byte) 0); clearBitmap(); });
-        showDialog(openDialog);
+        sheet.setOnDismissListener(dialog -> {
+            view.setImageDrawable(null); Arrays.fill(image, (byte) 0);
+            if (!transferred[0]) preview.recycle();
+        });
+        showDialog(sheet);
     }
 
     // Several photos at once: what is going to be sent, in a row that can be scrolled, and what the lifetime chosen means for them.
-    private void previewImages(java.util.List<byte[]> images, java.util.List<Bitmap> strip) throws Exception {
-        ChatEngine.Peer peer = Objects.requireNonNull(conversationPeer(selectedPeer));
+    private void previewImages(ChatEngine.Peer peer, java.util.List<byte[]> images, java.util.List<Bitmap> strip) {
         ChatEnvelope.Expiry selectedExpiry = expiry;
         LinearLayout panel = vertical();
         HorizontalScrollView scroll = new HorizontalScrollView(this);
@@ -4245,17 +4480,23 @@ public final class MainActivity extends AppCompatActivity {
         panel.addView(design.spacer(12));
         panel.addView(design.text(selectedExpiry == ChatEnvelope.Expiry.VIEW_ONCE ? "Each photo is sent on its own and can be opened once."
                 : "They arrive together, as one album.", 13, 500, MUTED));
-        openDialog = new SecureSheet.Builder(this).setTitle("Send " + images.size() + " photos").setView(panel).setNegativeButton("Cancel", null)
+        boolean[] transferred = {false};
+        SecureSheet sheet = new SecureSheet.Builder(this).setTitle("Send " + images.size() + " photos").setView(panel).setNegativeButton("Cancel", null)
                 .setPositiveButton("Send", (dialog, which) -> {
+                    if (transferred[0] || !peer.userId().equals(selectedPeer)) return;
+                    boolean keep = selectedExpiry != ChatEnvelope.Expiry.VIEW_ONCE && photosOn();
                     ChatEnvelope.Reference reference = pendingReplyTo == null ? null : new ChatEnvelope.Reference(pendingReplyTo.id(), pendingReplySnippet, pendingReplyTo.outgoing());
-                    if (enqueueAlbum(peer, images, selectedExpiry, reference)) { pendingReplyTo = null; pendingReplySnippet = null; updateReplyStrip(); }
+                    if (enqueueAlbum(peer, images, selectedExpiry, reference, keep ? strip : List.of())) {
+                        transferred[0] = keep;
+                        if (keep) for (ImageView picture : shown) picture.setImageDrawable(null);
+                        pendingReplyTo = null; pendingReplySnippet = null; updateReplyStrip();
+                    }
                 }).create();
-        openDialog.setOnDismissListener(dialog -> {
+        sheet.setOnDismissListener(dialog -> {
             for (ImageView picture : shown) picture.setImageDrawable(null);
-            for (Bitmap each : strip) each.recycle();
-            for (byte[] image : images) Arrays.fill(image, (byte) 0);
+            discardPreview(images, transferred[0] ? List.of() : strip);
         });
-        showDialog(openDialog);
+        showDialog(sheet);
     }
 
     private void viewContent(ChatEngine.Entry entry) {
@@ -4291,20 +4532,37 @@ public final class MainActivity extends AppCompatActivity {
     private void openContent(ChatEngine.Entry entry, java.util.List<ChatEngine.Entry> album, int index) {
         // At the point of action, before a view-once message is consumed: the confirmation may have been up while the settings changed.
         if (entry.image() && !allowed(RemoteSettings.Flag.PHOTOS)) return;
-        // Once a view-once message has been opened it is gone, so the screen is drawn again; anything else stays where it is, pictures and all.
-        int generation = screenGeneration;
+        ChatEngine loaded = engine;
+        if (!resumed || loaded == null || !entry.peerId().equals(selectedPeer)) return;
+        int generation = conversationGeneration;
         submit(() -> {
-            ChatEngine loaded = engine;
+            if (!conversationCurrent(loaded, generation) || (entry.image() && !photosOn())) return;
             // Decided before the message is consumed, and off the main thread because it reads the identity key from the vault.
             boolean admin = entry.image() && loaded.onboarding().verifiedAdmin();
             ChatEngine.Content content = loaded.content(entry, true);
-            ui.post(() -> {
-                if (!resumed || engine == null || generation != screenGeneration || System.currentTimeMillis() >= entry.expiresAt()) {
-                    if (content.image() != null) Arrays.fill(content.image(), (byte) 0);
+            byte[] image = content.image();
+            if (image != null) {
+                Bitmap bitmap = null;
+                try { bitmap = SafeImages.display(image); }
+                catch (java.io.IOException | RuntimeException failure) {
+                    ui.post(() -> { if (conversationCurrent(loaded, generation)) problem("Content unavailable."); });
                     return;
                 }
+                finally { if (!admin || bitmap == null) Arrays.fill(image, (byte) 0); }
+                Bitmap ready = bitmap;
+                byte[] savable = admin ? image : null;
+                imagesReady.post(() -> {
+                    if (!conversationCurrent(loaded, generation) || !photosOn() || System.currentTimeMillis() >= entry.expiresAt()) {
+                        ready.recycle(); if (savable != null) Arrays.fill(savable, (byte) 0); return;
+                    }
+                    try { showPhoto(entry, ready, savable, album, index); queueSync(); }
+                    catch (RuntimeException failure) { problem("Content unavailable."); }
+                });
+                return;
+            }
+            ui.post(() -> {
+                if (!conversationCurrent(loaded, generation) || System.currentTimeMillis() >= entry.expiresAt()) return;
                 try {
-                    if (content.image() != null) { showPhoto(entry, content.image(), admin, album, index); queueSync(); return; }
                     LinearLayout panel = vertical();
                     panel.setPadding(dp(24), dp(12), dp(24), dp(20));
                     if (entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE) {
@@ -4328,24 +4586,15 @@ public final class MainActivity extends AppCompatActivity {
                     queueSync();
                 } catch (Exception failure) { problem("Content unavailable."); }
             });
-        }, entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE ? this::render : () -> { });
+        }, () -> { if (entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE && conversationCurrent(loaded, generation)) refreshMessages(shownConversationPeer); });
     }
 
-    // A photo fills the screen with one close button. Only the verified official admin account keeps the bytes so that a long press
-    // can save them; everyone else's copy is wiped as soon as it is decoded, exactly as before.
-    private void showPhoto(ChatEngine.Entry entry, byte[] bytes, boolean admin) throws Exception { showPhoto(entry, bytes, admin, null, 0); }
-
-    // {@code album} (with the place of this photo in it) makes the viewer page through the album's other photos, and close when the
-    // first of them expires.
-    private void showPhoto(ChatEngine.Entry entry, byte[] bytes, boolean admin, java.util.List<ChatEngine.Entry> album, int index) throws Exception {
-        Bitmap bitmap;
-        try { bitmap = SafeImages.display(bytes); }
-        catch (Exception failure) { Arrays.fill(bytes, (byte) 0); throw failure; }
-        if (!admin) Arrays.fill(bytes, (byte) 0);
+    // The full-size picture is prepared off the UI thread; only the verified admin retains the JPEG for explicit save.
+    private void showPhoto(ChatEngine.Entry entry, Bitmap bitmap, byte[] savable, java.util.List<ChatEngine.Entry> album, int index) {
         closePhoto();
         PhotoViewer viewer = null;
         try {
-            viewer = new PhotoViewer(this, bitmap, admin ? bytes : null, this::confirmPhotoSave);
+            viewer = new PhotoViewer(this, bitmap, savable, this::confirmPhotoSave);
             PhotoViewer shown = viewer;
             photoViewer = shown;
             shown.setOnDismissListener(dialog -> { if (photoViewer == shown) photoViewer = null; });
@@ -4361,7 +4610,7 @@ public final class MainActivity extends AppCompatActivity {
             photoViewer = null;
             if (viewer != null) viewer.release();
             else bitmap.recycle();
-            Arrays.fill(bytes, (byte) 0);
+            if (savable != null) Arrays.fill(savable, (byte) 0);
             throw failure;
         }
     }
@@ -4371,12 +4620,13 @@ public final class MainActivity extends AppCompatActivity {
     // never shown.
     private void albumPhoto(PhotoViewer viewer, java.util.List<ChatEngine.Entry> album, int page) {
         ChatEngine current = engine;
-        int generation = screenGeneration;
+        int generation = conversationGeneration;
         ChatEngine.Entry entry = album.get(page);
         if (current == null) { viewer.failed(); return; }
         // Paging is a person's action, so a switch that came while the album was open is said, and no further photo is decoded.
         if (!allowed(RemoteSettings.Flag.PHOTOS)) { viewer.failed(); return; }
         act(() -> {
+            if (!conversationCurrent(current, generation)) return;
             Bitmap bitmap = null; byte[] bytes = null; boolean admin = false;
             try {
                 admin = current.onboarding().verifiedAdmin();
@@ -4386,9 +4636,11 @@ public final class MainActivity extends AppCompatActivity {
                 if (bitmap != null) bitmap.recycle();
                 bitmap = null;
             }
-            Bitmap decoded = bitmap; byte[] kept = bytes; boolean saveable = admin;
-            ui.post(() -> {
-                boolean usable = decoded != null && resumed && engine == current && generation == screenGeneration && photoViewer == viewer
+            byte[] kept = admin && bitmap != null ? bytes : null;
+            if (kept == null && bytes != null) Arrays.fill(bytes, (byte) 0);
+            Bitmap decoded = bitmap;
+            imagesReady.post(() -> {
+                boolean usable = decoded != null && conversationCurrent(current, generation) && photosOn() && photoViewer == viewer
                         && viewer.isShowing() && System.currentTimeMillis() < entry.expiresAt();
                 if (!usable) {
                     if (decoded != null) decoded.recycle();
@@ -4396,8 +4648,7 @@ public final class MainActivity extends AppCompatActivity {
                     if (photoViewer == viewer) { viewer.failed(); if (decoded == null) problem("Photo unavailable."); }
                     return;
                 }
-                if (!saveable && kept != null) Arrays.fill(kept, (byte) 0);
-                viewer.show(page, decoded, saveable ? kept : null);
+                viewer.show(page, decoded, kept);
             });
         });
     }
@@ -4503,11 +4754,13 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     // A message that has just been stored is shown in the open chat at once; the rest of the sync pass carries on behind it.
-    private void showReceived(ChatEngine current, int generation) {
+    private void showReceived(ChatEngine current, int generation, UUID peer) {
+        if (peer == null || !peer.equals(selectedPeer) || !receivedRefreshPosted.compareAndSet(false, true)) return;
         ui.post(() -> {
-            if (!resumed || engine != current || generation != screenGeneration || busy || selectedPeer == null) return;
-            ChatEngine.Peer open = conversationPeer(selectedPeer);
-            if (open != null) refreshMessages(open);
+            receivedRefreshPosted.set(false);
+            ChatEngine.Peer open = shownConversationPeer;
+            if (resumed && engine == current && generation == screenGeneration && !busy && open != null && peer.equals(open.userId()))
+                refreshMessages(open);
         });
     }
 
@@ -4516,7 +4769,7 @@ public final class MainActivity extends AppCompatActivity {
         ChatEngine current = engine;
         if (!resumed || current == null || !current.safety().termsAccepted(PlayPolicy.VERSION)) return;
         boolean completed = true;
-        try { completed = current.sync(() -> waitingActions.get() > 0, () -> showReceived(current, generation)); }
+        try { completed = current.sync(() -> waitingActions.get() > 0, peer -> showReceived(current, generation, peer)); }
         catch (GeneralSecurityException | AndroidVault.PhoneLockedException failure) {
             ui.post(() -> { if (engine == current && generation == screenGeneration && !busy) { hideContent(); storageFailure(failure); } }); return;
         }
@@ -4527,21 +4780,20 @@ public final class MainActivity extends AppCompatActivity {
         catch (Exception failure) { current.online = false; }
         // A user action is waiting: it runs first and the sync resumes right behind it from the stored state.
         if (!completed) { syncRequested.set(true); return; }
+        int conversation = conversationGeneration;
         UUID selected = selectedPeer;
-        java.util.List<ChatEngine.Peer> peers;
-        java.util.List<GroupChat.Conversation> groups;
+        ChatListContents contents;
         Map<UUID, Long> unreadCounts = new HashMap<>();
         GroupChat.Conversation selectedGroup;
         ChatEngine.Peer selectedContact;
         String groupStatus;
         boolean groupCanSend;
-        long directoryGeneration = current.onboarding().generation();
         try {
-            peers = current.authenticated() ? current.peers() : java.util.List.of();
-            groups = current.authenticated() ? current.groups().conversations() : java.util.List.of();
+            contents = current.authenticated() ? ChatListContents.read(current)
+                    : new ChatListContents(java.util.List.of(), java.util.List.of(), Set.of(), 0);
             if (current.authenticated()) unreadCounts.putAll(current.unreadCounts());
-            selectedGroup = groups.stream().filter(group -> group.id().equals(selected) && !current.groups().invited(group)).findFirst().orElse(null);
-            selectedContact = selectedGroup == null ? peers.stream().filter(peer -> peer.userId().equals(selected)).findFirst().orElse(null)
+            selectedGroup = contents.groups().stream().filter(group -> group.id().equals(selected) && !current.groups().invited(group)).findFirst().orElse(null);
+            selectedContact = selectedGroup == null ? contents.peers().stream().filter(peer -> peer.userId().equals(selected)).findFirst().orElse(null)
                     : new ChatEngine.Peer(selectedGroup.id(), selectedGroup.snapshot().epoch(), "", selectedGroup.name());
             groupStatus = selectedGroup == null ? "" : current.groups().status(selectedGroup);
             groupCanSend = selectedGroup != null && current.groups().ready(selectedGroup) && selectedGroup.snapshot().active().size() > 1;
@@ -4554,19 +4806,10 @@ public final class MainActivity extends AppCompatActivity {
             if (notificationOpen != null) { render(); return; }
             homeStatus();
             if (!current.authenticated()) { if (chatScreen || contactRows != null) { dismissContent(); render(); } }
+            else if (conversation != conversationGeneration) return;
             else if (selectedPeer == null) {
                 if (connection != null) connection.setText(statusText());
-                // A row that has a finger on it is not drawn again under it; the next pass draws the list.
-                boolean touching = rowSwipes.active();
-                if (!touching && (!peers.equals(shownPeers) || !groups.equals(shownGroups) || shownAdminDirectory != directoryGeneration)) {
-                    shownPeers = peers; shownGroups=groups; shownAdminDirectory = directoryGeneration; renderContacts();
-                }
-                for (var unread : unreadLabels.entrySet()) {
-                    TextView badge = unread.getValue();
-                    long count = unreadCounts.getOrDefault(unread.getKey(), 0L);
-                    badge.setText(Long.toString(count)); badge.setVisibility(count == 0 ? View.GONE : View.VISIBLE);
-                }
-                if (unreadOnly && !touching) renderContacts();
+                updateContacts(contents, unreadCounts);
             }
             else {
                 if (!Objects.equals(selected, selectedPeer)) return;
@@ -4607,6 +4850,13 @@ public final class MainActivity extends AppCompatActivity {
     private void onReader(Runnable task) {
         try { reader.execute(task); }
         catch (RejectedExecutionException closed) { if (!reader.isShutdown()) throw closed; }
+    }
+
+    private static ExecutorService backgroundLane(String name) {
+        return Executors.newSingleThreadExecutor(task -> new Thread(() -> {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
+            task.run();
+        }, name));
     }
 
     private void submit(Work action, Runnable completed) {
@@ -4693,6 +4943,8 @@ public final class MainActivity extends AppCompatActivity {
         pushRegistrationRunning = false; pushRegistrationFailed = false; pushRegisteredAccount = null; notificationStatus = null;
         completingGoogle = false;
         busy = false;
+        reactionChoices.clear();
+        clearHome();
         clearProfileAvatars();
         dismissContent();
         for (PendingSend pending : pendingSends) pending.clear();
@@ -4702,11 +4954,11 @@ public final class MainActivity extends AppCompatActivity {
         emojiPanel = null; emojiControl = null; emojiShown = false; emojiPending = false; emojiTab = -1; recentEmoji.clear();
         quoteJump = null; stopQuoteFlash();
         composerPeer=null;
-        sendControl=null; attachmentControl=null; shownGroups=java.util.List.of();
-        homeConnection=null; unreadFilter=null; homeQuery=""; unreadOnly=false; noticeHost=null; noticeArea=null;
+        sendControl=null; attachmentControl=null;
+        homeQuery=""; unreadOnly=false;
         conversationName = null; conversationUsername = null;
         contactStatus = null;
-        messageScroll = null; shownEntries = java.util.List.of(); contactRows = null; contactSearch = null; actionError = null; unreadLabels.clear();
+        messageScroll = null; shownEntries = java.util.List.of(); actionError = null;
         connection = null;
         ChatEngine closing = engine; engine = null;
         if (closing != null) { closing.cancelPendingRequests(); work.execute(closing::close); }
@@ -4733,5 +4985,5 @@ public final class MainActivity extends AppCompatActivity {
         if (hasFocus) resumeAfterPhoneUnlock();
     }
     @Override protected void onSaveInstanceState(Bundle state) { super.onSaveInstanceState(new Bundle()); }
-    @Override protected void onDestroy() { clearProfileAvatars(); selectedProfilePhoto = null; profilePhotoOwner = null; dismissContent(); if (googleCancellation != null) googleCancellation.cancel(); if (googleAttempt != null) googleAttempt.idToken = null; googleAttempt = null; ui.removeCallbacksAndMessages(null); unregisterReceiver(pushRefresh); unregisterReceiver(phoneUnlocked); if (cameraImage != null) Arrays.fill(cameraImage, (byte) 0); work.shutdown(); reader.shutdownNow(); saveWork.shutdown(); photoWork.shutdownNow(); updateWork.shutdownNow(); super.onDestroy(); }
+    @Override protected void onDestroy() { clearProfileAvatars(); selectedProfilePhoto = null; profilePhotoOwner = null; dismissContent(); if (googleCancellation != null) googleCancellation.cancel(); if (googleAttempt != null) googleAttempt.idToken = null; googleAttempt = null; ui.removeCallbacksAndMessages(null); unregisterReceiver(pushRefresh); unregisterReceiver(phoneUnlocked); if (cameraImage != null) cameraImage.recycle(); work.shutdown(); reader.shutdownNow(); previewReader.shutdownNow(); imageWork.shutdown(); saveWork.shutdown(); photoWork.shutdownNow(); updateWork.shutdownNow(); super.onDestroy(); }
 }

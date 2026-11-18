@@ -1103,18 +1103,143 @@ public class ScreenFlowTest {
         }
     }
 
-    @Test public void startupMessagesAreHorizontallyCentered() throws Exception {
+    @Test public void startupShowsCenteredBrandAndProgressUntilTheNextScreen() throws Exception {
         signedInFixture();
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
-            scenario.onActivity(this::inject);
-            for (String message : List.of("Opening your chats...", "Secure storage is unavailable. Your encrypted data has not been cleared.")) {
-                scenario.onActivity(activity -> {
-                    setField(activity, "storageError", message.startsWith("Opening") ? null : message);
-                    invoke(activity, "storageState");
-                });
-                snapshot(scenario, message.startsWith("Opening") ? "56-centered-opening" : "56-centered-storage-error");
-                scenario.onActivity(activity -> assertHorizontallyCentered((TextView) text(root(activity), message), root(activity)));
+            scenario.onActivity(activity -> { inject(activity); invoke(activity, "storageState"); });
+            snapshot(scenario, "56-centered-opening");
+            scenario.onActivity(activity -> {
+                View screen = root(activity), logo = screen.findViewById(R.id.brand_logo);
+                ProgressBar progress = screen.findViewById(R.id.startup_progress);
+                assertNotNull(logo); assertNotNull(progress);
+                Rect area = screenRect(screen), brand = screenRect(logo), bar = screenRect(progress);
+                assertEquals(area.centerX(), brand.centerX(), dpPx(2));
+                assertEquals(area.centerX(), bar.centerX(), dpPx(2));
+                assertEquals(area.centerY(), brand.centerY(), dpPx(24));
+                assertTrue("The horizontal progress indicator belongs below the logo", bar.top > brand.bottom && bar.width() > 10 * bar.height());
+                assertTrue(progress.isIndeterminate());
+                assertEquals(activity.getString(R.string.opening_vanishr), progress.getContentDescription());
+                assertTrue(descendants(screen).stream().noneMatch(TextView.class::isInstance));
+                invoke(activity, "storageState");
+                assertSame("Starting the vault open must not recreate the indicator", progress, screen.findViewById(R.id.startup_progress));
+                invoke(activity, "render");
+                assertNull("The chat list replaces startup in the same render", screen.findViewById(R.id.startup_progress));
+                assertNotNull(readField(activity, "contactRows"));
+                setField(activity, "storageError", "Secure storage is unavailable. Your encrypted data has not been cleared.");
+                invoke(activity, "storageState");
+            });
+            snapshot(scenario, "56-centered-storage-error");
+            scenario.onActivity(activity -> assertHorizontallyCentered((TextView) text(root(activity),
+                    "Secure storage is unavailable. Your encrypted data has not been cleared."), root(activity)));
+        }
+    }
+
+    @Test public void backReusesTheScrolledChatListAndRefreshesUnreadWithoutWaitingForWork() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        vault.transaction(() -> {
+            for (int index = 0; index < 60; index++) {
+                UUID id = UUID.randomUUID();
+                write("contact/" + id, new ChatEngine.Peer(id, peerDevice, peer.identityKey(), "Aarav Contact " + index));
             }
+            return null;
+        });
+        var release = new java.util.concurrent.CountDownLatch(1);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            try {
+                ScrollView[] list = new ScrollView[1];
+                View[] name = new View[1];
+                TextView[] badge = new TextView[1];
+                int[] position = new int[1];
+                scenario.onActivity(activity -> {
+                    inject(activity);
+                    ((EditText) readField(activity, "contactSearch")).setText("Aarav");
+                    ((java.util.concurrent.Executor) readField(activity, "work")).execute(() -> {
+                        try { release.await(20, java.util.concurrent.TimeUnit.SECONDS); }
+                        catch (InterruptedException stopped) { Thread.currentThread().interrupt(); }
+                    });
+                    list[0] = (ScrollView) ((View) readField(activity, "contactRows")).getParent();
+                    name[0] = text(list[0], peer.name());
+                    badge[0] = (TextView) ((Map<?, ?>) readField(activity, "unreadLabels")).get(peerId);
+                });
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+                scenario.onActivity(activity -> {
+                    list[0].scrollTo(0, list[0].getChildAt(0).getHeight());
+                    position[0] = list[0].getScrollY();
+                    assertTrue(position[0] > 0);
+                    assertEquals("2", badge[0].getText().toString());
+                    assertTrue(((View) name[0].getParent().getParent()).performClick());
+                    assertFalse("The cached list must not be in the chat's view tree", list[0].isAttachedToWindow());
+                });
+                awaitMessages(scenario);
+                scenario.onActivity(activity -> {
+                    View back = descendants(root(activity)).stream().filter(view -> "Back".contentEquals(Objects.toString(view.getContentDescription(), "")))
+                            .findFirst().orElseThrow();
+                    long started = android.os.SystemClock.elapsedRealtime();
+                    assertTrue(back.performClick());
+                    assertTrue("Returning to the list must finish on the tap, without the work lane",
+                            android.os.SystemClock.elapsedRealtime() - started < 250);
+                    assertSame(list[0], ((View) readField(activity, "contactRows")).getParent());
+                    assertSame(name[0], text(root(activity), peer.name()));
+                    assertEquals("1", badge[0].getText().toString()); // The view-once message is still unread.
+                });
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+                scenario.onActivity(activity -> {
+                    assertEquals(position[0], list[0].getScrollY());
+                    assertEquals("Aarav", ((EditText) readField(activity, "contactSearch")).getText().toString());
+                    ((View) name[0].getParent().getParent()).performClick();
+                    assertNotNull(readField(activity, "messageScroll"));
+                    invoke(activity, "hideContent");
+                    assertNull("Backgrounding must discard the detached list", readField(activity, "homeLayout"));
+                    assertTrue(((List<?>) readField(activity, "photoAvatars")).isEmpty());
+                });
+            } finally { release.countDown(); }
+        }
+    }
+
+    @Test public void chatWallpaperIsASubtleRepeatingTileSharedAcrossChats() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                inject(activity);
+                setField(activity, "selectedPeer", peerId);
+                invoke(activity, "render");
+                var scroll = (ScrollView) readField(activity, "messageScroll");
+                var wallpaper = (android.graphics.drawable.BitmapDrawable) scroll.getBackground();
+                Bitmap tile = wallpaper.getBitmap();
+                assertEquals(Shader.TileMode.REPEAT, wallpaper.getTileModeX());
+                assertEquals(Shader.TileMode.REPEAT, wallpaper.getTileModeY());
+                assertTrue(tile.getByteCount() < 100 * 1024);
+                int marks = 0;
+                for (int y = 0; y < tile.getHeight(); y++) for (int x = 0; x < tile.getWidth(); x++)
+                    if (tile.getPixel(x, y) != Ui.CANVAS) marks++;
+                assertTrue("The wallpaper must actually contain the design without covering most of the canvas",
+                        marks > 0 && marks < tile.getWidth() * tile.getHeight() / 8);
+                activity.getOnBackPressedDispatcher().onBackPressed();
+                assertNull(((View) readField(activity, "contactRows")).getBackground());
+                setField(activity, "selectedPeer", peerId);
+                invoke(activity, "render");
+                assertSame(tile, ((android.graphics.drawable.BitmapDrawable) ((ScrollView) readField(activity, "messageScroll")).getBackground()).getBitmap());
+            });
+            awaitMessages(scenario);
+        }
+    }
+
+    @Test public void chatTextLoadsWhilePhotoPreviewsAreQueued() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        var release = new java.util.concurrent.CountDownLatch(1);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            try {
+                scenario.onActivity(activity -> {
+                    ((java.util.concurrent.Executor) readField(activity, "previewReader")).execute(() -> {
+                        try { release.await(20, java.util.concurrent.TimeUnit.SECONDS); }
+                        catch (InterruptedException stopped) { Thread.currentThread().interrupt(); }
+                    });
+                    setField(activity, "selectedPeer", peerId); inject(activity);
+                });
+                awaitMainCondition(scenario, activity -> hasText(activity, "Coffee at 4?") && !tilesOf(activity).isEmpty());
+                scenario.onActivity(activity -> assertFalse("The photo is still waiting for its decoder", tilesOf(activity).get(0).drawn()));
+            } finally { release.countDown(); }
+            awaitMainCondition(scenario, activity -> tilesOf(activity).stream().anyMatch(PhotoTile::drawn));
         }
     }
 
@@ -1368,7 +1493,7 @@ public class ScreenFlowTest {
                     .anyMatch(avatar -> readField(avatar, "bitmap") != null));
             scenario.onActivity(activity -> {
                 avatars.addAll((List<?>) readField(activity, "photoAvatars"));
-                worker[0] = (java.util.concurrent.ExecutorService) readField(activity, "reader");
+                worker[0] = (java.util.concurrent.ExecutorService) readField(activity, "previewReader");
                 worker[0].execute(() -> {
                     started.countDown();
                     try { release.await(10, java.util.concurrent.TimeUnit.SECONDS); }
@@ -2595,17 +2720,18 @@ public class ScreenFlowTest {
     @Test public void profilePhotoControlsSaveRemoveAndClearBitmapsOnBackground() throws Exception {
         signedInFixture();
         byte[] image = SafeImages.profilePhoto(photo);
+        Bitmap cancelled = SafeImages.displayProfilePhoto(image), accepted = SafeImages.displayProfilePhoto(image);
         var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             scenario.onActivity(activity -> {
                 inject(activity); invoke(activity, "accountDialog");
                 text(dialog(activity).getWindow().getDecorView(), "Profile photo").performClick();
                 assertNotNull(text(dialog(activity).getWindow().getDecorView(), "Choose photo"));
-                invoke(activity, "previewProfilePhoto", new Class<?>[]{byte[].class, UUID.class}, image.clone(), userId);
+                invoke(activity, "previewProfilePhoto", new Class<?>[]{byte[].class, Bitmap.class, UUID.class}, image.clone(), cancelled, userId);
                 assertTrue((dialog(activity).getWindow().getAttributes().flags & WindowManager.LayoutParams.FLAG_SECURE) != 0);
                 dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
                 assertNull(engine.photos().own());
-                invoke(activity, "previewProfilePhoto", new Class<?>[]{byte[].class, UUID.class}, image.clone(), userId);
+                invoke(activity, "previewProfilePhoto", new Class<?>[]{byte[].class, Bitmap.class, UUID.class}, image.clone(), accepted, userId);
             });
             snapshot(scenario, "60-profile-photo-preview");
             scenario.onActivity(activity -> dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick());
@@ -4821,7 +4947,11 @@ public class ScreenFlowTest {
                 invoke(activity, "attachmentDialog");
             });
             snapshot(scenario, "12-attachments");
-            scenario.onActivity(activity -> { dialog(activity).dismiss(); invoke(activity, "previewImage", new Class<?>[]{byte[].class}, photo.clone()); });
+            Bitmap sendPreview = SafeImages.thumbnail(photo, PhotoThumbnails.EDGE);
+            scenario.onActivity(activity -> {
+                dialog(activity).dismiss();
+                invoke(activity, "previewImage", new Class<?>[]{ChatEngine.Peer.class, byte[].class, Bitmap.class}, peer, photo.clone(), sendPreview);
+            });
             snapshot(scenario, "13-photo-preview");
             scenario.onActivity(activity -> dialog(activity).dismiss());
             InstrumentationRegistry.getInstrumentation().waitForIdleSync();
@@ -5053,6 +5183,34 @@ public class ScreenFlowTest {
         assertNull("A receipt that was sent is removed", vault.get("ack/" + unread.id()));
         assertTrue(engine.hasEntry(unread.id()));
         assertFalse("A message that is gone must be recognised as gone", engine.hasEntry(UUID.randomUUID()));
+    }
+
+    @Test public void aWaitingActionStopsAReceiptBacklogAfterTheCurrentRequestAndKeepsTheRest() throws Exception {
+        signedInFixture(); establishedConversation(new SignalClient(peerId, new DeviceSecurityTest.MemoryVault()));
+        plainTransport(new ArrayList<>(), new ArrayList<>());
+        long deadline = System.currentTimeMillis() + 60_000;
+        List<UUID> ids = List.of(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID());
+        vault.transaction(() -> {
+            for (UUID id : ids) write("ack/" + id, new ChatEngine.Ack(id, deadline, "delivered"));
+            return null;
+        });
+        List<String> sent = new ArrayList<>();
+        var client = ((okhttp3.OkHttpClient) readField(engine.groupApi(), "client")).newBuilder();
+        client.interceptors().add(0, chain -> {
+            String path = chain.request().url().encodedPath();
+            if (path.endsWith("/delivered")) sent.add(path.split("/")[2]);
+            return chain.proceed(chain.request());
+        });
+        setField(engine.groupApi(), "client", client.build());
+        assertFalse("The pass must hand the work lane back to the waiting action", engine.sync(() -> !sent.isEmpty()));
+        assertEquals("Only the request already in flight finished", 1, sent.size());
+        assertNull("Persist progress made before yielding", vault.get("ack/" + sent.get(0)));
+        assertEquals(3, vault.names("ack/").size());
+        assertTrue(engine.sync(() -> false));
+        assertEquals("The next pass must send everything that was left without repeating the committed receipt",
+                new HashSet<>(ids.stream().map(UUID::toString).toList()), new HashSet<>(sent));
+        assertEquals(4, sent.size());
+        assertTrue(vault.names("ack/").isEmpty());
     }
 
     @Test public void aGroupReadReceiptStoredWhileDeliveredIsBeingSentIsNotLost() throws Exception {
@@ -10003,13 +10161,25 @@ public class ScreenFlowTest {
             });
             // Pick a reaction on a received message.
             openActions(scenario, "Coffee at 4?");
-            scenario.onActivity(activity -> {
-                assertTrue("Nothing is picked yet", descendants(overlay(activity).getWindow().getDecorView()).stream()
-                    .noneMatch(view -> view.getContentDescription() != null && view.getContentDescription().toString().startsWith("Remove reaction ")));
-                descendants(overlay(activity).getWindow().getDecorView()).stream().filter(view -> thumbs.equals(text(view))).findFirst().orElseThrow().performClick();
-            });
+            var release = new java.util.concurrent.CountDownLatch(1);
+            try {
+                scenario.onActivity(activity -> {
+                    ((java.util.concurrent.Executor) readField(activity, "work")).execute(() -> {
+                        try { release.await(20, java.util.concurrent.TimeUnit.SECONDS); }
+                        catch (InterruptedException stopped) { Thread.currentThread().interrupt(); }
+                    });
+                    View original = holderOf(activity, "Coffee at 4?");
+                    assertTrue("Nothing is picked yet", descendants(overlay(activity).getWindow().getDecorView()).stream()
+                        .noneMatch(view -> view.getContentDescription() != null && view.getContentDescription().toString().startsWith("Remove reaction ")));
+                    descendants(overlay(activity).getWindow().getDecorView()).stream().filter(view -> thumbs.equals(text(view))).findFirst().orElseThrow().performClick();
+                    assertNull("The worker has not committed the reaction yet", engine.entry(theirs.id()).reactionMine());
+                    assertTrue("The pill appears during the tap", hasText(chip(activity, "Coffee at 4?"), thumbs));
+                    assertSame("Only the pill changes, not the message bubble", original, holderOf(activity, "Coffee at 4?"));
+                });
+            } finally { release.countDown(); }
             awaitNoOverlay(scenario);
-            awaitMainCondition(scenario, activity -> thumbs.equals(engine.entry(theirs.id()).reactionMine()) && chips(activity, "Coffee at 4?") == 1);
+            awaitMainCondition(scenario, activity -> thumbs.equals(engine.entry(theirs.id()).reactionMine()) && chips(activity, "Coffee at 4?") == 1
+                    && outgoing.size() == 1);
             assertEquals("One control message went out", 1, outgoing.size());
             scenario.onActivity(activity -> {
                 Rect bubble = screenRect((View) text(root(activity), "Coffee at 4?").getParent()), pill = screenRect(chip(activity, "Coffee at 4?"));
@@ -10027,7 +10197,8 @@ public class ScreenFlowTest {
                 picked.performClick();
             });
             awaitNoOverlay(scenario);
-            awaitMainCondition(scenario, activity -> engine.entry(theirs.id()).reactionMine() == null && chips(activity, "Coffee at 4?") == 0);
+            awaitMainCondition(scenario, activity -> engine.entry(theirs.id()).reactionMine() == null && chips(activity, "Coffee at 4?") == 0
+                    && outgoing.size() == 2);
             assertEquals("and the removal went out too", 2, outgoing.size());
             // On a message of mine the pill sits on the other side.
             openActions(scenario, "Sounds good. Same place?");
@@ -10044,6 +10215,38 @@ public class ScreenFlowTest {
             scenario.onActivity(activity -> chip(activity, "Sounds good. Same place?").performClick());
             awaitOverlay(scenario);
             closeActions(scenario);
+        }
+    }
+
+    @Test public void aReactionThatCannotBeSavedRestoresThePreviousPillWithoutRecreatingTheMessage() throws Exception {
+        signedInFixture(); establishedConversation(new SignalClient(peerId, new DeviceSecurityTest.MemoryVault()));
+        ChatEngine.Entry original = entry(false, "Coffee at 4?", null, ChatEnvelope.Expiry.HOUR_1, "READ", -240_000);
+        String first = ChatEnvelope.REACTION_CHOICES.get(0), replacement = ChatEnvelope.REACTION_CHOICES.get(1);
+        vault.transaction(() -> { write("entry/" + original.id(), original.withReaction(true, first)); return null; });
+        plainTransport(new ArrayList<>(), new ArrayList<>());
+        var client = ((okhttp3.OkHttpClient) readField(engine.groupApi(), "client")).newBuilder();
+        client.interceptors().add(0, chain -> {
+            if ("/account/blocks".equals(chain.request().url().encodedPath())) throw new IOException("Fixture offline");
+            return chain.proceed(chain.request());
+        });
+        setField(engine.groupApi(), "client", client.build());
+        setField(engine.safety(), "nextRefresh", 0L);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            openActions(scenario, "Coffee at 4?");
+            View[] bubble = new View[1];
+            scenario.onActivity(activity -> {
+                bubble[0] = holderOf(activity, "Coffee at 4?");
+                descendants(overlay(activity).getWindow().getDecorView()).stream().filter(view -> replacement.equals(text(view)))
+                        .findFirst().orElseThrow().performClick();
+                assertTrue(hasText(chip(activity, "Coffee at 4?"), replacement));
+            });
+            awaitMainCondition(scenario, activity -> hasText(chip(activity, "Coffee at 4?"), first)
+                    && "Cannot connect right now. Check your connection and try again.".equals(readField(activity, "lastProblem")));
+            scenario.onActivity(activity -> assertSame(bubble[0], holderOf(activity, "Coffee at 4?")));
+            assertEquals(first, engine.entry(original.id()).reactionMine());
+            assertTrue(vault.names("outbox/").isEmpty());
         }
     }
 
@@ -10735,23 +10938,25 @@ public class ScreenFlowTest {
         signedInFixture(); establishedConversation(remote);
         List<ChatEngine.Send> outgoing = new ArrayList<>();
         plainTransport(new ArrayList<>(), outgoing);
+        Bitmap preview = SafeImages.thumbnail(photo, PhotoThumbnails.EDGE);
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
             awaitMessages(scenario);
             scenario.onActivity(activity -> {
-                assertTrue((boolean) invoke(activity, "enqueueSend", new Class<?>[]{ChatEngine.Peer.class, String.class, byte[].class, ChatEnvelope.Expiry.class},
-                    peer, null, photo, ChatEnvelope.Expiry.HOURS_12));
+                assertTrue((boolean) invoke(activity, "enqueueSend", new Class<?>[]{ChatEngine.Peer.class, String.class, byte[].class,
+                        ChatEnvelope.Expiry.class, ChatEnvelope.Reference.class, Bitmap.class},
+                    peer, null, photo, ChatEnvelope.Expiry.HOURS_12, null, preview));
                 List<PhotoTile> tiles = tilesOf(activity);
                 assertEquals("The photo is on the screen as soon as it is sent", 1, tiles.size());
                 assertNull("while it is still being sent", tiles.get(0).entry());
-                assertTrue(tiles.get(0).drawn());
+                assertSame("Sending reuses the already decoded preview", preview, tiles.get(0).bitmap());
             });
             awaitMainCondition(scenario, activity -> outgoing.size() == 1);
             awaitMainCondition(scenario, activity -> { PhotoTile stored = tilesOf(activity).stream().filter(tile -> tile.entry() != null).findFirst().orElse(null); return stored != null && stored.drawn(); });
             scenario.onActivity(activity -> {
                 assertEquals(1, tilesOf(activity).size());
                 ChatEngine.Entry stored = tilesOf(activity).get(0).entry();
-                assertTrue("The stored message is drawn with the picture the sender saw", thumbnailsOf(activity).get(stored.id()) != null);
+                assertSame("The stored message is drawn with the picture the sender saw", preview, thumbnailsOf(activity).get(stored.id()));
                 ChatEngine.PhotoInfo info = stored.photo();
                 assertEquals("The size of the photo is on its record", 720, info.width());
                 assertEquals(480, info.height());
@@ -11273,16 +11478,20 @@ public class ScreenFlowTest {
         plainTransport(incoming, outgoing);
         List<byte[]> pictures = new ArrayList<>();
         for (int index = 0; index < 6; index++) pictures.add(jpeg(800, 600, ALBUM_COLORS[index]));
+        List<Bitmap> previews = new ArrayList<>();
+        for (byte[] picture : pictures) previews.add(SafeImages.thumbnail(picture, 320));
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
             awaitMessages(scenario);
             scenario.onActivity(activity -> {
-                assertTrue((boolean) invoke(activity, "enqueueAlbum", ALBUM_SEND, peer, pictures, ChatEnvelope.Expiry.HOURS_24, reference));
+                assertTrue((boolean) invoke(activity, "enqueueAlbum", new Class<?>[]{ChatEngine.Peer.class, List.class,
+                        ChatEnvelope.Expiry.class, ChatEnvelope.Reference.class, List.class}, peer, pictures, ChatEnvelope.Expiry.HOURS_24, reference, previews));
                 List<AlbumView> albums = albumsOf(activity);
                 assertEquals("As soon as it is sent, the album is on the screen as the collage it will be", 1, albums.size());
                 assertEquals(4, albums.get(0).tiles().size());
                 assertEquals("+3", albums.get(0).tiles().get(3).moreText().toString());
                 assertTrue("with the pictures that were chosen", albums.get(0).tiles().stream().allMatch(PhotoTile::drawn));
+                assertSame("The first preview is reused", previews.get(0), albums.get(0).tiles().get(0).bitmap());
                 assertNotNull(text(root(activity), "Sending 0/6"));
                 assertEquals("and the reply it answers", 1, descendants((View) readField(activity, "messages")).stream().filter(QuoteBlock.class::isInstance).count());
             });
@@ -11400,16 +11609,32 @@ public class ScreenFlowTest {
             try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
                 scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
                 awaitMessages(scenario);
-                scenario.onActivity(activity -> { setField(activity, "selectedImages", new ArrayList<>(chosen)); invoke(activity, "importPendingImage"); });
-                awaitMainCondition(scenario, activity -> dialog(activity) != null && dialog(activity).isShowing() && hasText(dialog(activity).getWindow().getDecorView(), "Send 3 photos"));
-                scenario.onActivity(activity -> {
-                    View sheet = dialog(activity).getWindow().getDecorView();
-                    for (int index = 1; index <= 3; index++) assertNotNull("Every photo is shown before it is sent", byDescription(sheet, "Photo " + index + " of 3"));
-                    assertTrue(hasText(sheet, "They arrive together, as one album."));
-                    assertEquals("The one that could not be used is said to have been left out", "One photo could not be used.", readField(activity, "lastNotice"));
-                });
-                snapshot(scenario, "136-album-preview");
-                scenario.onActivity(activity -> dialog(activity).getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).performClick());
+                var release = new java.util.concurrent.CountDownLatch(1);
+                try {
+                    scenario.onActivity(activity -> {
+                        ((java.util.concurrent.Executor) readField(activity, "work")).execute(() -> {
+                            try { release.await(20, java.util.concurrent.TimeUnit.SECONDS); }
+                            catch (InterruptedException stopped) { Thread.currentThread().interrupt(); }
+                        });
+                        setField(activity, "selectedImages", new ArrayList<>(chosen)); invoke(activity, "importPendingImage");
+                    });
+                    awaitMainCondition(scenario, activity -> dialog(activity) != null && dialog(activity).isShowing()
+                            && hasText(dialog(activity).getWindow().getDecorView(), "Send 3 photos"));
+                    scenario.onActivity(activity -> {
+                        View sheet = dialog(activity).getWindow().getDecorView();
+                        for (int index = 1; index <= 3; index++) assertNotNull("Every photo is shown before it is sent", byDescription(sheet, "Photo " + index + " of 3"));
+                        assertTrue(hasText(sheet, "They arrive together, as one album."));
+                        assertEquals("One photo could not be used.", readField(activity, "lastNotice"));
+                    });
+                    snapshot(scenario, "136-album-preview");
+                    scenario.onActivity(activity -> {
+                        View sheet = dialog(activity).getWindow().getDecorView();
+                        Bitmap saved = ((android.graphics.drawable.BitmapDrawable) ((ImageView) byDescription(sheet, "Photo 1 of 3")).getDrawable()).getBitmap();
+                        dialog(activity).getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).performClick();
+                        assertSame("The send tap reuses the already prepared preview before encryption or upload starts",
+                                saved, albumsOf(activity).get(0).tiles().get(0).bitmap());
+                    });
+                } finally { release.countDown(); }
                 awaitMainCondition(scenario, activity -> outgoing.size() == 3);
                 List<ChatEnvelope> wire = new ArrayList<>();
                 for (ChatEngine.Send sent : outgoing) wire.add(decryptControl(remote, sent));

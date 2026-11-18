@@ -249,7 +249,8 @@ lanes with one job each, so a slow network call can no longer sit in front of a 
 | Lane | Does | Does not |
 |---|---|---|
 | `work` | sync, sending, sign-in/out, opening the vault, introductions for contacts not yet saved, other user actions | prepare what a screen shows |
-| `reader` | decrypts the open chat's text, commits that screen's read receipts as one write, loads avatars, checks the presence header; runs at background priority so it cannot compete with touch handling | use the network or Signal sessions |
+| `reader` | decrypts the open chat's text, commits that screen's read receipts as one write, checks the presence header | use the network or Signal sessions |
+| `previewReader`, `imageWork` | load avatars and photo tiles separately from text; import and prepare picker previews independently of sync | use the network or Signal sessions |
 | `photoWork`, `updateWork` | owner photo requests; the update feed check | anything else |
 
 Signal sessions and ratchet state stay on the `work` lane because libsignal state is
@@ -259,8 +260,9 @@ Tapping a chat opens it from local state: a saved contact, verified or the autom
 admin chat, is re-checked on the main thread against the saved identity, the admin pin
 and the block list only. A contact this phone has never saved still needs its
 introduction over the network on the `work` lane. User actions are counted while they
-wait, and a running sync stops at its next step boundary (between relay calls, which is
-equivalent to a dropped connection at that point) and resumes right behind them.
+wait. A running sync yields between durable steps, including within receipt, outbox,
+status and group batches. It retains progress and resumes behind the queued actions;
+it does not cancel the request already in flight.
 
 A conversation is loaded newest first, a few messages at a time (0.6.1). The reader lane
 lists the chat once, then decrypts 16 messages, records their read receipts as one write
@@ -268,13 +270,34 @@ and shows them; each next batch of 16 is queued behind whatever else the lane ha
 so presence and avatar reads are never held up by a long history. Only the newest 100
 messages are prepared when a chat opens; older ones load when the user scrolls up to
 them, and the message the user was looking at stays where it is while they are added
-above it. A message received during a sync is shown as soon as it is stored, not after
-the rest of the pass (acknowledgements, receipts, groups, profiles) has finished. The
+above it. A message received during a sync can be shown as soon as it is stored, not after
+the rest of the pass has finished. Incoming bursts coalesce refreshes for the open
+conversation instead of redrawing it for events in other chats. The
 message list is a `ChatScroll` that keeps the bottom of its content where it was when its
 own height changes, so the keyboard pushes the newest messages up with the composer. The
 chat's expiry tick only walks the rows when one is due, and parsed message records are
 kept while their stored bytes are unchanged (ids, deadlines and states only, never content),
 so listing, purging and syncing a chat of hundreds of messages does not parse them again.
+
+On opening the app, the logo and a horizontal indeterminate bar take the place of
+the loading copy. The app replaces that screen as soon as the protected local
+state is ready; there is no minimum display time and ordinary startup does not
+wait for relay sync. Storage and sign-in errors still have their own screens.
+Back from a conversation reattaches the existing conversation list with its
+search and scroll position intact. Changed contacts, groups and unread counts
+are reconciled from local state. The detached list is foreground-only and is
+dropped when the vault closes, just like the open conversation.
+
+A reaction changes that message's pill on tap, not its text, photos or the rest
+of the chat. The work lane still verifies and commits the reaction and encrypted
+outbox before upload. A choice that cannot be committed is rolled back; a saved
+choice is not a delivery confirmation. The chat wallpaper is one original
+vector rendered once into a shared 144 × 144 px tile (81 KiB of pixel memory);
+Android repeats it behind the viewport without decoding a full-screen image.
+Photo confirmation and the sending tile reuse one prepared bitmap; pressing Send
+does not decode the selection again. Both the first photo and later album pages
+are decoded off the UI thread after the same expiry and access checks. Navigation
+and backgrounding discard results for a screen that is no longer current.
 
 The open vault serves reads from an immutable snapshot of the last committed state,
 so a read never waits for an encrypted commit on another thread. A transaction still

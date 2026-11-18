@@ -397,33 +397,46 @@ final class GroupChat {
         vault.transaction(() -> { vault.remove("group-control-ack/"+packet.id()); return null; });
     }
 
-    void sync() throws Exception {
+    void sync() throws Exception { sync(() -> false, id -> { }); }
+
+    boolean sync(java.util.function.BooleanSupplier yield, java.util.function.Consumer<UUID> received) throws Exception {
         engine.safety().requireNotDeleting();
-        if (!supported) return;
+        if (!supported) return true;
         Snapshot[] snapshots;
         try { snapshots=api().call("GET","/groups",null,Snapshot[].class); }
-        catch (RelayApi.ApiFailure failure) { if (failure.status==404) { supported=false; return; } throw failure; }
+        catch (RelayApi.ApiFailure failure) { if (failure.status==404) { supported=false; return true; } throw failure; }
         if (snapshots==null || snapshots.length>40) throw new SecurityException("Invalid group inventory");
         Set<UUID> present=new HashSet<>();
         for (Snapshot snapshot : snapshots) {
+            if (yield.getAsBoolean()) return false;
             present.add(snapshot.id());
             try {
                 if (snapshot.closed()) { if (get(snapshot.id())!=null) forget(snapshot.id()); continue; }
                 snapshot(snapshot);
                 if (snapshot.ownerId().equals(user())) approveOwner(snapshot);
                 else verifiedOwner(snapshot);
+                if (yield.getAsBoolean()) return false;
                 Control[] controls=api().call("GET",path(snapshot.id())+"/controls",null,Control[].class);
                 if (controls==null || controls.length>64) throw new SecurityException("Invalid group controls");
                 Arrays.sort(controls,Comparator.comparing(packet -> !packet.senderId().equals(snapshot.ownerId())));
-                for (Control packet : controls) receiveControl(snapshot,packet);
+                for (Control packet : controls) {
+                    if (yield.getAsBoolean()) return false;
+                    receiveControl(snapshot,packet);
+                }
                 if (snapshot.member(user()).state().equals("INVITED")) continue;
+                if (yield.getAsBoolean()) return false;
                 publish(snapshot,32);
-                flushOutgoing(snapshot);
-                flushAcks(snapshot.id());
+                if (yield.getAsBoolean() || !flushOutgoing(snapshot,yield)) return false;
+                if (yield.getAsBoolean() || !flushAcks(snapshot.id(),yield)) return false;
+                if (yield.getAsBoolean()) return false;
                 Message[] incoming=api().call("GET",path(snapshot.id())+"/messages",null,Message[].class);
                 if (incoming==null || incoming.length>32) throw new SecurityException("Invalid group inbox");
-                for (Message message : incoming) receive(snapshot,message);
-                flushAcks(snapshot.id());
+                for (Message message : incoming) {
+                    if (yield.getAsBoolean()) return false;
+                    receive(snapshot,message);
+                    received.accept(snapshot.id());
+                }
+                if (!flushAcks(snapshot.id(),yield) || yield.getAsBoolean()) return false;
                 Status[] statuses=api().call("GET",path(snapshot.id())+"/status",null,Status[].class);
                 if (statuses!=null && statuses.length>256) throw new SecurityException("Invalid group status list");
                 if (statuses!=null) vault.transaction(() -> {
@@ -443,7 +456,9 @@ final class GroupChat {
                 issue(snapshot.id(),failure.status==409 ? "Membership changed; refreshing" : "Connection pending");
             }
         }
+        if (yield.getAsBoolean()) return false;
         for (Conversation group : conversations()) if (!present.contains(group.id())) forget(group.id());
+        return true;
     }
 
     void send(UUID groupId,String text,byte[] image,ChatEnvelope.Expiry expiry,UUID id,long createdAt,Runnable stored) throws Exception {
@@ -486,15 +501,16 @@ final class GroupChat {
         } catch (Exception failure) { AndroidVault.deleteContentKey(deadline,id,user()); throw failure; }
         finally { if (encrypted!=null) Arrays.fill(encrypted.key(),(byte)0); }
         stored.run();
-        try { publish(current,32); flushOutgoing(current); }
+        try { publish(current,32); flushOutgoing(current,() -> false); }
         catch (IOException failure) { engine.online=false; if (failure instanceof RelayApi.ApiFailure apiFailure && apiFailure.status==401) engine.invalidateToken(); }
     }
 
-    private void flushOutgoing(Snapshot snapshot) throws Exception {
+    private boolean flushOutgoing(Snapshot snapshot, java.util.function.BooleanSupplier yield) throws Exception {
         List<Outbox> pending=vault.names("group-out/").stream().map(name -> read(name,Outbox.class)).filter(item -> item.groupId().equals(snapshot.id())).toList();
-        if (pending.isEmpty()) return;
-        if (!publish(snapshot,32)) return;
+        if (pending.isEmpty()) return true;
+        if (!publish(snapshot,32)) return true;
         for (Outbox outbox : pending) {
+            if (yield.getAsBoolean()) return false;
             Send message=outbox.message(); ChatEngine.Entry entry=read("entry/"+message.id(),ChatEngine.Entry.class);
             if (entry==null) { vault.transaction(() -> { vault.remove("group-out/"+message.id()); return null; }); continue; }
             if (message.revision()!=snapshot.revision() || !message.epoch().equals(snapshot.epoch())) {
@@ -507,6 +523,7 @@ final class GroupChat {
                 vault.transaction(() -> { vault.remove("body/"+entry.id()); return null; });
             }
         }
+        return true;
     }
 
     private void receive(Snapshot current,Message message) throws Exception {
@@ -566,8 +583,9 @@ final class GroupChat {
         write("group-ack/"+message.id(),new Ack(message.groupId(),message.id(),message.expiresAt(),"delete"));
     }
     void acknowledge(ChatEngine.Entry entry,String action) { write("group-ack/"+entry.id(),new Ack(entry.peerId(),entry.id(),entry.expiresAt(),action)); }
-    private void flushAcks(UUID group) throws Exception {
+    private boolean flushAcks(UUID group, java.util.function.BooleanSupplier yield) throws Exception {
         for (String name : vault.names("group-ack/")) {
+            if (yield.getAsBoolean()) return false;
             Ack ack=read(name,Ack.class); if (ack==null || !ack.groupId().equals(group) || ack.action().equals(ChatEngine.HELD)) continue;
             boolean refused=false;
             try { api().call("POST",path(group)+"/messages/"+ack.id()+"/"+ack.action(),null,Void.class); }
@@ -586,11 +604,13 @@ final class GroupChat {
             });
         }
         for (String name : vault.names("group-control-ack/")) {
+            if (yield.getAsBoolean()) return false;
             Ack ack=read(name,Ack.class); if (!ack.groupId().equals(group)) continue;
             try { api().call("DELETE",path(group)+"/controls/"+ack.id(),null,Void.class); }
             catch (RelayApi.ApiFailure failure) { if (failure.status!=404 && failure.status!=410) throw failure; }
             vault.transaction(() -> { vault.remove(name); return null; });
         }
+        return true;
     }
 
     void purge(String prefix,long now) {

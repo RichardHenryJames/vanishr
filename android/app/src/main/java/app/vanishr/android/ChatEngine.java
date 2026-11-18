@@ -8,6 +8,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 import static app.vanishr.android.RelayApi.JSON;
 
@@ -720,19 +722,33 @@ final class ChatEngine implements AutoCloseable {
     /** {@code emoji} null removes this phone's own reaction; otherwise it must be one of {@link ChatEnvelope#REACTIONS}. Either party's
      * message, in a 1:1 conversation only (a group reaction is not part of this). */
     void react(Entry entry, String emoji) throws Exception {
+        react(entry, emoji, stored -> { });
+    }
+
+    void react(Entry entry, String emoji, java.util.function.Consumer<Entry> stored) throws Exception {
         if (entry.groupEpoch() != null) throw new IllegalArgumentException("React to a group message through the group, not this method");
         if (emoji != null && !ChatEnvelope.REACTIONS.contains(emoji)) throw new IllegalArgumentException("Not an offered reaction");
+        reactionTarget(entry);
         safety.refresh();
         Instant now = Instant.now();
         Send control = buildControl(entry.peerId(), ChatEnvelope.REACTION, new ChatEnvelope.Action(entry.id(), emoji, null), now);
-        vault.transaction(() -> {
-            Entry current = read("entry/" + entry.id(), Entry.class);
-            if (current != null) write("entry/" + entry.id(), current.withReaction(true, emoji));
+        Entry updated = vault.transaction(() -> {
+            Entry current = reactionTarget(entry).withReaction(true, emoji);
+            write("entry/" + entry.id(), current);
             write("outbox/" + control.id(), new Outbox(control, null));
-            return null;
+            return current;
         });
+        stored.accept(updated);
         try { flushOutgoing(); }
         catch (IOException failure) { online = false; if (failure instanceof RelayApi.ApiFailure apiFailure && apiFailure.status == 401) invalidateToken(); }
+    }
+
+    private Entry reactionTarget(Entry target) throws Exception {
+        safety.requireAllowed(target.peerId());
+        Entry current = read("entry/" + target.id(), Entry.class);
+        if (current == null || !current.peerId().equals(target.peerId()) || current.groupEpoch() != null
+                || current.expiresAt() <= System.currentTimeMillis()) throw new IllegalArgumentException("Message is no longer available");
+        return current;
     }
 
     /** Only a text message this phone sent, still alive, can be edited; the lifetime does not reset. 1:1 only. */
@@ -800,17 +816,21 @@ final class ChatEngine implements AutoCloseable {
 
     List<Entry> entries(UUID peerId) {
         List<Entry> result = new ArrayList<>();
+        visitLiveEntries(peerId, result::add);
+        result.sort(Comparator.comparingLong(entry -> entry.expiresAt() - entry.expiry().milliseconds));
+        return result;
+    }
+
+    private void visitLiveEntries(UUID peerId, Consumer<Entry> visit) {
         Map<UUID, Boolean> blocked = new HashMap<>();
         long now = System.currentTimeMillis();
         List<String> names = vault.names("entry/");
         for (String name : names) {
             Entry entry = readEntry(name);
             if (entry == null || entry.expiresAt() <= now || (peerId != null && !peerId.equals(entry.peerId()))) continue;
-            if (!blocked.computeIfAbsent(entry.groupEpoch() == null ? entry.peerId() : entry.senderId(), safety::isBlocked)) result.add(entry);
+            if (!blocked.computeIfAbsent(entry.groupEpoch() == null ? entry.peerId() : entry.senderId(), safety::isBlocked)) visit.accept(entry);
         }
         forgetParsedEntries(names);
-        result.sort(Comparator.comparingLong(entry -> entry.expiresAt() - entry.expiry().milliseconds));
-        return result;
     }
 
     /** One stored message record, or null; far cheaper than listing a whole conversation to find a single message. */
@@ -822,7 +842,9 @@ final class ChatEngine implements AutoCloseable {
     /** Unread incoming messages per conversation, counted in one pass instead of one scan per row. */
     Map<UUID, Long> unreadCounts() {
         Map<UUID, Long> counts = new HashMap<>();
-        for (Entry entry : entries(null)) if (!entry.outgoing() && !entry.state().equals("READ")) counts.merge(entry.peerId(), 1L, Long::sum);
+        visitLiveEntries(null, entry -> {
+            if (!entry.outgoing() && !entry.state().equals("READ")) counts.merge(entry.peerId(), 1L, Long::sum);
+        });
         return counts;
     }
 
@@ -1001,10 +1023,14 @@ final class ChatEngine implements AutoCloseable {
         return prefixes;
     }
 
-    private void flushOutgoing() throws Exception {
+    private void flushOutgoing() throws Exception { flushOutgoing(() -> false); }
+
+    private boolean flushOutgoing(BooleanSupplier yield) throws Exception {
         safety.requireNotDeleting();
-        if (!vault.names("outbox/").isEmpty()) safety.refresh();
-        for (String name : vault.names("outbox/")) {
+        List<String> pending = vault.names("outbox/");
+        if (!pending.isEmpty()) safety.refresh();
+        for (String name : pending) {
+            if (yield.getAsBoolean()) return false;
             Outbox outbox = read(name, Outbox.class);
             if (outbox == null) continue;
             Send message = outbox.message();
@@ -1047,15 +1073,20 @@ final class ChatEngine implements AutoCloseable {
                 vault.transaction(() -> { vault.remove("body/" + message.id()); return null; });
             }
         }
+        return true;
     }
 
-    private void flushAcks() throws Exception {
+    private void flushAcks() throws Exception { flushAcks(() -> false); }
+
+    private boolean flushAcks(BooleanSupplier yield) throws Exception {
         // Everything the relay accepted is removed in one encrypted commit at the end, not one commit per receipt; an acknowledgement
         // whose removal is lost to a crash is simply sent again, and the relay already treats a repeat as done.
         Map<String, Ack> sent = new LinkedHashMap<>(), refused = new LinkedHashMap<>();
         Exception failure = null;
+        boolean finished = true;
         try {
             for (String name : vault.names("ack/")) {
+                if (yield.getAsBoolean()) { finished = false; break; }
                 Ack acknowledgement = read(name, Ack.class);
                 if (acknowledgement == null || acknowledgement.action().equals(HELD)) continue;
                 boolean delete = acknowledgement.action().equals("delete");
@@ -1086,6 +1117,7 @@ final class ChatEngine implements AutoCloseable {
             }
         }
         if (failure != null) throw failure;
+        return finished;
     }
 
     /** A message that is not read (from a blocked sender, or from a retired device): its routing is checked, the relay is asked to delete it, and it is marked seen. */
@@ -1182,16 +1214,16 @@ final class ChatEngine implements AutoCloseable {
 
     void sync() throws Exception { sync(() -> false); }
 
-    boolean sync(java.util.function.BooleanSupplier yield) throws Exception { return sync(yield, () -> { }); }
+    boolean sync(BooleanSupplier yield) throws Exception { return sync(yield, peer -> { }); }
 
     /**
      * One sync pass. The caller can ask it to yield: it then stops between steps and returns false, which is
      * equivalent to a dropped connection at that point, and the next pass resumes from the stored state.
-     * {@code received} runs after each incoming message has been handled, so a screen can show it straight away instead
-     * of after the rest of the pass (acknowledgements, receipts, groups, profiles) has finished.
+     * {@code received} names the conversation of an incoming message after it has been handled.
      */
-    boolean sync(java.util.function.BooleanSupplier yield, Runnable received) throws Exception {
+    boolean sync(BooleanSupplier yield, Consumer<UUID> received) throws Exception {
         safety.requireNotDeleting();
+        if (yield.getAsBoolean()) return false;
         purge();
         if (!authenticated()) {
             if (account != null && account.accessToken() != null && !account.accessToken().isEmpty()) invalidateToken();
@@ -1201,43 +1233,26 @@ final class ChatEngine implements AutoCloseable {
             safety.refresh();
             if (yield.getAsBoolean()) return false;
             if (System.currentTimeMillis() >= nextKeyCheck) { replenishKeys(); nextKeyCheck = System.currentTimeMillis() + 30_000; }
-            flushAcks();
-            if (yield.getAsBoolean()) return false;
-            flushOutgoing();
+            if (yield.getAsBoolean() || !flushAcks(yield)) return false;
+            if (yield.getAsBoolean() || !flushOutgoing(yield)) return false;
             if (yield.getAsBoolean()) return false;
             unverifiedIncoming = false;
             Incoming[] pending = api.call("GET", "/messages/pending", null, Incoming[].class);
             for (Incoming message : pending) {
                 receive(message);
-                received.run();
+                received.accept(message.senderId());
                 if (yield.getAsBoolean()) return false;
             }
-            flushAcks();
-            if (yield.getAsBoolean()) return false;
-            List<Status> statuses = new ArrayList<>();
-            List<Entry> outgoing = new ArrayList<>();
-            for (Entry entry : entries(null)) if (entry.outgoing() && entry.groupEpoch()==null) outgoing.add(entry);
-            for (int offset = 0; offset < outgoing.size(); offset += 50) {
-                List<String> ids = new ArrayList<>();
-                for (Entry entry : outgoing.subList(offset, Math.min(outgoing.size(), offset + 50))) ids.add(entry.id().toString());
-                Collections.addAll(statuses, api.call("GET", "/messages/status?ids=" + String.join(",", ids), null, Status[].class));
-            }
-            vault.transaction(() -> {
-                for (Status status : statuses) {
-                    Entry entry = read("entry/" + status.id(), Entry.class);
-                    if (entry != null && entry.outgoing() && Arrays.asList("QUEUED", "DELIVERED", "READ", "DELETED").contains(status.state()))
-                        write("entry/" + entry.id(), entry.withState(status.state()));
-                }
-                return null;
-            });
-            if (yield.getAsBoolean()) return false;
+            if (!flushAcks(yield) || yield.getAsBoolean()) return false;
+            if (!syncStatuses(yield) || yield.getAsBoolean()) return false;
             boolean hadGroups=!groups.conversations().isEmpty();
-            groups.sync();
+            boolean groupsFinished = groups.sync(yield, received);
             if (!hadGroups && !groups.conversations().isEmpty()) nextKeyCheck=0;
-            if (yield.getAsBoolean()) return false;
+            if (!groupsFinished || yield.getAsBoolean()) return false;
             refreshProfiles();
             if (yield.getAsBoolean()) return false;
             photos.sync();
+            if (yield.getAsBoolean()) return false;
             online = true;
             onboarding.refresh();
             return true;
@@ -1247,6 +1262,34 @@ final class ChatEngine implements AutoCloseable {
             throw failure;
         } catch (IOException failure) { online = false; throw failure; }
     }
+
+    private boolean syncStatuses(BooleanSupplier yield) throws Exception {
+        Map<UUID, String> known = new LinkedHashMap<>();
+        visitLiveEntries(null, entry -> { if (entry.outgoing() && entry.groupEpoch() == null) known.put(entry.id(), entry.state()); });
+        List<String> ids = known.keySet().stream().map(UUID::toString).toList();
+        List<Status> changed = new ArrayList<>();
+        boolean finished = true;
+        for (int offset = 0; offset < ids.size(); offset += 50) {
+            if (yield.getAsBoolean()) { finished = false; break; }
+            String batch = String.join(",", ids.subList(offset, Math.min(ids.size(), offset + 50)));
+            for (Status status : api.call("GET", "/messages/status?ids=" + batch, null, Status[].class)) {
+                if (status.state() == null || !RELAY_STATES.contains(status.state())) continue;
+                String previous = known.replace(status.id(), status.state());
+                if (previous != null && !previous.equals(status.state())) changed.add(status);
+            }
+        }
+        if (!changed.isEmpty()) vault.transaction(() -> {
+            for (Status status : changed) {
+                Entry entry = read("entry/" + status.id(), Entry.class);
+                if (entry != null && entry.outgoing() && !entry.state().equals(status.state()))
+                    write("entry/" + entry.id(), entry.withState(status.state()));
+            }
+            return null;
+        });
+        return finished;
+    }
+
+    private static final Set<String> RELAY_STATES = Set.of("QUEUED", "DELIVERED", "READ", "DELETED");
 
     void connect(Runnable wake) { this.wake = wake; reconnect(); }
     void reconnect() {

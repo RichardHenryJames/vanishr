@@ -6,4 +6,6 @@
     <string name="identity_verified">Identity verified independently</string>
     <string name="notifications">New message notifications</string>
     <string name="working">Working</string>
+    <string name="opening_vanishr">Opening Vanishr</string>
+    <item name="startup_progress" type="id" />
 </resources>

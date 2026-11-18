@@ -3,6 +3,23 @@
 Evidence refreshed on Windows, 2026-11-15 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
+## Unreleased Android responsiveness changes (2026-11-18)
+
+- Gradle passed `:app:testDebugUnitTest` (120 tests), `:crypto:test` (38 tests),
+  `:app:lintDebug`, `:app:assembleQa` and `:app:assembleQaAndroidTest`.
+- The QA APK contains the repeating wallpaper vector at 775 compressed bytes
+  (1,668 bytes unpacked). Its shared decoded tile uses 81 KiB.
+- The QA APK installed and launched on the isolated Android 16 emulator.
+  All 16 focused instrumentation tests passed. They cover the launch layout,
+  Back preserving list scroll and unread counts while the work lane is held,
+  reaction feedback before a commit and rollback when blocked by the network,
+  wallpaper size and reuse, chat text while photo previews are held, reuse of
+  prepared photos, album paging and settings, avatar cleanup, and receipt
+  batching, interruption and preservation in direct and group chats.
+- The tests use synthetic messages and a synthetic relay. They do not measure
+  physical-phone startup or delivery latency on a live network. No Google Play
+  build was published.
+
 ## Website only / New screenshots on the home page and for the store listing (2026-11-15)
 
 The owner asked for the screenshots on the home page to be updated, and for current phone screenshots for the Google Play listing, to be put in a

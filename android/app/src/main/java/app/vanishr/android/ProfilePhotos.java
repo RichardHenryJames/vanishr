@@ -55,9 +55,14 @@ final class ProfilePhotos {
         return value == null ? null : value.photo();
     }
     byte[] contact(UUID userId) {
+        Cached cached = contactAvatar(userId);
+        return cached == null ? null : cached.photo();
+    }
+
+    Cached contactAvatar(UUID userId) {
         Cached cached = read("profile-photo-cache/" + userId, Cached.class);
         if (cached == null) return null;
-        if (cached.expiresAt() > System.currentTimeMillis() && matches(peer(userId), cached.deviceId(), cached.identityKey())) return cached.photo();
+        if (cached.expiresAt() > System.currentTimeMillis() && matches(peer(userId), cached.deviceId(), cached.identityKey())) return cached;
         if (cached.photo() != null) Arrays.fill(cached.photo(), (byte) 0);
         return null;
     }
