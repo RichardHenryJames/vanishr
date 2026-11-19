@@ -12,6 +12,19 @@ license notices at **https://vanishr-download.vercel.app**.
 The public [update feed](https://vanishr-download.vercel.app/updates.json), not
 the latest Git version, determines which release users can download and discover.
 
+Release **0.7.2/code 54** makes a long chat open at once. On the test emulator a chat that had run for two or three pages (157 messages, a window of
+the newest 100) showed its first messages after 0.5 to 1.3 s and its whole window after 2.5 to 4.8 s, and opening it again did the same work again,
+because the text of every message is sealed under its own Keystore key and each one costs a Keystore call (17 to 20 ms there). The app now keeps the
+words of the messages it has drawn in memory (bounded, wiped when the app leaves the screen, never given back for a message that has expired or
+been erased or for a contact who is blocked), reads the newest 14 text messages of the two chats likeliest to be opened next while the chat list is
+on screen (nothing is marked read, nothing goes over the network), and draws a chat newest first in small stages. Measured the same way, the first
+messages of a chat that was read ahead or opened before show after about 120 to 250 ms with no Keystore call for them, and its whole window after
+about 1 s; a chat that is neither still decrypts its first screen (about 0.5 s there). **One security statement changed:** the newest messages of a
+few chats that are not open are now decrypted into memory while the list is shown, in memory only, as described in the threat model. No relay
+change, no new permission, nothing new on the wire. Emulator tests only: no physical phone, no hardware-backed Keystore measured, no Google Play
+install. See the [threat model](docs/THREAT-MODEL.md#the-words-of-messages-kept-in-memory-and-a-chat-that-opens-at-once-072) and the
+[verification](docs/VERIFICATION.md#release-072--a-chat-that-opens-at-once-2026-11-19).
+
 Release **0.7.1/code 53** makes the app feel faster, and what it changes is the protected store rather than the screens. On the test emulator the
 whole store file was encrypted by the Android Keystore, which takes about a quarter of a second for each megabyte, at every save and again when
 the app opened it: with 4 MB of pictures on the phone a reaction took about 3 s to be saved and an album of six photos about 19 s to arrive. The

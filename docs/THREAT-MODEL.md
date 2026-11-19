@@ -808,6 +808,72 @@ file (about 40 ms for 4 MB and 73 ms for 8 MB on the emulator), so a very large 
 incremental is a larger change that was not made. Making a message's own key (about 17 ms on the emulator) and sealing with it are unchanged and
 slower on a StrongBox. No physical phone was used.
 
+## The words of messages kept in memory, and a chat that opens at once (0.7.2)
+
+**No relay change, no new permission and nothing new on the wire.** The owner found that a chat that has run for two or three screens, or for a
+hundred messages, takes a noticeable time to appear and goes on filling in for seconds. Measured on the test emulator, the time was not in drawing.
+Every message has its own Keystore key, so showing the words of a chat meant one call to the Keystore for every message (about 17 to 20 ms each on the
+emulator, more on a phone whose keys are in a separate chip), and a chat that was opened again asked for every one of them again: the first rows of a
+chat of 157 messages were drawn 0.5 to 1.3 s after the tap and the last of its newest 100 two and a half to five seconds after it. Three changes, all
+on the phone:
+
+- **The words of a message are kept in memory** (`MessageWords`, `ChatEngine.words`). When the list of a chat needs the words of a text message, and
+  what it quotes, they come from memory if they were read lately or if this phone has just written or received the message (the `storeContent` that
+  seals them also keeps them); only otherwise are they decrypted with the message's own key, as before, and then kept. The rules:
+  - *Memory only, and only while the app is open.* Nothing is written anywhere. The engine drops all of it when it is closed, which is what happens
+    when the app leaves the screen, on sign-out and when the store is locked.
+  - *Bounded.* At most 320 messages (more than a phone holds live) and 400,000 characters; the one read longest ago goes first.
+  - *Only for the record it was read from.* On every use the stored sealed record is compared with the one the words came from, so a message that was
+    edited, replaced or removed is never shown from memory, whatever else forgot to say so. A message that is erased, evicted to make room or purged
+    leaves memory with it, and every listing drops the words of any message whose record is no longer stored (apart from one put there in the last five
+    seconds, whose record may be in a commit that the listing cannot see yet).
+  - *A read that is under way when its message goes keeps nothing.* A message can be erased on one thread while another is decrypting its words, and
+    that decryption can still finish after the key is deleted. Each removal, and each clearing of memory (which is what closing the engine does), moves
+    a counter; the read takes the counter before it begins and its words are not kept if the counter has moved (`MessageWords.ticket`, shown by tests
+    that erase, evict or close at exactly that moment). The words of an erased or evicted message leave memory once its key has gone, not before.
+  - *Never at or after a deadline.* The words of a message are not given back at or after its deadline, and they leave memory then: at the next tick of
+    the screen (a quarter of a second while it is open), at every listing and at every purge, whether or not the record has been purged yet. And every
+    check that comes before decrypting comes before memory too: a blocked sender, an expired message, a
+    message that belongs to another account, a store that is closed and a phone that is locked (the store's own check, reused for at most 250 ms as for
+    every read of a record in memory) each refuse exactly as they do when the words are decrypted. Tests show each of them with the words in memory.
+  - *Not kept:* a photo (its sealed record holds the picture) and a view-once message.
+  - **What this changes.** The 0.6.1 text below says that words are decrypted only for the open chat and held only in that chat's views. Now the words
+    of the messages read lately are also held, as Java strings that the app cannot overwrite (as the text in the chat's views already was), for as long
+    as the app is on the screen and not only while their chat is. The per-message keys, their deletion at the deadline and the encrypted records are
+    untouched, so expiry still erases a message cryptographically: once its key has gone nothing on the phone can decrypt it. Its words are not shown from
+    memory at or after the deadline and leave memory at the next tick of the screen, listing, purge or erase.
+- **The newest messages of the chats likeliest to be opened next are read ahead.** While the chat list is on the screen (the app in the foreground and
+  the phone unlocked) the app reads the words of the newest 14 text messages of up to two chats into memory, on the reader lane (background priority),
+  so that opening one does not wait for the Keystore. The chats are those with unread messages first, then the most recently active; a muted chat only
+  after all the others, and a contact whose new identity is waiting for review is left out, because nothing from it is read until it has been accepted.
+  **It marks nothing read, sends no receipt, uses no network and draws nothing.** It stops at once when a chat is opened or the app leaves the screen,
+  is not repeated for the same engine within three seconds, and ends without a word at the first message that cannot be read. **This is a change of what
+  the app does, not only of how long it keeps what it has read:** at most 28 messages of chats that nobody has opened are decrypted, and what a person
+  who gets hold of the app's memory could read grows by them. The chat list still shows no message text.
+- **A chat is prepared newest first, and nothing older is drawn before its turn.** The first stage is the newest 14 messages that are not drawn yet
+  (of any kind: text, photo, view-once), the next ones are 12 each, and each is asked for 24 ms after the one before it is on the screen, so that frames
+  are drawn and touches answered in between. Before, the photos and the view-once rows of the whole window of 100 were drawn at the first stage, with
+  gaps where the older text was not read yet, and the Keystore was asked for the pictures of all of those photos at once; now an older photo is drawn,
+  and its picture asked for, with its own stage. An album is drawn whole: when a stage ends inside one, its older pictures come into that stage, and with
+  them whatever lies between them (the pictures of one album are not always next to each other). A
+  refresh that has nothing new to read (a receipt, a reaction) is one stage and not several. **Read receipts** are still recorded in one commit per
+  stage and before the stage is shown, as in 0.6.1; the one difference is that a photo drawn as a picture is marked read with the stage that draws it
+  and no longer, all of the window's at once, when the chat is opened. The first stage runs at the normal thread priority instead of the lane's
+  background priority, because the person is waiting for it; the later stages run at the background priority as before. (That last change was not
+  measured: the emulator's cores are all alike.)
+
+Unchanged: no relay change, no new logging, nothing written to disk for any of this, the per-message keys and every deadline, the window of the
+newest 100 messages and the paging of older ones, and fail-closed behavior for expired content, blocked senders, changed identities, failed
+authentication and unavailable secure storage.
+
+Not claimed: every number in [VERIFICATION.md](VERIFICATION.md#release-072--a-chat-that-opens-at-once-2026-11-19) comes from an emulator with a
+software-backed Keystore and the QA build (debuggable, not minified), with made-up messages. A phone whose Keystore is hardware-backed or StrongBox-backed
+decrypts more slowly, so it should gain more from memory; that was not measured. A chat that was not read ahead and not opened before still has to
+decrypt the words of its first screen, about 14 calls to the Keystore, and the rest of its window of 100 still decrypts in the background after the
+first screen is drawn (two to three seconds on the emulator, invisible unless the person scrolls up at once). The cost of running the code for the first
+time after the app starts (class loading, building the first rows) is not removed: about 100 to 300 ms on the emulator on the first chat opened. Messages
+older than the window are decrypted when the person scrolls to them, as before. No physical phone was used.
+
 ## Account erasure, blocks and safety reports
 
 Account erasure requires a fresh account-only password/Google sign-in, never a
@@ -1030,7 +1096,9 @@ commit, and a message that vanished meanwhile is skipped, never recreated.
 Receipt-only updates reuse the existing message views instead of
 decrypting the history again. Retained views remain bounded by the existing
 message limit; their text is cleared on expiry, conversation changes and
-backgrounding. Asynchronous results are bound to the current engine and screen
+backgrounding. (From 0.7.2 the words of recently read messages are also kept in memory, bounded and
+dropped at the deadline and when the app leaves the screen, but not by a change of conversation; see
+[the words of messages kept in memory](#the-words-of-messages-kept-in-memory-and-a-chat-that-opens-at-once-072).) Asynchronous results are bound to the current engine and screen
 generation and recheck absolute deadlines before display. View-once messages
 still require explicit opening. No additional plaintext disk cache is created.
 
@@ -1311,15 +1379,19 @@ working at 100 live messages, because the limit was 100 across all chats and a t
 reaches that within the hour. These are bounded now without changing what is protected:
 
 - **Per-message keys are unchanged.** Every message still has its own hardware key, deleted
-  at its deadline, so expiry still erases it cryptographically. Text is still decrypted
-  only for the open chat, still held only in that chat's views, and still cleared on
-  expiry, leaving the chat and backgrounding. Decryption happens in batches on the same
+  at its deadline, so expiry still erases it cryptographically. In 0.6.1 text was decrypted
+  only for the open chat, held only in that chat's views, and cleared on expiry, leaving the
+  chat and backgrounding; **from 0.7.2 the words of recently read messages are also kept in
+  memory while the app is on the screen, and a few are read ahead**
+  ([the words of messages kept in memory](#the-words-of-messages-kept-in-memory-and-a-chat-that-opens-at-once-072)),
+  and expiry and backgrounding still clear them. Decryption happens in batches on the same
   background-priority lane, one message at a time (the reader adds no parallel Keystore
   operations of its own, which hardware-backed stores limit), and every message re-checks
   that the chat is still the one on screen, and every Keystore use that the phone is
   unlocked, before anything is decrypted.
 - **Newest first, in batches.** The first 16 messages are shown before the rest are
-  decrypted. Read receipts are recorded per batch before that batch is shown, so a
+  decrypted (0.7.2: the first stage is the newest 14 messages of any kind, the later ones 12,
+  and nothing older is drawn before its turn). Read receipts are recorded per batch before that batch is shown, so a
   message that is on screen has its receipt durable exactly as before.
 - **A window of history.** Only the newest 100 messages are prepared when a chat opens;
   older ones are decrypted when the user scrolls up to them. Messages outside the window
@@ -1327,7 +1399,8 @@ reaches that within the hour. These are bounded now without changing what is pro
 - **Parsed records.** A parsed message record (id, deadline, state, flags) is kept in
   memory while its stored bytes are exactly the same, and dropped when the record is
   removed or the engine closes. It never holds message content, so this is not a message
-  cache.
+  cache. (The words kept since 0.7.2 are a separate memory that does hold content; see
+  above.)
 - **Limit raised to 300, and a full phone makes room.** The limit is per phone, not per
   chat. When a phone holds 300 live messages, or its encrypted store passes 16 MB (photos are
   what make it large), it does not stop: before it stores the next message it removes the ones

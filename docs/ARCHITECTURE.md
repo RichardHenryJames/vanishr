@@ -249,7 +249,7 @@ lanes with one job each, so a slow network call can no longer sit in front of a 
 | Lane | Does | Does not |
 |---|---|---|
 | `work` | sync, sending, sign-in/out, opening the vault, introductions for contacts not yet saved, other user actions | prepare what a screen shows |
-| `reader` | decrypts the open chat's text, commits that screen's read receipts as one write, checks the presence header | use the network or Signal sessions |
+| `reader` | decrypts the open chat's text (and, ahead of time, the newest messages of the chats likeliest to be opened next), commits that screen's read receipts as one write, checks the presence header | use the network or Signal sessions |
 | `previewReader`, `imageWork` | load avatars and photo tiles separately from text; import and prepare picker previews independently of sync | use the network or Signal sessions |
 | `photoWork`, `updateWork` | owner photo requests; the update feed check | anything else |
 
@@ -264,11 +264,14 @@ wait. A running sync yields between durable steps, including within receipt, out
 status and group batches. It retains progress and resumes behind the queued actions;
 it does not cancel the request already in flight.
 
-A conversation is loaded newest first, a few messages at a time (0.6.1). The reader lane
-lists the chat once, then decrypts 16 messages, records their read receipts as one write
-and shows them; each next batch of 16 is queued behind whatever else the lane has to do,
-so presence and avatar reads are never held up by a long history. Only the newest 100
-messages are prepared when a chat opens; older ones load when the user scrolls up to
+A conversation is loaded newest first, a few messages at a time (0.6.1; the stages changed in 0.7.2). The reader lane
+lists the chat once, then prepares it in stages: the first is the newest 14 messages that are not drawn yet (of any kind),
+the next ones 12 each. A stage reads the words of its text messages (from memory when they are there, see below), records
+their read receipts as one write and is shown; the next stage is asked for once that one is on the screen and 24 ms
+later, behind whatever else the lane has to do, so frames are drawn between stages and presence and avatar reads are never
+held up by a long history. Nothing older than what has been prepared is drawn before its turn, except the rows that are
+drawn already, and an album is drawn whole. A refresh with nothing new to read (a receipt, a reaction) is one stage. Only
+the newest 100 messages are prepared when a chat opens; older ones load when the user scrolls up to
 them, and the message the user was looking at stays where it is while they are added
 above it. A message received during a sync can be shown as soon as it is stored, not after
 the rest of the pass has finished. Incoming bursts coalesce refreshes for the open
@@ -329,6 +332,18 @@ early download is only a head start: it starts for a message that has passed the
 checks made before a fetch, never renews the session, and if it fails the
 ordinary download is made as before. A picture that sits above the screen and
 takes its real shape once it is decoded no longer moves the messages being read.
+
+Reading the words of a chat no longer asks the Keystore for every message every time it is opened (0.7.2). Each message
+has its own Keystore key, so the words of a chat of a hundred messages cost a hundred Keystore calls, about 17 ms each on
+the test emulator and more on a phone whose keys are in a separate chip, and again at every opening. The engine now keeps the
+words of the messages it has read lately, and of those it has just stored, in memory (`MessageWords`, used through
+`ChatEngine.words`): bounded, checked against the stored sealed record on every use, never given back at or after a deadline (and dropped at the
+next tick of the screen, listing or purge after it), dropped when the record changes or goes, and when the engine is closed, which is when the app
+leaves the screen. A read that is under way when its message is erased or evicted, or the engine closed, keeps nothing (`MessageWords.ticket`). While the
+chat list is on the screen the reader lane also reads ahead, a chat at a time, the newest 14 text messages of the two chats
+likeliest to be opened next (unread first, then most recent; muted ones last), marking nothing read. The first screen of a chat
+that was read ahead, or opened before, is drawn without a Keystore call. See the
+[threat model](THREAT-MODEL.md#the-words-of-messages-kept-in-memory-and-a-chat-that-opens-at-once-072).
 
 ## Retention semantics
 

@@ -343,7 +343,25 @@ final class ChatEngine implements AutoCloseable {
     private void forgetParsedEntries(Collection<String> present) {
         Set<String> names = new HashSet<>(present);
         parsedEntries.keySet().removeIf(name -> name.startsWith("entry/") && !names.contains(name));
+        // The words of a message whose record has gone are dropped too, whatever removed it, and those of a message whose deadline has come,
+        // whether or not its record has been purged yet.
+        Set<UUID> stored = new HashSet<>();
+        for (String name : names) {
+            try { stored.add(UUID.fromString(name.substring("entry/".length()))); }
+            catch (IllegalArgumentException notAMessage) { /* not a message record, nothing to keep */ }
+        }
+        long now = System.currentTimeMillis();
+        readWords.retainOnly(stored, now);
+        readWords.dropExpired(now);
     }
+
+    // The words of messages read lately, in memory only and checked against the stored record on every use (see MessageWords). Dropped
+    // with the engine, when the record they came from changes or goes, and at the message's deadline.
+    private final MessageWords readWords = new MessageWords();
+
+    /** How many messages have their words in memory, and whether one does; for tests. */
+    int wordsInMemory() { return readWords.size(); }
+    boolean holdsWords(UUID id) { return readWords.holds(id); }
     private void write(String key, Object value) {
         if (safety != null && (safety.deletionPending() || safety.deletionCompleted()))
             throw new SecurityException("Account deletion prevents further writes");
@@ -804,8 +822,19 @@ final class ChatEngine implements AutoCloseable {
     void storeContent(Entry entry, Content content) throws Exception {
         safety.requireNotDeleting();
         byte[] plaintext = bytes(content);
-        try { vault.put("body/" + entry.id(), vault.seal(contentKey(entry), plaintext)); }
-        finally { Arrays.fill(plaintext, (byte) 0); }
+        try {
+            byte[] sealed = vault.seal(contentKey(entry), plaintext);
+            vault.put("body/" + entry.id(), sealed);
+            rememberWords(entry, sealed, content);
+        } finally { Arrays.fill(plaintext, (byte) 0); }
+    }
+
+    // What this phone has just written or received is in hand: its words go into memory with the record they were sealed into, so the chat
+    // that shows it does not ask the Keystore for them again. A photo and a view-once message are never kept.
+    private void rememberWords(Entry entry, byte[] sealed, Content content) {
+        if (entry.image() || entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE || content == null || content.envelope() == null) return;
+        readWords.put(entry.id(), sealed, entry.expiresAt(),
+                new MessageWords.Words(content.envelope().text(), content.envelope().reference()), System.currentTimeMillis());
     }
 
     private String contentKey(Entry entry) {
@@ -850,6 +879,83 @@ final class ChatEngine implements AutoCloseable {
 
     Content content(Entry entry, boolean consume) throws Exception { return content(entry, consume, true); }
 
+    /**
+     * What the list of a chat draws for a text message: its words and what it quotes. The words of a message that was read lately, or that
+     * this phone has just written or received, come from memory (see {@link MessageWords}); the rest are decrypted as {@link #content} does,
+     * with the same checks, and then kept. Nothing is marked read here, and a view-once message is never read through this, nor kept.
+     */
+    MessageWords.Words words(Entry entry) throws Exception {
+        safety.requireAllowed(entry.groupEpoch() == null ? entry.peerId() : entry.senderId());
+        long now = System.currentTimeMillis();
+        if (entry.expiresAt() <= now) { erase(entry, null); throw new SecurityException("Message expired"); }
+        if (entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE) throw new SecurityException("Explicit viewing is required");
+        String key = contentKey(entry);
+        long ticket = readWords.ticket();
+        byte[] sealed = vault.get("body/" + entry.id());
+        MessageWords.Words held = sealed == null ? null : readWords.get(entry.id(), sealed, now);
+        if (held != null) return held;
+        byte[] plaintext = vault.unseal(key, sealed);
+        try {
+            Content content = JSON.fromJson(new String(plaintext, StandardCharsets.UTF_8), Content.class);
+            MessageWords.Words words = new MessageWords.Words(content.envelope().text(), content.envelope().reference());
+            if (!entry.image()) {
+                Runnable hook = beforeWordsAreKept;
+                if (hook != null) hook.run();
+                // Refused when the message, or anything else, was removed while this was being decrypted (see MessageWords.ticket).
+                readWords.put(entry.id(), sealed, entry.expiresAt(), words, now, ticket);
+            }
+            return words;
+        } finally { Arrays.fill(plaintext, (byte) 0); }
+    }
+
+    /** For tests: run between decrypting the words of a message and keeping them, standing for what another thread may do just then. */
+    volatile Runnable beforeWordsAreKept;
+
+    /** Drops the words of every message whose deadline has come; the screen calls it as it removes the rows of expired messages. */
+    void dropExpiredWords() { readWords.dropExpired(System.currentTimeMillis()); }
+
+    /**
+     * Reads the words of the newest text messages of a chat into memory, so that the chat opens without waiting for the Keystore for them.
+     * Nothing is marked read and nothing is shown. It stops at once when {@code stop} says so, and at the first message that cannot be
+     * read, which is no failure: this is only done ahead of time. Returns how many messages it had to ask the Keystore about.
+     */
+    int readAhead(UUID peerId, int newest, BooleanSupplier stop) {
+        List<Entry> all = entries(peerId);
+        int asked = 0, taken = 0;
+        for (int index = all.size() - 1; index >= 0 && taken < newest; index--) {
+            Entry entry = all.get(index);
+            if (entry.image() || entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE) continue;
+            if (stop.getAsBoolean()) break;
+            taken++;
+            boolean inMemory = readWords.holds(entry.id());
+            try { words(entry); }
+            catch (Exception unavailable) { break; }
+            if (!inMemory) asked++;
+        }
+        return asked;
+    }
+
+    /**
+     * The chats that are likeliest to be opened next, likeliest first: those with unread messages, then the most recently active ones;
+     * a muted chat only after all the others. A contact whose new identity is waiting for review is left out: nothing from it is read until
+     * the person has looked at it.
+     */
+    List<UUID> likelyNext(int count) {
+        Map<UUID, long[]> chats = new HashMap<>();
+        visitLiveEntries(null, entry -> {
+            long[] chat = chats.computeIfAbsent(entry.peerId(), id -> new long[2]);
+            if (!entry.outgoing() && !entry.state().equals("READ")) chat[0]++;
+            chat[1] = Math.max(chat[1], entry.expiresAt() - entry.expiry().milliseconds);
+        });
+        Set<UUID> muted = mutedChats();
+        List<UUID> order = new ArrayList<>(chats.keySet());
+        order.removeAll(onboarding.changedContacts());
+        order.sort(Comparator.<UUID>comparingInt(id -> muted.contains(id) ? 1 : 0)
+                .thenComparingInt(id -> chats.get(id)[0] > 0 ? 0 : 1)
+                .thenComparing((first, second) -> Long.compare(chats.get(second)[1], chats.get(first)[1])));
+        return new ArrayList<>(order.subList(0, Math.min(count, order.size())));
+    }
+
     /** With markRead false the caller records receipts for a whole screen at once through markRead(Collection). */
     Content content(Entry entry, boolean consume, boolean markRead) throws Exception {
         safety.requireAllowed(entry.groupEpoch() == null ? entry.peerId() : entry.senderId());
@@ -882,6 +988,9 @@ final class ChatEngine implements AutoCloseable {
     void erase(Entry entry, String acknowledgement) throws Exception {
         contentKey(entry);
         vault.deleteOwnedContentKey(entry, account.userId());
+        // Its words leave memory once the key has gone, not before: a read of them that was already under way can still finish after the
+        // key is deleted, and the removal makes it put nothing (see MessageWords.ticket). From here nothing can decrypt them either.
+        readWords.remove(entry.id());
         vault.transaction(() -> {
             vault.remove("body/" + entry.id());
             vault.remove("entry/" + entry.id());
@@ -972,6 +1081,8 @@ final class ChatEngine implements AutoCloseable {
                 for (Entry entry : removed) {
                     try { vault.deleteOwnedContentKey(entry, account.userId()); }
                     catch (Exception error) { if (failure[0] == null) failure[0] = error; else failure[0].addSuppressed(error); }
+                    // Once the key has gone, and not before: a read of its words that was already under way must put nothing.
+                    finally { readWords.remove(entry.id()); }
                 }
             });
             return null;
@@ -984,6 +1095,7 @@ final class ChatEngine implements AutoCloseable {
         safety.requireNotDeleting();
         long now = System.currentTimeMillis();
         AndroidVault.expireContentKeys(now);
+        readWords.dropExpired(now);
         vault.transaction(() -> {
             for (String prefix : accountPrefixes()) {
                 groups.purge(prefix,now);
@@ -1501,6 +1613,7 @@ final class ChatEngine implements AutoCloseable {
         signal = null;
         account = null;
         parsedEntries.clear();
+        readWords.clear();
         vault.close();
     }
 }

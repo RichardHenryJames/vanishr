@@ -13000,6 +13000,475 @@ public class ScreenFlowTest {
         }
     }
 
+    // ---- 0.7.2: the words of messages kept in memory, and a chat that opens at once ----
+
+    private List<ChatEngine.Entry> textEntries() {
+        return engine.entries(peerId).stream().filter(entry -> !entry.image() && entry.expiry() != ChatEnvelope.Expiry.VIEW_ONCE).toList();
+    }
+
+    // A message stored the way a received or a sent one is, through the engine, so that its words are in memory as it leaves it.
+    private ChatEngine.Entry storedThroughTheEngine(boolean outgoing, String text, byte[] image, ChatEnvelope.Expiry expiry, long offset, String state) throws Exception {
+        UUID id = UUID.randomUUID(); long created = System.currentTimeMillis() + offset; long deadline = created + expiry.milliseconds;
+        createFixtureKey(AndroidVault.contentAlias(deadline, id));
+        ChatEnvelope envelope = new ChatEnvelope(1, id, outgoing ? userId : peerId, outgoing ? deviceId : peerDevice,
+                outgoing ? peerId : userId, outgoing ? peerDevice : deviceId, created, deadline, expiry, text, null);
+        ChatEngine.Entry made = new ChatEngine.Entry(id, peerId, deadline, expiry, outgoing, image != null, state);
+        vault.transaction(() -> { write("entry/" + id, made); engine.storeContent(made, new ChatEngine.Content(envelope, image)); return null; });
+        return made;
+    }
+
+    private ChatEngine.Entry storedThroughTheEngine(boolean outgoing, String text, long offset, String state) throws Exception {
+        return storedThroughTheEngine(outgoing, text, null, ChatEnvelope.Expiry.HOUR_1, offset, state);
+    }
+
+    @Test public void theWordsOfAMessageAreDecryptedOnceAndThenComeFromMemory() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry message = textEntries().get(0);
+        assertFalse("Nothing was read yet", engine.holdsWords(message.id()));
+        long before = vault.keystoreUses();
+        MessageWords.Words first = engine.words(message);
+        assertEquals("Reading the words the first time asks the Keystore once", before + 1, vault.keystoreUses());
+        assertEquals("Coffee at 4?", first.text());
+        assertTrue(engine.holdsWords(message.id()));
+        for (int round = 0; round < 5; round++) assertEquals(first, engine.words(message));
+        assertEquals("Reading them again does not", before + 1, vault.keystoreUses());
+        assertEquals("What the full read says is what memory says", first.text(), engine.content(message, false, false).envelope().text());
+    }
+
+    @Test public void whatThisPhoneStoresIsInMemoryAndNeedsNoKeystoreCallToShow() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry received = storedThroughTheEngine(false, "Words that were just received", -5_000, "DELIVERED");
+        ChatEngine.Entry sent = storedThroughTheEngine(true, "Words that were just sent", -4_000, "PENDING");
+        long used = vault.keystoreUses();
+        assertEquals("Words that were just received", engine.words(received).text());
+        assertEquals("Words that were just sent", engine.words(sent).text());
+        assertEquals("Neither needed the Keystore", used, vault.keystoreUses());
+        ChatEngine.Entry picture = storedThroughTheEngine(false, null, photo, ChatEnvelope.Expiry.HOUR_1, -3_000, "DELIVERED");
+        ChatEngine.Entry viewOnce = storedThroughTheEngine(false, "Seen once", null, ChatEnvelope.Expiry.VIEW_ONCE, -2_000, "DELIVERED");
+        assertFalse("A photo is not kept", engine.holdsWords(picture.id()));
+        assertFalse("Nor is a view-once message", engine.holdsWords(viewOnce.id()));
+        assertThrows("A view-once message is still opened only on purpose", SecurityException.class, () -> engine.words(viewOnce));
+    }
+
+    @Test public void aMessageWhoseRecordChangedShowsItsNewWordsNotTheOnesInMemory() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry message = storedThroughTheEngine(true, "Meet at four", -5_000, "DELIVERED");
+        assertEquals("Meet at four", engine.words(message).text());
+        // The record is replaced by one that memory knows nothing about, as an edit that did not say so would do.
+        ChatEnvelope changed = new ChatEnvelope(1, message.id(), userId, deviceId, peerId, peerDevice, System.currentTimeMillis() - 5_000,
+                message.expiresAt(), message.expiry(), "Meet at five", null);
+        vault.transaction(() -> {
+            byte[] content = RelayApi.JSON.toJson(new ChatEngine.Content(changed, null)).getBytes(StandardCharsets.UTF_8);
+            try { vault.put("body/" + message.id(), vault.seal(AndroidVault.contentAlias(message.expiresAt(), message.id()), content)); }
+            finally { Arrays.fill(content, (byte) 0); }
+            return null;
+        });
+        long used = vault.keystoreUses();
+        assertEquals("Meet at five", engine.words(message).text());
+        assertTrue("The new words had to be decrypted", vault.keystoreUses() > used);
+        used = vault.keystoreUses();
+        assertEquals("Meet at five", engine.words(message).text());
+        assertEquals("and are in memory from then on", used, vault.keystoreUses());
+    }
+
+    @Test public void anEditStoredThroughTheEngineReplacesTheWordsInMemory() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry message = storedThroughTheEngine(true, "Meet at four", -5_000, "DELIVERED");
+        ChatEnvelope changed = new ChatEnvelope(1, message.id(), userId, deviceId, peerId, peerDevice, System.currentTimeMillis() - 5_000,
+                message.expiresAt(), message.expiry(), "Meet at six", null);
+        vault.transaction(() -> { engine.storeContent(message, new ChatEngine.Content(changed, null)); return null; });
+        long used = vault.keystoreUses();
+        assertEquals("Meet at six", engine.words(message).text());
+        assertEquals("No Keystore call to show the edit", used, vault.keystoreUses());
+    }
+
+    @Test public void aMessageThatIsErasedLeavesMemoryAtOnceAndCannotBeReadFromThere() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry message = storedThroughTheEngine(false, "Gone soon", -5_000, "READ");
+        assertTrue(engine.holdsWords(message.id()));
+        engine.erase(message, null);
+        assertFalse("Its words are not in memory any more", engine.holdsWords(message.id()));
+        assertThrows(SecurityException.class, () -> engine.words(message));
+    }
+
+    @Test public void aReadOfWordsThatWasUnderWayWhenItsMessageWasErasedKeepsNothing() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry message = textEntries().get(0);
+        assertFalse("Not in memory, so the read has to decrypt it", engine.holdsWords(message.id()));
+        // What another thread may do while the Keystore is working: the message is erased after its words were decrypted and before they are kept.
+        engine.beforeWordsAreKept = () -> {
+            try { engine.erase(message, null); }
+            catch (Exception failure) { throw new IllegalStateException(failure); }
+        };
+        MessageWords.Words read = engine.words(message);
+        assertEquals("The read itself finished", "Coffee at 4?", read.text());
+        assertFalse("but what it read was not kept", engine.holdsWords(message.id()));
+        assertEquals(0, engine.wordsInMemory());
+        assertNull("The message is gone", engine.entry(message.id()));
+    }
+
+    @Test public void aReadOfWordsThatWasUnderWayWhenTheEngineWasClosedKeepsNothing() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry message = textEntries().get(0);
+        engine.beforeWordsAreKept = engine::close;
+        assertEquals("Coffee at 4?", engine.words(message).text());
+        assertEquals("What it read is not in memory of an engine that is closed", 0, engine.wordsInMemory());
+    }
+
+    @Test public void aMessageThatIsRemovedToMakeRoomLeavesMemoryWithItsKey() throws Exception {
+        signedInFixture();
+        ChatEngine.Entry soonest = storedThroughTheEngine(false, "Soonest to expire", -30_000, "READ");
+        ChatEngine.Entry latest = storedThroughTheEngine(false, "Latest to expire", -10_000, "READ");
+        assertTrue(engine.holdsWords(soonest.id()) && engine.holdsWords(latest.id()));
+        engine.liveLimit = 2;
+        assertTrue(engine.makeRoom(0));
+        assertNull("The message that expires first was removed", vault.get("entry/" + soonest.id()));
+        assertFalse("and its words left memory with it", engine.holdsWords(soonest.id()));
+        assertTrue("The other one is untouched", engine.holdsWords(latest.id()));
+        assertEquals("Latest to expire", engine.words(latest).text());
+    }
+
+    @Test public void aReadOfWordsThatWasUnderWayWhenItsMessageWasRemovedToMakeRoomKeepsNothing() throws Exception {
+        signedInFixture();
+        ChatEngine.Entry soonest = entry(false, "Read as it is removed", null, ChatEnvelope.Expiry.HOUR_1, "READ", -30_000);
+        entry(false, "Not removed", null, ChatEnvelope.Expiry.HOUR_1, "READ", -10_000);
+        assertFalse("Not in memory, so the read has to decrypt it", engine.holdsWords(soonest.id()));
+        engine.liveLimit = 2;
+        engine.beforeWordsAreKept = () -> {
+            try { assertTrue(engine.makeRoom(0)); }
+            catch (Exception failure) { throw new IllegalStateException(failure); }
+        };
+        assertEquals("The read itself finished", "Read as it is removed", engine.words(soonest).text());
+        engine.beforeWordsAreKept = null;
+        assertNull("The message was removed to make room", vault.get("entry/" + soonest.id()));
+        assertFalse("and what the read found was not kept", engine.holdsWords(soonest.id()));
+    }
+
+    @Test public void aMessageIsNotShownFromMemoryAtItsDeadlineAndLeavesMemory() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry message = storedThroughTheEngine(false, "Two seconds to live", -(ChatEnvelope.Expiry.HOUR_1.milliseconds - 2_000), "READ");
+        assertEquals("Two seconds to live", engine.words(message).text());
+        assertTrue(engine.holdsWords(message.id()));
+        android.os.SystemClock.sleep(2_300);
+        assertThrows("The deadline has passed", SecurityException.class, () -> engine.words(message));
+        assertFalse("and its words are gone from memory", engine.holdsWords(message.id()));
+    }
+
+    @Test public void aMessageWhoseRecordWasRemovedWithoutTellingMemoryLeavesMemoryAtTheNextListing() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry message = storedThroughTheEngine(false, "Removed behind its back", -5_000, "READ");
+        assertTrue(engine.holdsWords(message.id()));
+        vault.transaction(() -> { vault.remove("entry/" + message.id()); vault.remove("body/" + message.id()); return null; });
+        engine.entries(peerId);
+        assertTrue("A message that was put there a moment ago is spared, as its record may be in a commit that cannot be seen yet", engine.holdsWords(message.id()));
+        android.os.SystemClock.sleep(MessageWords.GRACE_MILLIS + 300);
+        engine.entries(peerId);
+        assertFalse("Later it is not: the record is not among the ones that are stored", engine.holdsWords(message.id()));
+    }
+
+    @Test public void aPurgeTakesTheWordsOfMessagesThatHaveExpiredOutOfMemory() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry message = storedThroughTheEngine(false, "Two seconds to live", -(ChatEnvelope.Expiry.HOUR_1.milliseconds - 2_000), "READ");
+        assertTrue(engine.holdsWords(message.id()));
+        android.os.SystemClock.sleep(2_300);
+        engine.purge();
+        assertFalse("Its deadline has passed, so it is not in memory", engine.holdsWords(message.id()));
+        assertNull("nor stored", engine.entry(message.id()));
+    }
+
+    @Test public void aListingTakesTheWordsOfAMessageThatHasExpiredOutOfMemoryBeforeItsRecordIsPurged() throws Exception {
+        signedInFixture(); conversationsFixture();
+        // Stored the way a received message is, with a deadline that has already come: its record stays until a purge removes it.
+        ChatEngine.Entry message = storedThroughTheEngine(false, "Expired a minute ago", -(ChatEnvelope.Expiry.HOUR_1.milliseconds + 60_000), "READ");
+        assertTrue("Its words are in memory", engine.holdsWords(message.id()));
+        assertNotNull("and its record is stored", vault.get("entry/" + message.id()));
+        assertTrue("A listing does not show it", engine.entries(peerId).stream().noneMatch(entry -> entry.id().equals(message.id())));
+        assertFalse("and drops its words", engine.holdsWords(message.id()));
+        assertNotNull("although nothing has purged its record", vault.get("entry/" + message.id()));
+    }
+
+    @Test public void theScreenTakesTheWordsOfAMessageThatHasExpiredOutOfMemoryAtItsNextTick() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            awaitMainCondition(scenario, ScreenFlowTest::listShown);
+            awaitMainCondition(scenario, activity -> !(boolean) readField(activity, "readAheadQueued"));
+            boolean[] ticked = {false};
+            // The words are caught in memory and the tick run in one step on the screen's thread, so that nothing else (a listing, a sync's
+            // purge) is what takes them out; if one was quicker the message is made again.
+            for (int attempt = 0; attempt < 5 && !ticked[0]; attempt++) {
+                ChatEngine.Entry message = storedThroughTheEngine(false, "Expired a minute ago", -(ChatEnvelope.Expiry.HOUR_1.milliseconds + 60_000), "READ");
+                scenario.onActivity(activity -> {
+                    if (!engine.holdsWords(message.id())) return;
+                    ((Runnable) readField(activity, "expiryTick")).run();
+                    assertFalse("The tick of the screen took them out of memory", engine.holdsWords(message.id()));
+                    assertNotNull("while its record is still stored", vault.get("entry/" + message.id()));
+                    ticked[0] = true;
+                });
+            }
+            assertTrue("The words were in memory when the tick was run", ticked[0]);
+        }
+    }
+
+    @Test public void aBlockedContactsWordsAreNotShownFromMemoryEvenWhileTheMessageIsStillStored() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry message = storedThroughTheEngine(false, "Before the block", -5_000, "READ");
+        assertEquals("Before the block", engine.words(message).text());
+        assertTrue(engine.holdsWords(message.id()));
+        // Only the marker, as a block known here but not yet acted on would leave things: the words are in memory and the record is stored.
+        vault.transaction(() -> { vault.put("blocked/" + peerId, new byte[]{1}); return null; });
+        assertThrows("Nothing is shown", SecurityException.class, () -> engine.words(message));
+    }
+
+    @Test public void aContactThatIsBlockedTakesItsMessagesOutOfMemoryWithIt() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry message = storedThroughTheEngine(false, "Before the block", -5_000, "READ");
+        assertEquals("Before the block", engine.words(message).text());
+        plainTransport(new ArrayList<>(), new ArrayList<>());
+        engine.safety().block(peer);
+        assertThrows(SecurityException.class, () -> engine.words(message));
+        assertFalse("and nothing of the chat is left in memory", engine.holdsWords(message.id()));
+    }
+
+    @Test public void nothingIsShownFromMemoryOnceTheStoreIsClosedAndClosingTheEngineEmptiesIt() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry message = storedThroughTheEngine(false, "In memory", -5_000, "READ");
+        assertEquals("In memory", engine.words(message).text());
+        assertTrue(engine.wordsInMemory() > 0);
+        vault.close();
+        assertThrows("A closed store shows nothing, from memory or otherwise", SecurityException.class, () -> engine.words(message));
+        engine.close();
+        assertEquals("Closing the engine empties memory", 0, engine.wordsInMemory());
+    }
+
+    @Test public void readingAheadTakesTheNewestMessagesOfAChatIntoMemoryAndMarksNothingRead() throws Exception {
+        signedInFixture(); conversationsFixture();
+        for (int index = 0; index < 6; index++) entry(false, "Unread " + index, null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -(10 - index) * 1_000L);
+        Map<UUID, Long> unread = engine.unreadCounts();
+        List<ChatEngine.Entry> before = engine.entries(peerId);
+        List<ChatEngine.Entry> texts = textEntries();
+        long used = vault.keystoreUses();
+        assertEquals("Four asked for, four read", 4, engine.readAhead(peerId, 4, () -> false));
+        assertEquals("one Keystore call each", used + 4, vault.keystoreUses());
+        for (int index = 0; index < texts.size(); index++)
+            assertEquals("Only the newest four: " + index, index >= texts.size() - 4, engine.holdsWords(texts.get(index).id()));
+        assertEquals("Nothing was marked read", unread, engine.unreadCounts());
+        assertEquals("No record changed", before, engine.entries(peerId));
+        used = vault.keystoreUses();
+        assertEquals("Reading ahead again finds them in memory", 0, engine.readAhead(peerId, 4, () -> false));
+        assertEquals(used, vault.keystoreUses());
+    }
+
+    @Test public void readingAheadStopsWhenToldAndLeavesPhotosAndViewOnceMessagesAlone() throws Exception {
+        signedInFixture(); conversationsFixture();
+        int[] asked = {0};
+        assertEquals("Told to stop after two", 2, engine.readAhead(peerId, 10, () -> asked[0]++ >= 2));
+        engine.readAhead(peerId, 50, () -> false);
+        for (ChatEngine.Entry entry : engine.entries(peerId))
+            assertEquals("Only text that is not view-once is read ahead: " + entry.image() + " " + entry.expiry(),
+                !entry.image() && entry.expiry() != ChatEnvelope.Expiry.VIEW_ONCE, engine.holdsWords(entry.id()));
+    }
+
+    @Test public void theChatsLikeliestToBeOpenedNextAreThoseWithUnreadMessagesThenTheMostRecentAndMutedOnesLast() throws Exception {
+        signedInFixture(); conversationsFixture();
+        UUID quiet = UUID.randomUUID(), newer = UUID.randomUUID(), muted = UUID.randomUUID();
+        vault.transaction(() -> { write("contact/" + muted, new ChatEngine.Peer(muted, UUID.randomUUID(), peer.identityKey(), "Muted Mona")); return null; });
+        bulkEntry(quiet, UUID.randomUUID(), true, "Mine, nothing unread, the newest of all", -1_000, "READ");
+        bulkEntry(newer, UUID.randomUUID(), false, "Unread, newer than the first chat's", -20_000, "DELIVERED");
+        bulkEntry(muted, UUID.randomUUID(), false, "Unread and newest, but muted", -500, "DELIVERED");
+        engine.mute(muted, true);
+        assertEquals("Unread first (the more recent of them first), then the rest, and the muted one last",
+            List.of(newer, peerId, quiet, muted), engine.likelyNext(4));
+        assertEquals(List.of(newer, peerId), engine.likelyNext(2));
+        assertEquals("No more than there are", 4, engine.likelyNext(10).size());
+    }
+
+    @Test public void aContactWhoseNewIdentityIsWaitingForReviewIsNotReadAhead() throws Exception {
+        var scene = new AdminWithAReinstalledContact();
+        entry(false, "From before the reinstall", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -5_000);
+        assertEquals("Before the reinstall the chat is the likeliest", List.of(peerId), engine.likelyNext(2));
+        scene.reinstall();
+        assertEquals(Set.of(peerId), engine.onboarding().changedContacts());
+        assertTrue("Nothing from a contact under review is read until it has been accepted", engine.likelyNext(2).isEmpty());
+    }
+
+    @Test public void anAlbumIsDrawnWholeEvenWhenSomeOfItsPicturesAreOlderThanTheFirstStage() throws Exception {
+        signedInFixture(); conversationsFixture();
+        List<ChatEngine.Entry> album = albumOf(false, ChatEnvelope.Expiry.HOURS_24, 4, -50_000, "READ");
+        manyTextMessages(12, "READ");
+        // The newest fourteen are the twelve messages and the last two pictures of the album; the other two are older.
+        List<ChatEngine.Entry> all = engine.entries(peerId);
+        Set<UUID> newestFourteen = new HashSet<>();
+        for (ChatEngine.Entry entry : all.subList(all.size() - 14, all.size())) newestFourteen.add(entry.id());
+        assertTrue(newestFourteen.contains(album.get(3).id()) && newestFourteen.contains(album.get(2).id()));
+        assertFalse(newestFourteen.contains(album.get(1).id()));
+        MainActivity.stagePauseMillis = 60_000;
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            awaitMainCondition(scenario, ScreenFlowTest::listShown);
+            scenario.onActivity(activity -> contactRow(activity, "Aarav Mehta").performClick());
+            awaitMainCondition(scenario, activity -> (int) readField(activity, "stagesApplied") >= 1);
+            scenario.onActivity(activity -> {
+                assertEquals("Only one stage has been drawn", 1, (int) readField(activity, "stagesApplied"));
+                @SuppressWarnings("unchecked") Map<UUID, Object> rows = (Map<UUID, Object>) readField(activity, "messageRows");
+                assertEquals("The twelve messages and the album as one row", 13, rows.size());
+                Object albumRow = rows.values().stream().filter(row -> ((Albums.Row) readField(row, "item")).album()).findFirst().orElseThrow();
+                assertEquals("The album is drawn with all of its pictures, not with the two that are among the newest",
+                    4, ((Albums.Row) readField(albumRow, "item")).members().size());
+            });
+        } finally { MainActivity.stagePauseMillis = 24; }
+    }
+
+    @Test public void anAlbumWhosePicturesHaveOtherMessagesBetweenThemIsDrawnWholeWhenAStageEndsBetweenThem() throws Exception {
+        signedInFixture(); conversationsFixture();
+        UUID album = UUID.randomUUID();
+        List<ChatEngine.Entry> pictures = new ArrayList<>();
+        for (int index = 0; index < 4; index++)
+            pictures.add(photoEntry(false, ChatEnvelope.Expiry.HOURS_24, jpeg(800, 600, ALBUM_COLORS[index]), 800, 600,
+                new ChatEnvelope.Album(album, index, 4), null, "READ", index < 2 ? -50_000 + index * 1_000L : -43_000 + (index - 2) * 1_000L));
+        // Two pictures, five messages, two more pictures, and the twelve newest messages: the first stage ends between the second and the third.
+        for (int between = 0; between < 5; between++) entry(false, "Between " + between, null, ChatEnvelope.Expiry.HOUR_1, "READ", -48_000 + between * 1_000L);
+        manyTextMessages(12, "READ");
+        List<UUID> order = engine.entries(peerId).stream().map(ChatEngine.Entry::id).toList();
+        Set<UUID> newestFourteen = new HashSet<>(order.subList(order.size() - 14, order.size()));
+        assertTrue(newestFourteen.contains(pictures.get(3).id()) && newestFourteen.contains(pictures.get(2).id()));
+        assertFalse("The first stage ends with five messages between it and the older pictures", newestFourteen.contains(pictures.get(1).id()));
+        MainActivity.stagePauseMillis = 60_000;
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            awaitMainCondition(scenario, ScreenFlowTest::listShown);
+            scenario.onActivity(activity -> contactRow(activity, "Aarav Mehta").performClick());
+            awaitMainCondition(scenario, activity -> (int) readField(activity, "stagesApplied") >= 1);
+            scenario.onActivity(activity -> {
+                assertEquals("Only one stage has been drawn", 1, (int) readField(activity, "stagesApplied"));
+                @SuppressWarnings("unchecked") Map<UUID, Object> rows = (Map<UUID, Object>) readField(activity, "messageRows");
+                assertEquals("The twelve newest messages, the five between the pictures and the album as one row", 18, rows.size());
+                Object albumRow = rows.values().stream().filter(row -> ((Albums.Row) readField(row, "item")).album()).findFirst().orElseThrow();
+                assertEquals("The album has all of its pictures, not the two that are among the newest",
+                    4, ((Albums.Row) readField(albumRow, "item")).members().size());
+                assertTrue("The messages between its pictures are drawn with it", hasText(activity, "Between 0"));
+                assertFalse("Nothing older than the oldest picture is drawn yet", hasText(activity, "Coffee at 4?"));
+            });
+        } finally { MainActivity.stagePauseMillis = 24; }
+    }
+
+    // A chat of many text messages, the newest last and newer than the ones of conversationsFixture; with state DELIVERED the other
+    // side's are unread, so that the chat is the likeliest to be opened.
+    private List<ChatEngine.Entry> manyTextMessages(int count, String state) throws Exception {
+        List<ChatEngine.Entry> made = new ArrayList<>();
+        for (int index = 0; index < count; index++)
+            made.add(entry(false, "Message number " + index, null, ChatEnvelope.Expiry.HOUR_1, state, -(count - index) * 1_000L));
+        return made;
+    }
+
+    private static boolean listShown(MainActivity activity) {
+        LinearLayout rows = (LinearLayout) readField(activity, "contactRows");
+        return rows != null && rows.isShown() && rows.getChildCount() > 0;
+    }
+
+    @Test public void aChatThatIsOpenedAgainShowsItsMessagesWithoutAskingTheKeystoreForTheirWords() throws Exception {
+        signedInFixture(); conversationsFixture();
+        manyTextMessages(30, "READ");
+        long started = vault.keystoreUses();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            awaitMainCondition(scenario, ScreenFlowTest::listShown);
+            scenario.onActivity(activity -> contactRow(activity, "Aarav Mehta").performClick());
+            awaitMessages(scenario);
+            long afterTheFirst = vault.keystoreUses();
+            assertTrue("The first opening read the words of its messages: " + (afterTheFirst - started), afterTheFirst - started >= 30);
+            scenario.onActivity(activity -> activity.getOnBackPressedDispatcher().onBackPressed());
+            awaitMainCondition(scenario, ScreenFlowTest::listShown);
+            scenario.onActivity(activity -> contactRow(activity, "Aarav Mehta").performClick());
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> assertNotNull(text(root(activity), "Message number 29")));
+            assertTrue("The second opening asked the Keystore for nothing but, at most, the one picture: " + (vault.keystoreUses() - afterTheFirst),
+                vault.keystoreUses() - afterTheFirst <= 2);
+        }
+    }
+
+    @Test public void aChatWhoseNewestMessagesWereReadAheadDrawsItsFirstScreenWithoutTheKeystore() throws Exception {
+        signedInFixture(); conversationsFixture();
+        List<ChatEngine.Entry> made = manyTextMessages(30, "DELIVERED");
+        ChatEngine.Entry newest = made.get(made.size() - 1), fourteenth = made.get(made.size() - 14);
+        Map<UUID, Long> unread = engine.unreadCounts();
+        MainActivity.stagePauseMillis = 60_000;
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            awaitMainCondition(scenario, ScreenFlowTest::listShown);
+            // Nobody has opened a chat: the list is on the screen, and the app reads ahead.
+            awaitMainCondition(scenario, activity -> engine.holdsWords(newest.id()) && engine.holdsWords(fourteenth.id()));
+            assertEquals("Nothing was marked read by reading ahead", unread, engine.unreadCounts());
+            long used = vault.keystoreUses();
+            scenario.onActivity(activity -> contactRow(activity, "Aarav Mehta").performClick());
+            awaitMainCondition(scenario, activity -> (int) readField(activity, "stagesApplied") >= 1);
+            scenario.onActivity(activity -> assertNotNull(text(root(activity), "Message number 29")));
+            assertEquals("The first screen was drawn without one use of a Keystore key", used, vault.keystoreUses());
+        } finally { MainActivity.stagePauseMillis = 24; }
+    }
+
+    @Test public void theListReadsAheadTheLikeliestTwoChatsAndNotAMutedOne() throws Exception {
+        signedInFixture(); conversationsFixture();
+        UUID second = UUID.randomUUID(), muted = UUID.randomUUID();
+        List<ChatEngine.Entry> mine = manyTextMessages(5, "DELIVERED");
+        vault.transaction(() -> { write("contact/" + muted, new ChatEngine.Peer(muted, UUID.randomUUID(), peer.identityKey(), "Muted Mona")); return null; });
+        bulkEntry(second, UUID.randomUUID(), false, "A second chat with an unread message", -500, "DELIVERED");
+        bulkEntry(muted, UUID.randomUUID(), false, "A muted chat with an unread message", -400, "DELIVERED");
+        engine.mute(muted, true);
+        ChatEngine.Entry inSecond = engine.entries(second).get(0), inMuted = engine.entries(muted).get(0);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            awaitMainCondition(scenario, ScreenFlowTest::listShown);
+            awaitMainCondition(scenario, activity -> engine.holdsWords(mine.get(mine.size() - 1).id()) && engine.holdsWords(inSecond.id()));
+            android.os.SystemClock.sleep(600);
+            assertFalse("A muted chat comes after the likelier ones, and two are read ahead", engine.holdsWords(inMuted.id()));
+        }
+    }
+
+    @Test public void aLongChatDrawsItsNewestMessagesFirstAndNothingOlderBeforeItsTurn() throws Exception {
+        signedInFixture(); conversationsFixture();
+        for (int index = 0; index < 40; index++) {
+            long offset = -(40 - index) * 3_000L;
+            if (index % 10 == 3) entry(index % 2 == 0, null, photo, ChatEnvelope.Expiry.HOUR_1, "READ", offset);
+            else entry(index % 2 == 0, "Older and newer message " + index, null, ChatEnvelope.Expiry.HOUR_1, "READ", offset);
+        }
+        List<ChatEngine.Entry> all = engine.entries(peerId);
+        Set<UUID> newestFourteen = new HashSet<>();
+        for (ChatEngine.Entry entry : all.subList(all.size() - 14, all.size())) newestFourteen.add(entry.id());
+        MainActivity.stagePauseMillis = 60_000;
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            awaitMainCondition(scenario, ScreenFlowTest::listShown);
+            scenario.onActivity(activity -> contactRow(activity, "Aarav Mehta").performClick());
+            awaitMainCondition(scenario, activity -> (int) readField(activity, "stagesApplied") >= 1);
+            scenario.onActivity(activity -> {
+                @SuppressWarnings("unchecked") Map<UUID, Object> rows = (Map<UUID, Object>) readField(activity, "messageRows");
+                assertEquals("The first stage draws the newest fourteen, and not one older message or photo among them", newestFourteen, rows.keySet());
+                assertEquals("Only one stage has been drawn", 1, (int) readField(activity, "stagesApplied"));
+                assertTrue("The chat is still being read", (boolean) readField(activity, "messageRefreshQueued"));
+            });
+        } finally { MainActivity.stagePauseMillis = 24; }
+    }
+
+    @Test public void aRefreshThatNeedsNothingReadIsOneStageAndNotSeveral() throws Exception {
+        signedInFixture(); conversationsFixture();
+        manyTextMessages(40, "READ");
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            awaitMainCondition(scenario, ScreenFlowTest::listShown);
+            scenario.onActivity(activity -> contactRow(activity, "Aarav Mehta").performClick());
+            awaitMessages(scenario);
+            int[] before = new int[1];
+            scenario.onActivity(activity -> {
+                before[0] = (int) readField(activity, "stagesApplied");
+                assertTrue("Opening it took several stages: " + before[0], before[0] >= 4);
+                invoke(activity, "refreshMessages", new Class<?>[]{ChatEngine.Peer.class}, peer);
+            });
+            awaitMessages(scenario);
+            scenario.onActivity(activity -> assertEquals("A refresh with nothing new to read is one stage", before[0] + 1, (int) readField(activity, "stagesApplied")));
+        }
+    }
+
     // ---- Speed probes (made only when asked for) ----
     //
     // Skipped unless the instrumentation is given perfProbe=1. They time what a person waits for, on the dedicated test emulator and with
@@ -13163,6 +13632,141 @@ public class ScreenFlowTest {
                     return rows != null && rows.isShown() && rows.getHeight() > 0;
                 });
                 perf("back_round" + round + "_handler_ms", back[0]); perf("back_round" + round + "_drawn_ms", back[1]); perf("back_round" + round + "_stall_ms", back[2]);
+                android.os.SystemClock.sleep(1_500);
+            }
+        }
+    }
+
+    // A chat as people live with it: mostly short texts, some long ones, replies that quote, emoji, photos and a few reactions, ten
+    // seconds apart so that every one of them is still alive. The last few messages of the other side are unread.
+    private void perfLongChat(int count, int unread) throws Exception {
+        Random random = new Random(5);
+        String[] words = {"ok", "Sounds good", "See you at 6", "Haha yes", "On my way, give me ten minutes", "Thanks!", "Perfect",
+            "Did you get the message I sent earlier about the tickets for Saturday?", "Can you send me the address again, I lost it",
+            "Let's do it tomorrow if that works for you, I have a meeting in the morning but I'm free after lunch and can come over",
+            "I will call you when I reach home and we can talk about the plan for the weekend properly, there is a lot to decide"};
+        String reaction = ChatEnvelope.REACTIONS.iterator().next();
+        ChatEngine.Entry quoted = null;
+        for (int index = 0; index < count; index++) {
+            boolean mine = random.nextInt(100) < 45;
+            long offset = -(long) (count - index) * 10_000L;
+            String state = !mine && index >= count - unread ? "DELIVERED" : "READ";
+            ChatEngine.Entry made;
+            if (index % 13 == 12) made = entry(mine, null, photo, ChatEnvelope.Expiry.HOUR_1, state, offset);
+            else if (index % 9 == 8 && quoted != null)
+                made = entryQuoting(mine, words[random.nextInt(words.length)], new ChatEnvelope.Reference(quoted.id(), "Sounds good", false), offset);
+            else if (index % 11 == 10) made = entry(mine, "\uD83D\uDE02", null, ChatEnvelope.Expiry.HOUR_1, state, offset);
+            else made = entry(mine, words[random.nextInt(words.length)], null, ChatEnvelope.Expiry.HOUR_1, state, offset);
+            if (!made.image()) quoted = made;
+            if (index % 7 == 6) {
+                ChatEngine.Entry reacted = made.withReaction(!mine, reaction);
+                vault.transaction(() -> { write("entry/" + reacted.id(), reacted); return null; });
+            }
+        }
+    }
+
+    // What a person waits for when a chat is opened, from the tap: until a screenful of rows has been drawn, until every row of the
+    // window has been (the batches come one after another), and the longest stretch in which the main thread did not answer.
+    private void perfOpenTimeline(ActivityScenario<MainActivity> scenario, String chat, String label) throws Exception {
+        var loaded = new java.util.concurrent.CountDownLatch(1);
+        var meter = new StallMeter();
+        List<long[]> draws = Collections.synchronizedList(new ArrayList<>());
+        long[] times = new long[2];
+        // Keystore keys used since the tap, when the first rows were drawn and when the chat had been loaded; and how many messages had
+        // their words in memory at the tap.
+        long[] keys = new long[4];
+        scenario.onActivity(activity -> {
+            meter.start();
+            View decor = activity.getWindow().getDecorView();
+            long started = System.nanoTime();
+            keys[0] = vault.keystoreUses(); keys[3] = engine.wordsInMemory();
+            ViewTreeObserver.OnDrawListener drawn = () -> {
+                LinearLayout rows = (LinearLayout) readField(activity, "messages");
+                int count = rows == null ? 0 : rows.getChildCount();
+                if (count > 0 && keys[1] == 0) keys[1] = vault.keystoreUses() - keys[0] + 1;
+                draws.add(new long[]{(System.nanoTime() - started) / 1_000_000, count});
+            };
+            decor.getViewTreeObserver().addOnDrawListener(drawn);
+            contactRow(activity, chat).performClick();
+            times[0] = (System.nanoTime() - started) / 1_000_000;
+            android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
+            handler.post(new Runnable() {
+                @Override public void run() {
+                    LinearLayout rows = (LinearLayout) readField(activity, "messages");
+                    if (rows != null && rows.getChildCount() > 0 && !(boolean) readField(activity, "messageRefreshQueued")) {
+                        times[1] = (System.nanoTime() - started) / 1_000_000;
+                        keys[2] = vault.keystoreUses() - keys[0];
+                        loaded.countDown();
+                        decor.postDelayed(() -> decor.getViewTreeObserver().removeOnDrawListener(drawn), 700);
+                    } else handler.postDelayed(this, 2);
+                }
+            });
+        });
+        assertTrue("The chat was not loaded", loaded.await(60, java.util.concurrent.TimeUnit.SECONDS));
+        android.os.SystemClock.sleep(800);
+        scenario.onActivity(activity -> meter.stop());
+        long first = -1, ten = -1, all = -1, maximum = 0;
+        synchronized (draws) { for (long[] draw : draws) maximum = Math.max(maximum, draw[1]); }
+        long previous = -1; int shown = 0;
+        synchronized (draws) {
+            for (long[] draw : draws) {
+                if (first < 0 && draw[1] > 0) first = draw[0];
+                if (ten < 0 && draw[1] >= 10) ten = draw[0];
+                if (all < 0 && draw[1] >= maximum) all = draw[0];
+                if (draw[1] != previous && draw[1] > 0 && shown++ < 12) perf(label + "_draw_" + draw[0] + "ms_rows", draw[1]);
+                previous = draw[1];
+            }
+        }
+        perf(label + "_tap_handler_ms", times[0]); perf(label + "_first_row_drawn_ms", first); perf(label + "_ten_rows_drawn_ms", ten);
+        perf(label + "_every_row_drawn_ms", all); perf(label + "_loaded_ms", times[1]); perf(label + "_worst_main_stall_ms", meter.worst);
+        perf(label + "_rows", maximum);
+        perf(label + "_words_in_memory_at_the_tap", keys[3]); perf(label + "_keystore_keys_until_first_rows", keys[1] - 1);
+        perf(label + "_keystore_keys_until_loaded", keys[2]);
+    }
+
+    // Round 1 is the first time this chat is opened since the app was started, after perfListWaitMs with the chat list on the screen (the
+    // time the app has to read ahead); the later rounds open it again.
+    @Test public void probeOpeningALongChat() throws Exception {
+        Assume.assumeTrue("Speed probes are made only when asked for: perfProbe=1", perfAsked());
+        int count = perfNumber("perfMessages", 150);
+        signedInFixture(); conversationsFixture();
+        manyVerifiedContacts(perfNumber("perfContacts", 40), 6);
+        perfLongChat(count, perfNumber("perfUnread", 24));
+        perfPadVault();
+        // What the reader lane does for the chat, step by step, away from the screen.
+        long[] listing = new long[5];
+        for (int index = 0; index < listing.length; index++) { long started = System.nanoTime(); engine.entries(peerId); listing[index] = (System.nanoTime() - started) / 1_000; }
+        perf("long_listing_us", perfMedian(listing));
+        List<ChatEngine.Entry> texts = engine.entries(peerId).stream().filter(entry -> !entry.image() && entry.expiry() != ChatEnvelope.Expiry.VIEW_ONCE).toList();
+        long[] decrypt = new long[Math.min(32, texts.size())];
+        for (int index = 0; index < decrypt.length; index++) {
+            long started = System.nanoTime();
+            engine.content(texts.get(texts.size() - 1 - index), false, false);
+            decrypt[index] = (System.nanoTime() - started) / 1_000;
+        }
+        perf("long_decrypt_one_median_us", perfMedian(decrypt));
+        perf("long_decrypt_first_us", decrypt[0]);
+        perf("long_messages_in_chat", engine.entries(peerId).size());
+        int rounds = perfNumber("perfRounds", 3);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            awaitMainCondition(scenario, activity -> readField(activity, "contactRows") != null
+                && ((LinearLayout) readField(activity, "contactRows")).getChildCount() > 20);
+            android.os.SystemClock.sleep(perfNumber("perfListWaitMs", 3_000));
+            if (perfNumber("perfPrewarm", 0) == 1) {
+                // What opening any other chat once costs, apart from this chat: a small one, opened and left before the long one is.
+                perfOpenTimeline(scenario, "Contact 001", "prewarm");
+                scenario.onActivity(activity -> activity.getOnBackPressedDispatcher().onBackPressed());
+                awaitMainCondition(scenario, ScreenFlowTest::listShown);
+                android.os.SystemClock.sleep(1_500);
+            }
+            for (int round = 1; round <= rounds; round++) {
+                perfOpenTimeline(scenario, "Aarav Mehta", "open" + round);
+                long[] back = perfMeasure(scenario, activity -> activity.getOnBackPressedDispatcher().onBackPressed(), activity -> {
+                    View rows = (View) readField(activity, "contactRows");
+                    return rows != null && rows.isShown() && rows.getHeight() > 0;
+                });
+                perf("back_round" + round + "_drawn_ms", back[1]);
                 android.os.SystemClock.sleep(1_500);
             }
         }

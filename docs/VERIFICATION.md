@@ -3,6 +3,142 @@
 Evidence refreshed on Windows, 2026-11-19 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
+## Release 0.7.2 / A chat that opens at once (2026-11-19)
+
+Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#the-words-of-messages-kept-in-memory-and-a-chat-that-opens-at-once-072) and
+[ARCHITECTURE.md](ARCHITECTURE.md#client-threading-and-the-open-vault). The owner, with 0.7.1 in hand, found one more slowness: when a chat has run for
+two or three pages, opening it takes a while, and it should be instant. **No relay change, no new permission, nothing new on the wire.** Version
+0.7.2 / code 54 in `build.gradle`.
+
+- **What took the time, measured on 0.7.1.** A new probe (`probeOpeningALongChat`, run only when asked for) makes a chat of 157 messages (mostly short
+  texts, some long ones, replies that quote, emoji, a photo about every thirteenth, a reaction on every seventh, the last 24 of the other side unread)
+  among 40 other contacts, in a 0.4 MB store, and opens it three times, the first after the app was started and the list shown for three seconds. The
+  window of a chat is its newest 100 messages. Dedicated emulator, QA build, software Keystore:
+
+  | opening | first rows drawn | all 100 rows drawn | longest stretch the main thread did not answer |
+  |---|---|---|---|
+  | first | 1,347 ms | 4,779 ms | 393 ms |
+  | second | 896 ms | 3,090 ms | 164 ms |
+  | third | 506 ms | 2,458 ms | 93 ms |
+
+  A second run of the same build with the app compiled ahead of time (`cmd package compile -m speed`) was no faster (first rows 1,496 / 1,256 /
+  1,268 ms, all rows 4.8 / 4.9 / 4.7 s), so the time was not in running Java for the first time. What the reader lane does, away from the screen:
+  listing the chat takes 25 ms (about 400 messages are stored), and **decrypting one message takes 17 to 20 ms** (median of 32), because each message
+  has its own Keystore key. The first 16 messages therefore cost about 290 ms before anything was drawn, the 100 of the window about 1.8 s of Keystore
+  calls on top of the drawing, and **a chat that was opened again asked for every one of them again**. The first stage also drew every photo and
+  view-once row of the whole window at once, with gaps above the newest text, and asked the Keystore for all those pictures at the same time.
+- **Changed** (see the threat model for the rules and the limits): the words of the messages a chat draws are kept in memory (`MessageWords`,
+  `ChatEngine.words`), so a chat that is opened again, and a message that has just been written or received, need no Keystore call for them; while the
+  chat list is on the screen the newest 14 text messages of the two chats likeliest to be opened next are read into memory (`ChatEngine.readAhead`,
+  `likelyNext`, `MainActivity.readAhead`); and a chat is prepared newest first in stages of 14, then 12, with nothing older drawn before its turn, whole
+  albums, one stage for a refresh that has nothing new to read, and the first stage at normal thread priority (`MainActivity.listMessages`,
+  `loadStage`).
+- **Measured after** (the same probe; "read ahead" means the chat was the likeliest one and the list had been on the screen for three seconds):
+
+  | | first rows drawn | all rows drawn | Keystore calls until the first rows | longest stall |
+  |---|---|---|---|---|
+  | 157 messages, first opening, read ahead (four runs) | 464, 281, 237, 183 ms | 3.1, 2.8, 2.8, 2.6 s | not counted, 0, 1, 1 | 423, 165, 159, 214 ms |
+  | the same chat opened again (five openings) | 107, 121, 163, 121, 194 ms | 0.97, 0.90, 1.03, 0.97, 1.14 s | 1 (its photo) | 71 to 93 ms |
+  | 47 messages, first opening, not read ahead | 523 ms | 1.5 s | 13 | 148 ms |
+  | the same chat opened again | 117 ms | 0.45 s | 1 | 58 ms |
+  | 307 messages, first opening, read ahead | 385 ms | 3.2 s | 1 | 150 ms |
+  | the same chat opened again | 228 ms | 1.4 s | 1 | 95 ms |
+
+  The first rows of a chat that was opened before, or read ahead, are therefore drawn after about 100 to 250 ms, 120 ms in the commonest case, instead of
+  500 to 1,350 ms, and its whole window after about 1 s instead of 2.5 to 4.8 s. One Keystore call is the picture of the chat's one photo, which is
+  decoded again at each opening (pictures are not kept). A chat that is neither read ahead nor opened before still decrypts the words of its first
+  screen: 13 Keystore calls and about 520 ms here, which is the 14 messages of the first stage and the cost of running the code for the first time
+  (opening any other chat first brought the long chat's first opening from 281 to 183 ms, and its tap handler from 131 to 44 ms). The rest of the
+  window of such a chat decrypts in the background, 85 calls, 2.6 to 3.2 s here, after the first screen is drawn. The listing of a chat (25 to 33
+  ms) is still done at each opening. **Measured again on the final build**, after the changes that the review below asked for (same probe, same
+  emulator): the 157-message chat, read ahead, first opening 409 and 347 ms to its first rows (one Keystore call each) and 2.5 and 2.4 s to its last,
+  and opened again 263, 143 and 171, 134 ms and 1.3, 1.3 and 1.0, 0.9 s; the 47-message chat, not read ahead, 457 ms (13 calls) and 1.5 s, and opened
+  again 85 and 102 ms and 0.42 s. The numbers do not differ from those above beyond what the emulator's noise (about 100 ms) allows.
+- **A review of the change** (a separate code review, read-only: it built and ran nothing) found two medium issues and one cosmetic one. All were
+  confirmed against the code and fixed in this release, each with a test, and the first draft of the threat model had stated the first one wrongly:
+  1. *The words of an expired message stayed in memory until the next purge*, which only a sync, a send or a sign-in makes, although the threat model
+     said "purge, listing or erase": a listing keeps whatever record is still stored, and an expired record stays stored until a purge. Now every
+     listing drops them (`ChatEngine.forgetParsedEntries`) and so does the screen's tick (`MainActivity.expiryTick` calls
+     `ChatEngine.dropExpiredWords()` every 250 ms), so they leave memory within a quarter of a second of the deadline while the screen is open.
+  2. *A read that was under way when its message was erased could put its words into memory after the erase*: the Keystore operation had already begun,
+     so it finishes after the key is deleted. The words could not be shown (the record was gone) and a later listing would drop them, but if the erase's
+     commit had failed as well, the record would have come back with its key gone and been shown from memory until its deadline. A ticket
+     (`MessageWords.ticket`) is taken before a read begins; every removal and every clear moves it, and `put` refuses words read under an older one.
+     The words of an erased or evicted message now leave memory after its key is deleted and not before (the order was the opposite).
+  3. *An album whose pictures have other messages between them*, cut by the end of a stage, was drawn with its newer pictures only and whole one stage
+     later (a flicker, no more). A stage now takes in the older pictures of any album that has one in it, and whatever lies between.
+
+  Also found: one assertion in `MessageWordsTest` that could not fail (`before > 0`), now exact. It found **no deadlock** (`MessageWords` never calls
+  out while holding its monitor, so the only order is the store's, then its own), **nothing shown that must not be** (every check that comes before
+  decrypting comes before memory too, and an edit or a re-seal changes the sealed bytes, so a stale entry cannot match) and nothing wrong in the
+  stage loader's receipts or in the read-ahead.
+- **Tests added.** JVM (18, total **159**), `MessageWordsTest`: the record stamp, the quote, the deadline, both bounds and the accounting under 2,000
+  random steps, the grace of `retainOnly`, four threads, and the ticket (a read that began before a removal or a clear cannot keep what it read, one
+  that began after can, and only a removal or a clear moves it). Emulator (28, `ScreenFlowTest`, section "0.7.2"): words decrypted once and then from
+  memory; what the phone stores is in memory; a record that changed or was edited; an erase, an eviction to make room, a deadline, a listing, the
+  screen's tick and a purge for expired words; a record removed behind its back; a blocked contact (the marker alone, and the whole block); a closed
+  store and engine; read-ahead (what it reads, that it marks nothing read and stops when told, who is likeliest, a contact under review); a long chat
+  drawn newest first; an album drawn whole, also when its pictures are not next to each other; a refresh that is one stage; a chat opened again and one
+  read ahead drawn without a Keystore call; and a read under way when its message is erased, evicted or the engine closed. A probe
+  (`probeOpeningALongChat`, with `perfLongChat` and `perfOpenTimeline`) runs only when asked for, like the other eight. The reads under way are shown
+  with a hook (`ChatEngine.beforeWordsAreKept`, null in the app) that runs between decrypting the words and keeping them and stands for what another
+  thread does at that moment: the order of events is made to happen, not produced by two threads.
+- **Mutation checks**, each made, built, run and reverted (the three source files are byte-identical to what they were, by SHA-256). All were caught:
+
+  | change made | caught by |
+  |---|---|
+  | words always decrypted, never taken from memory | 6 tests |
+  | the stored record is not compared with the one the words came from | 1 emulator, 2 JVM |
+  | `erase` does not drop the words | 2 tests |
+  | an eviction to make room does not drop the words | 2 tests |
+  | the deadline is not checked in `words` | 1 test |
+  | the blocked-sender check is removed from `words` | 1 test |
+  | a listing does not drop the words of a record that has gone | 1 test |
+  | a listing does not drop expired words | 1 test |
+  | the screen's tick does not drop expired words | 1 test |
+  | a purge does not drop expired words | 1 test |
+  | `close()` does not empty memory | 1 test |
+  | `storeContent` does not remember the words | 2 tests |
+  | a photo, or a view-once message, may be kept | 1 test each |
+  | the ticket is not compared | 2 JVM, 3 emulator |
+  | a removal, or a clear, does not move the ticket | 3 JVM, 3 emulator (both made together) |
+  | a muted chat is not read ahead last | 2 tests |
+  | a contact under review is read ahead | 1 test |
+  | the list does not start the read-ahead | 2 tests |
+  | the stage's filter of what is not prepared yet is removed | the app crashed (a row made without its text) |
+  | a stage does not take an album's older pictures | 1 test |
+  | it takes them only when they are next to each other (the old rule) | 1 test, which counted 13 rows where 18 are right |
+  | what is drawn already counts as work to do (a receipt is not one stage) | 1 test |
+- **The full emulator suite, twice.** On the dedicated emulator, wiped and started afresh for this work (error dialogs turned off, airplane mode on,
+  the Play store disabled), with the QA build made from the sources being released. **Run 1** (before the review's fixes), 426 tests in 23 minutes: 2
+  failed, 12 were skipped. **Run 2, on the final build, 433 tests in 21 minutes: 1 failed and 12 were skipped; every test that is not skipped passed
+  except `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`**, which is known and unchanged since 0.6.3 (a UiAutomator wait for a pop-up menu
+  entry; it fails the same way on the 0.7.1 build). The skips are nine speed probes and `storeListingScreenshots` (each asks for an option),
+  `vaultRejectsMissingDeviceCredentials` (needs a phone without a screen lock) and the signed-release test against the live relay. The other failure
+  of run 1 was `blockUserFromTheSwipeAsksFirstAndTakesTheMuteAndTheContactWithIt`: after the block was confirmed, the screen did not reach the
+  expected state in 15 s. **Its cause was not found**: the emulator's log had rolled over by the time it was noticed. It passed in all three runs
+  alone (together with the same gesture for "remove contact"), and in run 2, and it had passed in the 0.7.1 run; the 0.7.1 run's other eleven
+  failures were of this kind (a plain wait for something on the screen while the emulator slows), several of them gestures on the same list
+  (`touchingAnotherRowPutsTheOpenOneBackWithoutOpeningThatOneAndOnlyOneIsOpen`, `scrollingTheListPutsAnOpenRowBack`). Nothing in the code of the block
+  was changed by this release; what it calls, `erase` and the eviction of the blocked contact's messages, now also drop the words of what they
+  remove, and both are exercised by the tests above and by the rest of the suite. This is a judgement and not a finding: a second run that failed
+  on it again would have meant looking harder. `composerRemainsAccessibleWithKeyboardAndExpiryRemovesVisibleContent`, which failed on every
+  run of the 0.7.1 suite, passed in both runs of this one; why was not looked into.
+- **Release gate** (`scripts\verify.ps1 -Android`, run on the final sources; what was changed after it is documentation). JVM: client-core 38 tests and
+  the relay 114 (2 skipped: the live-relay tests), build successful (the one "ERROR" line in the log is a relay test that makes a migration fail on
+  purpose). Android: `:crypto:test` (up to date), `:app:testDebugUnitTest` **159 tests, 0 failures**, `lintDebug` **0 errors, 18 warnings** (the same
+  eighteen as 0.7.1: `SetTextI18n` 8, `UnusedResources` 6, and one each of `InlinedApi`, `MonochromeLauncherIcon`, `ObsoleteSdkInt` and
+  `ViewConstructor`); then the Google release-configuration tests (21), the over-the-air settings tests (25), the admin identity tests (15) and the
+  checks of the committed signed settings file and admin certificate: all passed. **The signed settings file expires on 2026-12-01 at 06:28 UTC (11.4
+  days from the run) and has to be renewed before then.**
+- **What this does not show.** Everything was measured on one emulator with a software-backed Keystore, in the QA build (debuggable, not minified), with made-up
+  messages. No physical phone, no hardware-backed Keystore or StrongBox (a Keystore call costs more there, so memory should gain more; not measured), no
+  Google Play install. The battery and heat cost of reading ahead (at most 28 Keystore calls each time the list is drawn, not more often than every
+  three seconds) was not measured. The cost of running the code for the first time after the app starts (100 to 300 ms on the first chat opened) is not
+  removed, the rest of a chat's window still decrypts in the background after its first screen (2.5 to 3.2 s here), and a chat that was neither read ahead
+  nor opened before still decrypts its first screen (13 calls, about 0.5 s here). The change to the first stage's thread priority was not measured on its
+  own (the emulator's cores are all alike). The words in memory are Java strings that the app cannot overwrite, as the text in the chat's views already was.
+
 ## Release 0.7.1 / A faster protected store and photos that arrive together (2026-11-19)
 
 Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#a-faster-protected-store-and-photos-fetched-together-071) and

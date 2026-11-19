@@ -142,6 +142,12 @@ Individual content records are additionally encrypted with separate Keystore
 keys (still record version 3). Expiry/read deletes that key before deleting the encrypted record, so an
 older vault-file copy does not retain the local content key. Deletion of flash
 blocks, secure-element internals and earlier ratchet snapshots is not proven.
+Since 0.7.2 the words of messages read lately are also held in memory, so that a chat
+does not ask the Keystore for every message each time it is opened: memory only, at
+most 320 messages, checked against the sealed record on every use, never given back at
+or after the message's deadline, never kept for a photo or a view-once message, and
+dropped at its deadline, when the record goes and when the engine closes. See the
+[threat model](THREAT-MODEL.md#the-words-of-messages-kept-in-memory-and-a-chat-that-opens-at-once-072).
 
 New vault and content keys use `setUserAuthenticationRequired(false)` and
 set `setUnlockedDeviceRequired(true)` only when generated on Android 15 or later.

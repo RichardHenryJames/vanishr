@@ -147,9 +147,21 @@ public final class MainActivity extends AppCompatActivity {
     private volatile int conversationGeneration;
     private boolean messageRefreshQueued;
     private boolean messageRefreshRequested;
-    // A chat shows its newest messages first and fills in the rest in the background; text is decrypted in small batches so a long
-    // history never keeps the newest messages waiting. Older ones beyond the first page are loaded when the user scrolls up to them.
-    private static final int FIRST_BATCH = 16, NEXT_BATCH = 16, HISTORY_PAGE = 100;
+    // A chat shows its newest messages first and fills in the rest in the background; text is read in small batches so a long
+    // history never keeps the newest messages waiting, and nothing older than what has been read is drawn before its turn. Older ones
+    // beyond the first page are loaded when the user scrolls up to them. The first batch is about what the screen holds; the later ones
+    // are drawn a moment apart, so that frames are drawn and touches answered in between.
+    private static final int FIRST_BATCH = 14, NEXT_BATCH = 12, HISTORY_PAGE = 100;
+    // How long the next stage waits once the one before it is on the screen; a test makes it long to look at one stage on its own.
+    static volatile long stagePauseMillis = 24;
+    // How many stages have been drawn; a test uses it to show that a refresh that has nothing new to read is one stage and not several.
+    private int stagesApplied;
+    // While the chat list is on the screen, the newest messages of the chats most likely to be opened next are read into memory.
+    private static final int READ_AHEAD_CHATS = 2, READ_AHEAD_MESSAGES = 14;
+    private static final long READ_AHEAD_PAUSE_MILLIS = 3_000;
+    private boolean readAheadQueued;
+    private long readAheadAt;
+    private ChatEngine readAheadFor;
     private int historyLimit = HISTORY_PAGE;
     private boolean historyMore;
     // Scrolls to the bottom that have been queued after a stage was applied but have not run yet. A stage that is applied while one is
@@ -192,15 +204,15 @@ public final class MainActivity extends AppCompatActivity {
         final int limit;
         final Map<UUID, ChatEngine.Entry> known = new HashMap<>();
         final java.util.List<ChatEngine.Entry> entries = new ArrayList<>();
-        final java.util.ArrayDeque<ChatEngine.Entry> waiting = new java.util.ArrayDeque<>();
-        final Set<UUID> unresolved = new HashSet<>();
+        // The entries that are not drawn yet, as positions in the list of entries, newest first, and taken a few at a time: the older ones,
+        // apart from the rows that are drawn already, wait for their turn.
+        final java.util.ArrayDeque<Integer> pending = new java.util.ArrayDeque<>();
         final Set<UUID> skipped = new HashSet<>();
         final Map<UUID, ChatEngine.Entry> resolved = new HashMap<>();
         final Map<UUID, String> senders = new HashMap<>();
-        // Photos drawn as pictures are read as soon as the chat is, like text; this is whether they are drawn, and which are to be marked.
+        // Photos drawn as pictures are read as soon as their stage is, like text; this is whether they are drawn at all.
         // A photo is not decrypted for the list, except a reply: whom it quotes is words, and words are read from the sealed message.
         boolean photosShown;
-        final java.util.List<ChatEngine.Entry> photoReceipts = new ArrayList<>();
         boolean first = true;
         int hidden;
         MessageLoad(ChatEngine engine, int generation, ChatEngine.Peer peer, int limit) {
@@ -393,6 +405,9 @@ public final class MainActivity extends AppCompatActivity {
             resumeAfterPhoneUnlock();
             refreshProfileAvatars();
             refreshContactStatus();
+            // The words of a message that has expired leave memory with its row, not at the next sync.
+            ChatEngine reading = engine;
+            if (reading != null) reading.dropExpiredWords();
             if (!reactionChoices.isEmpty()) {
                 long now = System.currentTimeMillis();
                 reactionChoices.values().removeIf(choice -> choice.deadline() <= now);
@@ -1202,6 +1217,7 @@ public final class MainActivity extends AppCompatActivity {
             updateContacts(ChatListContents.read(engine), engine.unreadCounts());
             renderNotice();
             homeStatus();
+            readAhead();
             return;
         }
         homeOwner = engine.account().userId();
@@ -1261,7 +1277,34 @@ public final class MainActivity extends AppCompatActivity {
             @Override public void afterTextChanged(Editable value) { }
         });
         homeStatus();
+        readAhead();
     }
+
+    // While the chat list is on the screen, the newest messages of the chats that are likeliest to be opened next (those with unread
+    // messages, then the most recently active) are read into memory, so that opening one does not wait for the Keystore for each of
+    // them. It runs on the reader lane, one chat at a time, stops the moment a chat is opened or the app leaves the screen, marks nothing
+    // read and draws nothing, and what it read goes with the engine like everything else in memory.
+    private void readAhead() {
+        ChatEngine current = engine;
+        if (current == null || !resumed || selectedPeer != null) return;
+        long now = android.os.SystemClock.elapsedRealtime();
+        // Not again at once for the same engine (the list is drawn again for many reasons); a new engine starts afresh.
+        if (current == readAheadFor && (readAheadQueued || now - readAheadAt < READ_AHEAD_PAUSE_MILLIS)) return;
+        readAheadQueued = true; readAheadAt = now; readAheadFor = current;
+        onReader(() -> readAheadStep(current, null, 0));
+    }
+
+    private void readAheadStep(ChatEngine current, java.util.List<UUID> chats, int index) {
+        try {
+            if (!resumed || engine != current || selectedPeer != null) { readAheadDone(current); return; }
+            java.util.List<UUID> order = chats == null ? current.likelyNext(READ_AHEAD_CHATS) : chats;
+            if (index >= order.size()) { readAheadDone(current); return; }
+            current.readAhead(order.get(index), READ_AHEAD_MESSAGES, () -> !resumed || engine != current || selectedPeer != null);
+            onReader(() -> readAheadStep(current, order, index + 1));
+        } catch (RuntimeException unavailable) { readAheadDone(current); }
+    }
+
+    private void readAheadDone(ChatEngine current) { ui.post(() -> { if (readAheadFor == current) readAheadQueued = false; }); }
 
     private void clearHome() {
         if (homeLayout == null) return;
@@ -2377,7 +2420,7 @@ public final class MainActivity extends AppCompatActivity {
         onReader(() -> listMessages(load));
     }
 
-    // Reader lane: list the conversation once, then decrypt and show it a few messages at a time, newest first.
+    // Reader lane: list the conversation once, then read and show it a few messages at a time, newest first.
     private void listMessages(MessageLoad load) {
         try {
             if (!conversationCurrent(load.engine, load.generation)) return;
@@ -2399,70 +2442,103 @@ public final class MainActivity extends AppCompatActivity {
                 }
                 load.senders.put(entry.id(), senderName);
             }
+            // What is already drawn stays as it is; what is not is prepared newest first, a stage at a time.
             for (int index = load.entries.size() - 1; index >= 0; index--) {
                 ChatEngine.Entry entry = load.entries.get(index);
-                boolean known = sameMessage(entry, load.known.get(entry.id()));
-                if (entry.image() && !known && load.photosShown && entry.expiry() != ChatEnvelope.Expiry.VIEW_ONCE && !entry.outgoing() && !entry.state().equals("READ"))
-                    load.photoReceipts.add(entry);
-                if (known || entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE) continue;
-                // A photo is read for the list only when it is a reply drawn as a picture, to show what it quotes.
-                if (entry.image() && !(load.photosShown && entry.photo() != null && entry.photo().quotes())) continue;
-                load.waiting.add(entry); load.unresolved.add(entry.id());
+                if (!sameMessage(entry, load.known.get(entry.id()))) load.pending.add(index);
             }
             loadStage(load);
         } catch (Exception failure) { messagesFailed(load, failure); }
     }
 
-    // One batch: decrypt, record the receipts, show it. The next batch is queued behind whatever else the reader lane has to do,
-    // so presence and avatar reads are never held up by a long history.
+    // One stage: read the next messages that are not drawn yet, newest first (their words come from memory when they are there), record
+    // the receipts, show them with everything newer and every row that is drawn already. The next stage is asked for once this one is on
+    // the screen, behind whatever else the reader lane has to do, so presence and avatar reads are never held up by a long history.
     private void loadStage(MessageLoad load) {
         Map<UUID, String> text = new HashMap<>();
         Map<UUID, ChatEnvelope.Reference> references = new HashMap<>();
+        boolean first = load.first;
+        // Whoever opened the chat is waiting for its first stage, so it is not run at the background priority of the lane; the stages that
+        // nobody waits for are.
+        if (first) android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT);
         try {
-            int size = load.first ? FIRST_BATCH : NEXT_BATCH;
+            int size = first ? FIRST_BATCH : NEXT_BATCH;
             load.first = false;
+            java.util.List<Integer> taken = new ArrayList<>();
+            while (taken.size() < size && !load.pending.isEmpty()) taken.add(load.pending.poll());
+            // Everything from here on is drawn; older entries only when they are drawn already. Nothing left to prepare means all of it.
+            int from = load.pending.isEmpty() || taken.isEmpty() ? 0 : taken.get(taken.size() - 1);
+            // An album is drawn whole or not at all, so the older pictures of an album that has one in this stage come into it as well,
+            // and with them whatever lies between (it is drawn, so it has to be read). Those may bring in the pictures of another album.
+            for (boolean grown = true; grown && from > 0 && !load.pending.isEmpty(); ) {
+                Set<UUID> albums = new HashSet<>();
+                for (int index = from; index < load.entries.size(); index++) {
+                    ChatEnvelope.Album album = load.entries.get(index).album();
+                    if (album != null) albums.add(album.id());
+                }
+                int oldest = from;
+                for (int position : load.pending) {
+                    ChatEnvelope.Album album = load.entries.get(position).album();
+                    if (album != null && albums.contains(album.id())) oldest = Math.min(oldest, position);
+                }
+                grown = oldest < from;
+                while (!load.pending.isEmpty() && load.pending.peekFirst() >= oldest) taken.add(load.pending.poll());
+                from = oldest;
+            }
             java.util.List<ChatEngine.Entry> receipts = new ArrayList<>();
-            // The photos drawn as pictures are read with the chat, in the same commit as the text.
-            for (ChatEngine.Entry photo : load.photoReceipts) { receipts.add(photo); load.resolved.put(photo.id(), photo.withState("READ")); }
-            load.photoReceipts.clear();
-            for (int taken = 0; taken < size && !load.waiting.isEmpty(); taken++) {
-                ChatEngine.Entry entry = load.waiting.poll();
+            for (int position : taken) {
+                ChatEngine.Entry entry = load.entries.get(position);
                 if (!conversationCurrent(load.engine, load.generation)) { text.clear(); return; }
+                // A photo that is drawn as a picture is read with the chat, in the same commit as the text.
+                if (entry.image() && load.photosShown && entry.expiry() != ChatEnvelope.Expiry.VIEW_ONCE && !entry.outgoing() && !entry.state().equals("READ")) {
+                    receipts.add(entry); load.resolved.put(entry.id(), entry.withState("READ"));
+                }
+                if (entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE) continue;
+                // A photo is read for the list only when it is a reply drawn as a picture, to show what it quotes.
+                if (entry.image() && !(load.photosShown && entry.photo() != null && entry.photo().quotes())) continue;
                 try {
-                    ChatEngine.Content content = load.engine.content(entry, false, false);
-                    try {
-                        // A photo is read only for what it quotes; its picture is not wanted here and is wiped at once.
-                        if (!entry.image()) text.put(entry.id(), content.envelope().text());
-                        if (content.envelope().reference() != null) references.put(entry.id(), quotedAuthor(load.engine, entry, content.envelope().reference()));
-                    } finally { if (content.image() != null) Arrays.fill(content.image(), (byte) 0); }
+                    ChatEnvelope.Reference reference;
+                    if (entry.image()) {
+                        // Its picture is not wanted here and is wiped at once.
+                        ChatEngine.Content content = load.engine.content(entry, false, false);
+                        try { reference = content.envelope().reference(); }
+                        finally { if (content.image() != null) Arrays.fill(content.image(), (byte) 0); }
+                    } else {
+                        MessageWords.Words words = load.engine.words(entry);
+                        text.put(entry.id(), words.text());
+                        reference = words.reference();
+                    }
+                    if (reference != null) references.put(entry.id(), quotedAuthor(load.engine, entry, reference));
                 }
                 catch (Exception failure) {
                     // Cleared, forgotten, blocked or expired meanwhile: nothing left to show, so it is not a failure.
                     if (entry.expiresAt() <= System.currentTimeMillis() || vanished(load.engine, load.generation, entry.id())) {
-                        load.unresolved.remove(entry.id()); load.skipped.add(entry.id()); continue;
+                        text.remove(entry.id()); load.skipped.add(entry.id()); continue;
                     }
                     throw failure;
                 }
-                load.unresolved.remove(entry.id());
                 if (!entry.outgoing() && !entry.image()) {
                     if (!entry.state().equals("READ")) receipts.add(entry);
                     load.resolved.put(entry.id(), entry.withState("READ"));
                 }
             }
             if (!conversationCurrent(load.engine, load.generation)) { text.clear(); return; }
-            // One durable commit for everything this batch made visible, not one encrypted write per message.
+            // One durable commit for everything this stage made visible, not one encrypted write per message.
             load.engine.markRead(receipts);
-            java.util.List<ChatEngine.Entry> visible = new ArrayList<>(load.entries.size());
-            for (ChatEngine.Entry entry : load.entries) {
-                if (load.unresolved.contains(entry.id()) || load.skipped.contains(entry.id())) continue;
+            java.util.List<ChatEngine.Entry> visible = new ArrayList<>(load.entries.size() - from);
+            for (int index = 0; index < load.entries.size(); index++) {
+                ChatEngine.Entry entry = load.entries.get(index);
+                if (load.skipped.contains(entry.id())) continue;
+                if (index < from && !sameMessage(entry, load.known.get(entry.id()))) continue;
                 visible.add(load.resolved.getOrDefault(entry.id(), entry));
             }
-            boolean last = load.waiting.isEmpty();
+            boolean last = load.pending.isEmpty();
             ui.post(() -> {
                 try {
                     if (!conversationCurrent(load.engine, load.generation)) return;
                     if (last) messageRefreshQueued = false;
                     applyMessages(load.peer, visible, text, load.senders, references);
+                    stagesApplied++;
                     historyMore = load.hidden > 0;
                     if (last) continueQuoteJump(load.peer);
                     if (last && messageRefreshRequested) refreshMessages(load.peer);
@@ -2473,9 +2549,11 @@ public final class MainActivity extends AppCompatActivity {
                         scroll.post(() -> { if (messageScroll == scroll && scroll.getScrollY() < dp(900)) loadOlderMessages(load.peer); });
                     }
                 } finally { text.clear(); }
+                // The next stage waits until this one is on the screen and a few frames have been drawn.
+                if (!last) ui.postDelayed(() -> { if (conversationCurrent(load.engine, load.generation)) onReader(() -> loadStage(load)); }, stagePauseMillis);
             });
-            if (!last) onReader(() -> loadStage(load));
         } catch (Exception failure) { text.clear(); messagesFailed(load, failure); }
+        finally { if (first) android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND); }
     }
 
     // A reply from an earlier app does not say who wrote what it quotes. While the quoted message is still here, its own record does:
@@ -4972,6 +5050,7 @@ public final class MainActivity extends AppCompatActivity {
         messageScroll = null; shownEntries = java.util.List.of(); actionError = null;
         connection = null;
         ChatEngine closing = engine; engine = null;
+        readAheadFor = null; readAheadQueued = false;
         if (closing != null) { closing.cancelPendingRequests(); work.execute(closing::close); }
         storageError = null; phoneSecurityRequired = false; waitingForPhoneUnlock = false;
         storageState();
