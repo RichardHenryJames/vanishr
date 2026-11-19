@@ -431,10 +431,12 @@ final class GroupChat {
                 if (yield.getAsBoolean()) return false;
                 Message[] incoming=api().call("GET",path(snapshot.id())+"/messages",null,Message[].class);
                 if (incoming==null || incoming.length>32) throw new SecurityException("Invalid group inbox");
-                for (Message message : incoming) {
-                    if (yield.getAsBoolean()) return false;
-                    receive(snapshot,message);
-                    received.accept(snapshot.id());
+                try (MediaPrefetch media=prefetchMedia(snapshot,incoming)) {
+                    for (Message message : incoming) {
+                        if (yield.getAsBoolean()) return false;
+                        receive(snapshot,message,media);
+                        received.accept(snapshot.id());
+                    }
                 }
                 if (!flushAcks(snapshot.id(),yield) || yield.getAsBoolean()) return false;
                 Status[] statuses=api().call("GET",path(snapshot.id())+"/status",null,Status[].class);
@@ -526,7 +528,36 @@ final class GroupChat {
         return true;
     }
 
-    private void receive(Snapshot current,Message message) throws Exception {
+    /**
+     * Starts fetching the pictures of the group messages that {@link #receive} will certainly fetch (see ChatEngine.prefetchMedia): only
+     * those that pass its checks before the fetch, made here without side effects.
+     */
+    private MediaPrefetch prefetchMedia(Snapshot current,Message[] incoming) {
+        MediaPrefetch media=new MediaPrefetch();
+        RelayApi relay=api();
+        for (Message message : incoming) {
+            if (message.mediaId()!=null && fetchesItsPicture(current,message))
+                media.expect(message.mediaId(),() -> relay.groupMediaBesideOthers(message.groupId(),message.id()));
+        }
+        media.start();
+        return media;
+    }
+
+    private boolean fetchesItsPicture(Snapshot current,Message message) {
+        long now=System.currentTimeMillis();
+        if (message.id()==null || message.expiresAt()<=now || message.expiresAt()>now+86_400_000L || marked("seen/"+message.id())) return false;
+        if (!current.id().equals(message.groupId()) || engine.safety().isBlocked(message.senderId())) return false;
+        Approval approval=approval(message.groupId(),message.epoch());
+        if (approval==null || approval.roster().revision()!=message.revision()) return false;
+        GroupRoster.Member sender;
+        try { sender=approval.roster().member(message.senderId()); }
+        catch (RuntimeException unknown) { return false; }
+        if (!sender.deviceId().equals(message.senderDeviceId()) || !approval.roster().member(user()).deviceId().equals(engine.account().deviceId())) return false;
+        if (engine.onboarding().retired(sender.userId(),new ChatEngine.Contact(sender.userId(),sender.deviceId(),sender.identityKey()))) return false;
+        return vault.get("group-key/"+epochKey(message.groupId(),message.epoch())+"/"+sender.userId())!=null;
+    }
+
+    private void receive(Snapshot current,Message message,MediaPrefetch media) throws Exception {
         boolean blocked=engine.safety().isBlocked(message.senderId());
         if (message.expiresAt()<=System.currentTimeMillis() || marked("seen/"+message.id())) return;
         if (!current.id().equals(message.groupId())) throw new SecurityException("Group routing changed");
@@ -549,7 +580,7 @@ final class GroupChat {
             return;
         }
         if (!blocked && !engine.makeRoom(0)) return;
-        byte[] imageCiphertext=blocked || message.mediaId()==null ? null : api().groupMedia(message.groupId(),message.id());
+        byte[] imageCiphertext=blocked || message.mediaId()==null ? null : media.take(message.mediaId(),() -> api().groupMedia(message.groupId(),message.id()));
         if (imageCiphertext!=null && !engine.makeRoom(imageCiphertext.length*2L)) return;
         try {
             vault.transaction(() -> {

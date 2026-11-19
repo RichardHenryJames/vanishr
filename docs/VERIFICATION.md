@@ -1,24 +1,121 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-11-15 UTC. This is a development foundation,
+Evidence refreshed on Windows, 2026-11-19 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
-## Unreleased Android responsiveness changes (2026-11-18)
+## Release 0.7.1 / A faster protected store and photos that arrive together (2026-11-19)
 
-- Gradle passed `:app:testDebugUnitTest` (120 tests), `:crypto:test` (38 tests),
-  `:app:lintDebug`, `:app:assembleQa` and `:app:assembleQaAndroidTest`.
-- The QA APK contains the repeating wallpaper vector at 775 compressed bytes
-  (1,668 bytes unpacked). Its shared decoded tile uses 81 KiB.
-- The QA APK installed and launched on the isolated Android 16 emulator.
-  All 16 focused instrumentation tests passed. They cover the launch layout,
-  Back preserving list scroll and unread counts while the work lane is held,
-  reaction feedback before a commit and rollback when blocked by the network,
-  wallpaper size and reuse, chat text while photo previews are held, reuse of
-  prepared photos, album paging and settings, avatar cleanup, and receipt
-  batching, interruption and preservation in direct and group chats.
-- The tests use synthetic messages and a synthetic relay. They do not measure
-  physical-phone startup or delivery latency on a live network. No Google Play
-  build was published.
+Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#a-faster-protected-store-and-photos-fetched-together-071) and
+[ARCHITECTURE.md](ARCHITECTURE.md#client-threading-and-the-open-vault). The owner installed 0.7.0 from Google Play and found the app slow: going
+back from a chat to the list, sending a reaction, and a start that showed "loading chat" as text. They asked for a very light WhatsApp-style
+chat wallpaper and for a startup screen with the logo and a progress bar, had begun the work themselves in commit `774eaca` ("Improve Vanishr
+Android responsiveness and startup", pulled and checked here), and then asked why several photos take long to appear on the receiving side and
+whether the pictures are compressed the way a fast messenger's are. This release is that commit plus what measuring it showed. **No relay change,
+no new permission, nothing new on the wire.** Version 0.7.1 / code 53 in `build.gradle`.
+
+- **What the owner's commit did, measured alone** (`774eaca` built on its own, dedicated emulator, a 4 MB store): going back from a chat to the
+  list takes about 50 ms (the list is reattached, not rebuilt), opening a chat 350 to 600 ms to its first rows, and the pill of a reaction is
+  on the screen 25 to 75 ms after the tap. All as intended. What was still slow was the save behind it: with a 4 MB store a reaction took
+  **2.8 to 3.0 s** to be saved (1.2 s of which is a hold the probe puts on the worker, as a running sync would), and the whole store is saved
+  for every message, receipt and reaction. The cause is the store's encryption, not the screens.
+- **Cause.** The store is one file written whole at every commit, and until 0.7.0 a hardware-backed Keystore key encrypted all of it. A Keystore
+  call moves its data in small pieces: about 250 ms for each megabyte on the emulator, for every commit and again for opening the store.
+  Measured on the emulator (median of five commits; the store padded with records the app never reads):
+
+  | store size | commit before | opening before | commit after | opening after |
+  |---|---|---|---|---|
+  | 0 KB | 27 ms | 36 ms | 10 ms | 24 ms |
+  | 1.2 MB | 267 ms | 360 ms | 29 ms | 41 ms |
+  | 4.2 MB | 1,030 ms | 978 ms | 40 ms | 66 ms |
+  | 8.2 MB | 2,201 ms | 2,070 ms | 73 ms | 87 ms |
+
+  The Keystore's own cost was also measured on its own: sealing 4 MB took about 1 s there and about 6 ms with AES-GCM in the process; a
+  Keystore call on 32 bytes about 12 ms, making a key about 17 ms, sealing 300 KB about 30 ms.
+- **Changed: the store file (version 4).** `VaultEnvelope` (new) and `AndroidVault`: the file is encrypted in the app with AES-256-GCM under a
+  random 256-bit data key; only that key is wrapped by the same Keystore key as before (the wrapped key is the file's header; the header and a
+  context naming the file are authenticated data). A new data key is made at the first commit of each opening and overwritten when the vault
+  closes. `unlock()` reads versions 1 to 3 as before and writes version 4 at once (versions 1 and 2 delete their old keys only after that write; a
+  version 3 store that cannot be written still opens). `persist()` still checks that the phone is unlocked on every commit. Per-message
+  content keys, the 32 MB limit and the whole-file commit are unchanged. An older build cannot read the new file (it fails closed).
+- **Changed: pictures of one sync are fetched together.** `MediaPrefetch` (new), `RelayApi.downloadBesideOthers` and `groupMediaBesideOthers`,
+  `ChatEngine.prefetchMedia` and `GroupChat.prefetchMedia`: up to three downloads run ahead of the message being handled, in message order;
+  each message is still checked, decrypted and stored one at a time on the sync thread; an early download starts only for a message that passes
+  the read-only checks made before a fetch, never renews the session, and any failure is done again the ordinary way.
+- **Measured after** (six photos of about 196 KB each, a 4.1 MB store, the stand-in relay adding 80 ms to every request; dedicated emulator):
+
+  | | before | new store format only | and pictures fetched together |
+  |---|---|---|---|
+  | receive: first photo shown / sixth / all done | 2.4 s / 12.2 s / **18.8 s** | 0.56 s / 1.76 s / 3.05 s | 0.61 s / **1.25 s** / **2.53 s** |
+  | send: time for six | **20.7 s** (3.5 s a photo) | **3.7 s** (0.6 s a photo) | (send unchanged) |
+
+  With 200 ms on every request, the sixth photo was shown after 1.63 s and the last step finished at 4.24 s. The number of commits is the
+  same (9 to receive six photos, 12 to send them). A reaction with the same 4 MB store: the pill after 31 to 74 ms in both, saved after
+  1.27 to 1.30 s (the 1.2 s hold included) instead of 2.83 to 2.99 s, that is about 80 ms of work instead of about 1.7 s.
+- **Cold start, measured and not changed.** `am start -W` on the emulator, QA builds, six to ten cold starts each (median `TotalTime`): the
+  commit before the owner's work 3,065 ms, the owner's commit 3,158 ms, this release 3,120 to 3,241 ms. Nothing here moves the time to the first
+  frame beyond the noise of about 100 ms; what changed is what the first frame is (the logo and a progress bar). An attempt to move the start
+  of WorkManager off the main thread gave about 40 ms, inside that noise, and was not kept. On a phone the times will differ.
+- **Compression, unchanged and not the cause.** `SafeImages.importImage` halves a photo in whole steps until both sides are at most 1,600 px,
+  then JPEG at quality 80, at most 2 MiB (a 12-megapixel photo becomes 1,000 x 750, an 8-megapixel one 816 x 612). A 196 KB photo is already
+  small, and the six that took 18.8 s did so because of the store and the one-at-a-time downloads, not their size. They are smaller in pixels
+  than other messengers' (about 1,600 on the long side); changing the size or the format was left to the owner.
+- **Review.** An automated code-review agent read the store-format and prefetch changes (reading only; it did not build or run anything) and
+  found four things. (1) A version 3 store failed to open if its rewrite failed (a full phone), where 0.7.0 opened it: now only versions 1 and 2
+  need the rewrite; two tests. (2) The buffer the store is written into could grow and leave an unwiped copy of the whole store: it is now made
+  as big as the store (a test compares its size with the file's) and a growth would wipe what it leaves. (3) An early download can be made for a
+  message that `receive` then does not fetch (a phone full of unread messages, an interrupted sync, a sender blocked a moment later): bounded at
+  three pictures a pass and written down, not changed. (4) The Keystore's unlocked-device requirement on Android 15 and later now covers the first
+  commit of an opening and not each one; the app's own check covers the rest. Written down in the threat model and `ENCRYPTION.md`; adding one
+  32-byte Keystore call to each commit would restore it and keep most of the speed, but brings back a hardware-dependent delay per commit.
+- **The owner's commit and the tests.** Four tests that passed on the commit before it (`dda6168`) failed on it, and now pass: three followed the
+  screens' new structure (`profileNamePersistsAndSignOutRequiresConfirmation` looks for the toolbar by its description and not as the first child of
+  the root; `touchingTheQuoteOfAPhotoThatIsInAnAlbumGoesToTheAlbum` reads `MessageRow.item` and not `members`;
+  `anAlbumThatAnswersAMessageKeepsItsQuoteWhenAnotherPhotoOfItArrivesOrIsReactedTo` now expects the pill to change on the same album view, as the
+  commit intends, with the quote kept). The fourth, `olderMessagesBeyondTheFirstPageLoadWhenTheUserScrollsUpToThem`, found a defect: a photo whose
+  size the sender did not say (the pictures of apps before 0.7.0, and the test's fixture) takes its real shape when it is decoded, and when that
+  happened above the screen the messages being read moved by up to a picture's height. The commit moved the decoding to its own lane, which is
+  when this showed; why it did not show on the commit before was not established. `adaptTile` now keeps the message at the top of the screen
+  where it is, as `applyMessages` does (a test that gives a photo above the screen another shape directly, which fails with the fix removed,
+  and the old test, which does too). One lint warning that the
+  commit added (`getDrawable`) is fixed too (`AppCompatResources`).
+- **Mutations.** The checks that keep an early download from a blocked sender: with the group's check removed `AccountSafetyTest` fails ("not
+  requested, not even early"). In a direct chat the conditions overlap: the test still passed with only the blocked condition removed, and with
+  the verified condition removed too (the saved-contact check also excluded the sender), and failed, with three pictures asked for, once all
+  three were removed. The compensation in `adaptTile` switched off fails both scroll tests (offset 120 instead of 173; 301 instead of -130).
+  All restored (a search for leftovers found none).
+- **Tests added.** JVM (21, total **141**): `VaultEnvelopeTest` 13 (round trip, every changed or cut byte, wrong context, wrong wrapped key, header
+  and length checks, a new nonce each time), `MediaPrefetchTest` 8 (order, the limit of three, failure falls back, close drops). Emulator
+  (`ScreenFlowTest`, `AccountSafetyTest`): the store (10: a 0.7.0 store opens and is rewritten in the new format; a commit makes no Keystore
+  call after the first of an opening; the file shows nothing of its contents; a changed or cut file fails closed and is left as it was; each
+  opening makes a new data key; the new format does not open without its Keystore key and is not reset; a 4 MB commit and opening each under
+  half a second; a version 3 store still opens when it cannot be written, and a version 2 one does not; the buffer is as big as the store),
+  the pictures (5: fetched two to three at a time and each stored byte for byte; an early failure is fetched again and the album arrives; a
+  picture that cannot be had is the relay's own 404; a message already received is not fetched again; a blocked sender's pictures are not
+  asked for) and the screen (1: a photo taking its shape above the screen). `AccountSafetyTest` goes through the early-fetch decision for its
+  blocked group message. Eight speed probes are in `ScreenFlowTest` and run only when asked for (`-e perfProbe 1`).
+- **The full emulator suite on the final build: 404 tests, 380 passed, 11 skipped, 13 failed in the one run; the 13 are explained below, and no single
+  run was clean.** The run took 22 minutes on the dedicated emulator, wiped and started afresh, with the build that is released (APK built after the
+  last source edit). The skips are the eight speed probes and `storeListingScreenshots` (each asks for an option), `vaultRejectsMissingDeviceCredentials`
+  (needs a phone without a screen lock) and the signed-release test against the live relay. Two failures are known and fail the same way every time:
+  `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount` (unchanged since 0.6.3) and
+  `composerRemainsAccessibleWithKeyboardAndExpiryRemovesVisibleContent` (the message it waits for has four seconds to live and the test does not
+  see it drawn; it fails the same way on `dda6168`, the commit before the owner's work, built and run apart on the dedicated emulator). The other
+  eleven failed from 09:33 on, ten of them in the five minutes after the second known failure, each one a plain wait for something on the screen,
+  while the emulator was slowing down (slow frames of 0.7 to 1.4 s and skipped-frame warnings in its log, a load average of 4.4 over five minutes and
+  5.0 over fifteen on its four cores): `withARealKeyboardUpTheEmojiButtonSwapsItForThePanelAndBackAndTheTwoAreNeverThereTogether`,
+  `readableUsernameCanBeFoundFromTheAddContactDialog`,
+  `notificationShadeTapLaunchesTheExactChatThroughItsImmutablePendingIntent`,
+  `aRealPressAndHoldAnywhereOnTheAdminsPhotoOpensTheSavePopupAndTheCrossClosesIt`, `googleFailuresRemainVisibleAfterReturningFromThePicker`,
+  `profileNamePersistsAndSignOutRequiresConfirmation`, `touchingAnotherRowPutsTheOpenOneBackWithoutOpeningThatOneAndOnlyOneIsOpen`,
+  `scrollingTheListPutsAnOpenRowBack`,
+  `aQuotedMessageOlderThanThePagesLoadedIsFoundByLoadingMoreAndAMessageOfAnotherChatLoadsNothing`,
+  `touchingTheEmptyPartOfTheListAndBackPutAnOpenRowBackAndASecondBackLeaves` and `conversationProfileEditsContactNameButNeverTheirUsername`.
+  **Run again together on an emulator wiped and started afresh, all eleven passed** (11 of 11, two minutes), and the two known ones failed
+  again (at lines 4285 and 1921). So each test that is not skipped passed on the final build except the two known ones, but only the
+  second run of the eleven shows it, and the reason they failed in the first was not found beyond that they pass alone on a calm emulator.
+  (The first attempt at this run was spoiled by the system UI's own "not
+  responding" dialog taking the focus and was thrown away; the emulator was then wiped, started afresh with error dialogs turned off, airplane mode
+  on, the Play store disabled and the background compiler run to the end before the run above.)
 
 ## Website only / New screenshots on the home page and for the store listing (2026-11-15)
 

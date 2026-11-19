@@ -125,11 +125,21 @@ server, and an offline recipient with expired/missing fallback keys still
 cannot start a new session. Message expiry remains at most 24 hours, not 30 days.
 
 Vault mutations, ratchet changes, outboxes and acknowledgement queues commit
-using an encrypted `AtomicFile` in Android's no-backup directory. A failed
+using an encrypted `AtomicFile` in Android's no-backup directory. From 0.7.1 that
+file is version 4: it is encrypted in the app with AES-256-GCM under a random
+256-bit data key, and only the data key goes through the Android Keystore, wrapped
+by the same nonexportable key that protected the whole file before. Layout:
+`4 | wrapped-key length | wrapped key (12-byte IV, the 32-byte key, 16-byte tag) |
+12-byte nonce | ciphertext and 16-byte tag`; a context naming the file and the
+header are authenticated data, so a changed header or a file moved to another name
+fails to open. A new data key is made at the first commit of each opening and its
+copy is overwritten when the vault closes. Versions 1 to 3 (encrypted whole by the
+Keystore) are read once and rewritten as version 4; an older build cannot read a
+version 4 file and fails closed. A failed
 transaction restores the prior logical state. No logs, Java serialization,
 plaintext database, device backup or token preferences are used for secrets.
 Individual content records are additionally encrypted with separate Keystore
-keys. Expiry/read deletes that key before deleting the encrypted record, so an
+keys (still record version 3). Expiry/read deletes that key before deleting the encrypted record, so an
 older vault-file copy does not retain the local content key. Deletion of flash
 blocks, secure-element internals and earlier ratchet snapshots is not proven.
 
@@ -142,7 +152,11 @@ Every storage access requires `KeyguardManager.isDeviceSecure()` and rejects
 and reads of records already decrypted in memory reuse a successful check for at most
 250 ms (0.5.9), so message text is never decrypted and nothing is committed while the
 phone is locked. On older Android this lock boundary is app-enforced, not an
-independent Keystore authorization. Keys remain nonexportable AES-256-GCM with
+independent Keystore authorization. From 0.7.1 that is also so for the commits
+after the first of an opening on every version: they do not call the Keystore, so
+on Android 15 and later its unlocked-device requirement applies when the vault is
+opened and when a data key is wrapped, and the app's own check refuses a commit
+made while the phone is locked in between. Keys remain nonexportable AES-256-GCM with
 random IVs and authenticated records. Existing keys keep their creation policy
 after OS upgrades. There is no separate app credential prompt or authentication
 timer. Android-accepted face/fingerprint unlock can open storage; the system may

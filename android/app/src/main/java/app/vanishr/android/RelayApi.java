@@ -167,6 +167,19 @@ final class RelayApi implements AutoCloseable {
 
     byte[] groupMedia(UUID group,UUID message) throws Exception { return execute(request("/groups/"+group+"/messages/"+message+"/media").get().build(),app.vanishr.crypto.ImageCipher.MAX_IMAGE_BYTES+16); }
 
+    // The same downloads for several at a time (see MediaPrefetch). They never renew the session, because renewing it uses and replaces
+    // the refresh credential and must only happen on one thread; if one of these fails for that or any other reason, the caller asks again
+    // in the ordinary way, which does renew it.
+    byte[] downloadBesideOthers(UUID id) throws Exception {
+        if (cancelled) throw new IOException("Relay connection closed");
+        return executeOnce(request("/media/" + id).get().build(), app.vanishr.crypto.ImageCipher.MAX_IMAGE_BYTES + 16);
+    }
+
+    byte[] groupMediaBesideOthers(UUID group, UUID message) throws Exception {
+        if (cancelled) throw new IOException("Relay connection closed");
+        return executeOnce(request("/groups/" + group + "/messages/" + message + "/media").get().build(), app.vanishr.crypto.ImageCipher.MAX_IMAGE_BYTES + 16);
+    }
+
     AccountBackup.Status backupUpload(byte[] ciphertext) throws Exception {
         byte[] response = execute(request("/account/backup").put(RequestBody.create(ciphertext, MediaType.get("application/octet-stream"))).build(), 4096);
         try {

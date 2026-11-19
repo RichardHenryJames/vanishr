@@ -2881,14 +2881,25 @@ public final class MainActivity extends AppCompatActivity {
         return false;
     }
 
-    // A photo whose size was not known gets the shape it really has, and the list stays where it was while that happens.
+    // A photo whose size was not known gets the shape it really has, and the list stays where it was while that happens: at the bottom, it
+    // stays at the bottom; anywhere else, the message at the top of the screen stays where it is, whether the photo is above it or not.
     private void adaptTile(PhotoTile tile, Bitmap bitmap) {
         int width = tile.getLayoutParams().width, height = AlbumLayout.singleHeight(width, bitmap.getWidth(), bitmap.getHeight());
         if (tile.getLayoutParams().height == height) return;
         ScrollView scroll = messageScroll;
         boolean atEnd = scroll != null && scroll.getChildCount() > 0 && scroll.getChildAt(0).getHeight() - scroll.getScrollY() - scroll.getHeight() < dp(100);
+        View anchor = null; int anchorOffset = 0;
+        if (scroll != null && !atEnd && messages != null) {
+            int position = scroll.getScrollY();
+            for (int index = 0; index < messages.getChildCount(); index++) {
+                View child = messages.getChildAt(index);
+                if (child.getBottom() > position && child.getTag() instanceof Long) { anchor = child; anchorOffset = child.getTop() - position; break; }
+            }
+        }
         tile.size(width, height);
+        View kept = anchor; int keptOffset = anchorOffset;
         if (atEnd) scroll.post(() -> { if (messageScroll == scroll && scroll.getChildCount() > 0) scroll.scrollTo(0, scroll.getChildAt(0).getHeight()); });
+        else if (kept != null) scroll.post(() -> { if (messageScroll == scroll && kept.getParent() == messages) scroll.scrollTo(0, kept.getTop() - keptOffset); });
     }
 
     private MessageRow messageRow(ChatEngine.Peer peer, Albums.Row item, String text, String senderName, ChatEnvelope.Reference reference) {

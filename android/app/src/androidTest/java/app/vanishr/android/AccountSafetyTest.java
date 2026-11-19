@@ -145,13 +145,25 @@ public class AccountSafetyTest {
     }
 
     private static void invoke(Object owner, String name, Class<?>[] types, Object... arguments) throws Exception {
+        call(owner, name, types, arguments);
+    }
+
+    private static Object call(Object owner, String name, Class<?>[] types, Object... arguments) throws Exception {
         Method method = owner.getClass().getDeclaredMethod(name, types);
         method.setAccessible(true);
-        try { method.invoke(owner, arguments); }
+        try { return method.invoke(owner, arguments); }
         catch (InvocationTargetException failure) {
             if (failure.getCause() instanceof Exception cause) throw cause;
             if (failure.getCause() instanceof Error cause) throw cause;
             throw failure;
+        }
+    }
+
+    // What a group sync does with one message: the early picture downloads that its checks allow, then the message itself.
+    private void receiveGroupMessage(GroupChat.Snapshot snapshot, GroupChat.Message message) throws Exception {
+        try (MediaPrefetch media = (MediaPrefetch) call(engine.groups(), "prefetchMedia",
+                new Class<?>[]{GroupChat.Snapshot.class, GroupChat.Message[].class}, snapshot, new GroupChat.Message[]{message})) {
+            invoke(engine.groups(), "receive", new Class<?>[]{GroupChat.Snapshot.class, GroupChat.Message.class, MediaPrefetch.class}, snapshot, message, media);
         }
     }
 
@@ -1069,7 +1081,7 @@ public class AccountSafetyTest {
         byte[] encrypted = sender.encrypt(RelayApi.JSON.toJson(new GroupEnvelope(1, groupId, epoch, 1, content)).getBytes(StandardCharsets.UTF_8));
         GroupChat.Message message = new GroupChat.Message(messageId, groupId, epoch, 1, peerId, peerDevice,
                 content.expiry(), content.expiresAt(), encrypted, mediaId);
-        invoke(engine.groups(), "receive", new Class<?>[]{GroupChat.Snapshot.class, GroupChat.Message.class}, snapshot, message);
+        receiveGroupMessage(snapshot, message);
         assertFalse(Arrays.equals(before, vault.get(ratchetKey)));
         assertNull(vault.get("entry/" + messageId));
         assertNull(vault.get("body/" + messageId));
@@ -1078,6 +1090,8 @@ public class AccountSafetyTest {
         assertNull(engine.notificationConversation(new ChatEngine.NotificationDestination(userId, deviceId, groupId, messageId, now + 60_000)));
         assertThrows(SecurityException.class, () -> engine.groups().invite(groupId, List.of(peer)));
         assertEquals(0, requests("/groups/" + groupId + "/invitations"));
+        assertEquals("A blocked sender's picture is not requested, not even early", 0,
+                requests.stream().filter(request -> request.url().encodedPath().endsWith("/media")).count());
         engine.safety().unblock(peerId);
         assertFalse(engine.independentlyVerified(peerId));
         UUID nextId = UUID.randomUUID();
@@ -1087,7 +1101,7 @@ public class AccountSafetyTest {
         GroupChat.Message nextMessage = new GroupChat.Message(nextId, groupId, epoch, 1, peerId, peerDevice,
                 next.expiry(), next.expiresAt(), nextEncrypted, null);
         keys.add(new ChatEngine.Entry(nextId, groupId, next.expiresAt(), next.expiry(), false, false, "DELIVERED", userId, epoch, 1, peerId));
-        invoke(engine.groups(), "receive", new Class<?>[]{GroupChat.Snapshot.class, GroupChat.Message.class}, snapshot, nextMessage);
+        receiveGroupMessage(snapshot, nextMessage);
         assertEquals(1, engine.entries(groupId).size());
     }
 

@@ -30,7 +30,13 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
     }
     static String phoneAlias(String alias) { return alias + ".phone"; }
     static String currentAlias(String alias) { return alias + ".phone.v3"; }
+    /** The version of a record that was sealed on its own (a message's content); the store's own file is {@link #VAULT_VERSION}. */
     static final byte RECORD_VERSION = 3;
+    /** The version of the store's file: encrypted in this process under a data key that the Keystore key protects (see VaultEnvelope). */
+    static final byte VAULT_VERSION = VaultEnvelope.VERSION;
+    // What the file is, authenticated with its contents; and what the wrapped data key is, authenticated with the key.
+    private static final String VAULT_CONTEXT = MASTER;
+    private static final byte[] WRAP_CONTEXT = ("vanishr.wrap.v4:" + MASTER).getBytes(StandardCharsets.UTF_8);
     static final class PhoneLockedException extends SecurityException { }
     static final class PhoneLockRequiredException extends SecurityException { }
     static final class MigrationUnlockRequiredException extends SecurityException { }
@@ -40,6 +46,11 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
     private final AtomicFile file;
     // Working state, guarded by this monitor. Writers mutate it inside a transaction.
     private Map<String, byte[]> values = new HashMap<>();
+    // The data key of the open store and the same key wrapped by the Keystore, which goes in the file's header; guarded by this monitor.
+    // A new data key is made for the first commit after the store is opened, so no key outlives one opening of the store.
+    private byte[] dataKey, wrappedKey;
+    // How often a Keystore key was used; a test uses it to show that a commit does not use one.
+    private final java.util.concurrent.atomic.AtomicLong keystoreUses = new java.util.concurrent.atomic.AtomicLong();
     // Last committed state. Readers use it without the monitor, so a slow commit never blocks them.
     private volatile Map<String, byte[]> committed = Map.of();
     // Held shared while a reader copies a value and exclusively while replaced values are wiped.
@@ -59,6 +70,9 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
 
     Context applicationContext() { return context; }
 
+    /** How many times a Keystore key was looked up since this object was made. */
+    long keystoreUses() { return keystoreUses.get(); }
+
     private static KeyStore keyStore() throws Exception {
         KeyStore store = KeyStore.getInstance("AndroidKeyStore");
         store.load(null);
@@ -67,6 +81,7 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
 
     private SecretKey key(String alias, boolean create) throws Exception {
         requirePhoneUnlocked();
+        keystoreUses.incrementAndGet();
         KeyStore store = keyStore();
         // A single lookup: asking whether the alias exists first costs a second round trip to the keystore for every key use.
         java.security.Key existing = store.getKey(alias, null);
@@ -89,6 +104,25 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
         generator.init(keyPolicy(alias, strongBox, Build.VERSION.SDK_INT));
         return generator.generateKey();
     }
+
+    // Protects the store's data key with the same Keystore key that used to encrypt the whole file. Only these 32 bytes go through the
+    // Keystore; the file itself is encrypted in this process (see VaultEnvelope for why).
+    private final VaultEnvelope.KeyWrapper keystoreWrapper = new VaultEnvelope.KeyWrapper() {
+        @Override public byte[] wrap(byte[] secret) throws Exception {
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, key(currentAlias(MASTER), true));
+            cipher.updateAAD(WRAP_CONTEXT);
+            byte[] encrypted = cipher.doFinal(secret);
+            return ByteBuffer.allocate(12 + encrypted.length).put(cipher.getIV()).put(encrypted).array();
+        }
+        @Override public byte[] unwrap(byte[] wrapped) throws Exception {
+            if (wrapped.length != 12 + VaultEnvelope.KEY_BYTES + 16) throw new SecurityException("Invalid protected record");
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.DECRYPT_MODE, key(currentAlias(MASTER), false), new GCMParameterSpec(128, wrapped, 0, 12));
+            cipher.updateAAD(WRAP_CONTEXT);
+            return cipher.doFinal(wrapped, 12, wrapped.length - 12);
+        }
+    };
 
     public byte[] seal(String alias, byte[] plaintext) throws Exception {
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
@@ -123,8 +157,16 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
         if (open) return;
         if (file.getBaseFile().exists() || new File(file.getBaseFile().getPath() + ".bak").exists()) {
             byte[] encrypted;
-            try (InputStream input = file.openRead()) { encrypted = boundedRead(input, MAX_VAULT + 29); }
-            byte[] plaintext = unseal(MASTER, encrypted);
+            try (InputStream input = file.openRead()) { encrypted = boundedRead(input, MAX_VAULT + VaultEnvelope.MAXIMUM_OVERHEAD); }
+            // Versions 1 to 3 were encrypted whole by a Keystore key; from version 4 on the file is encrypted in this process.
+            boolean current = VaultEnvelope.isEnvelope(encrypted);
+            byte[] plaintext;
+            if (current) {
+                VaultEnvelope.Opened opened = VaultEnvelope.open(keystoreWrapper, VAULT_CONTEXT, encrypted);
+                plaintext = opened.plaintext();
+                // Not kept: the first commit of this opening makes a new data key.
+                Arrays.fill(opened.dataKey(), (byte) 0);
+            } else plaintext = unseal(MASTER, encrypted);
             try (DataInputStream input = new DataInputStream(new ByteArrayInputStream(plaintext))) {
                 int count = input.readInt();
                 if (count < 0 || count > 4000) throw new SecurityException("Invalid vault size");
@@ -141,12 +183,22 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
             finally { Arrays.fill(plaintext, (byte) 0); }
             publish();
             open = true;
-            if (encrypted[0] != RECORD_VERSION) {
+            if (!current) {
+                // Versions 1 and 2 need the new file before their keys can go, so a store that cannot be written is one that does not
+                // open. A store of version 3 reads as it did without it (its next commit writes the new format), so a full phone, say, does
+                // not stop it opening; but a phone that is locked still does.
+                boolean earlier = encrypted[0] != RECORD_VERSION;
                 try {
                     persist();
-                    keyStore().deleteEntry(MASTER);
-                    keyStore().deleteEntry(phoneAlias(MASTER));
-                } catch (Exception failure) { close(); throw failure; }
+                    // The keys of versions 1 and 2 are not needed once the file is written in the new format. The key of version 3 is the
+                    // one that now protects the data key.
+                    if (earlier) {
+                        keyStore().deleteEntry(MASTER);
+                        keyStore().deleteEntry(phoneAlias(MASTER));
+                    }
+                } catch (Exception failure) {
+                    if (earlier || failure instanceof SecurityException) { close(); throw failure; }
+                }
             }
         } else {
             byte[] probe = new byte[]{0};
@@ -299,21 +351,69 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
 
     private void persist() throws Exception { persist(false); }
 
-    private void persist(boolean verifyCommit) throws Exception {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (DataOutputStream output = new DataOutputStream(bytes)) {
-            output.writeInt(values.size());
-            for (Map.Entry<String, byte[]> entry : values.entrySet()) {
-                output.writeUTF(entry.getKey());
-                output.writeInt(entry.getValue().length);
-                output.write(entry.getValue());
-                if (bytes.size() > MAX_VAULT) throw new IllegalStateException("Secure storage capacity reached");
-            }
+    // The store as bytes, kept in the buffer it was written to so that it can be sealed without another copy and then wiped. The buffer is made
+    // as big as the store, so it never needs to grow; if it ever did, the array it leaves behind is wiped and not just dropped, because it holds
+    // the whole store.
+    private static final class StoreBytes extends ByteArrayOutputStream {
+        StoreBytes(int capacity) { super(Math.max(capacity, 16)); }
+        byte[] buffer() { return buf; }
+        void wipe() { Arrays.fill(buf, (byte) 0); }
+        @Override public synchronized void write(int value) { room(1); super.write(value); }
+        @Override public synchronized void write(byte[] bytes, int offset, int length) { room(length); super.write(bytes, offset, length); }
+        private void room(int more) {
+            if (count + more <= buf.length) return;
+            byte[] grown = new byte[Math.max(count + more, buf.length + (buf.length >> 1))];
+            System.arraycopy(buf, 0, grown, 0, count);
+            Arrays.fill(buf, (byte) 0);
+            buf = grown;
         }
-        byte[] plaintext = bytes.toByteArray();
+    }
+
+    // How many bytes persist() writes for the records held now: the count, then for each record its name as DataOutputStream.writeUTF writes
+    // it, its length and its bytes. A test compares it with the size of the file.
+    synchronized int storeSize() {
+        long size = 4;
+        for (Map.Entry<String, byte[]> entry : values.entrySet()) size += 2L + utfLength(entry.getKey()) + 4 + entry.getValue().length;
+        if (size > MAX_VAULT) throw new IllegalStateException("Secure storage capacity reached");
+        return (int) size;
+    }
+
+    private static int utfLength(String text) {
+        int length = 0;
+        for (int index = 0; index < text.length(); index++) {
+            char unit = text.charAt(index);
+            length += unit >= 0x0001 && unit <= 0x007F ? 1 : unit > 0x07FF ? 3 : 2;
+        }
+        return length;
+    }
+
+    private void startDataKey() throws Exception {
+        byte[] fresh = VaultEnvelope.newDataKey();
+        try {
+            wrappedKey = keystoreWrapper.wrap(fresh);
+            dataKey = fresh;
+            fresh = null;
+        } finally { if (fresh != null) Arrays.fill(fresh, (byte) 0); }
+    }
+
+    private void persist(boolean verifyCommit) throws Exception {
+        // Writing the store checks that the phone is secure and unlocked each time, as every use of a Keystore key does.
+        requirePhoneUnlocked();
+        StoreBytes bytes = new StoreBytes(storeSize());
         byte[] encrypted;
-        try { encrypted = seal(MASTER, plaintext); }
-        finally { Arrays.fill(plaintext, (byte) 0); }
+        try {
+            try (DataOutputStream output = new DataOutputStream(bytes)) {
+                output.writeInt(values.size());
+                for (Map.Entry<String, byte[]> entry : values.entrySet()) {
+                    output.writeUTF(entry.getKey());
+                    output.writeInt(entry.getValue().length);
+                    output.write(entry.getValue());
+                    if (bytes.size() > MAX_VAULT) throw new IllegalStateException("Secure storage capacity reached");
+                }
+            }
+            if (dataKey == null) startDataKey();
+            encrypted = VaultEnvelope.seal(dataKey, wrappedKey, VAULT_CONTEXT, bytes.buffer(), bytes.size());
+        } finally { bytes.wipe(); }
         FileOutputStream output = null;
         try {
             output = file.startWrite();
@@ -322,7 +422,7 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
         } catch (Exception failure) { file.failWrite(output); throw failure; }
         if (verifyCommit) {
             try (InputStream input = file.openRead()) {
-                if (!Arrays.equals(encrypted, boundedRead(input, MAX_VAULT + 29)))
+                if (!Arrays.equals(encrypted, boundedRead(input, MAX_VAULT + VaultEnvelope.MAXIMUM_OVERHEAD)))
                     throw new IOException("Encrypted account update did not commit");
             }
         }
@@ -685,5 +785,7 @@ public final class AndroidVault implements SecureVault, AutoCloseable {
             for (byte[] value : values.values()) Arrays.fill(value, (byte) 0);
         } finally { arrays.writeLock().unlock(); }
         values.clear();
+        if (dataKey != null) Arrays.fill(dataKey, (byte) 0);
+        dataKey = null; wrappedKey = null;
     }
 }

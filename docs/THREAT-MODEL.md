@@ -742,6 +742,72 @@ between the keyboard and the panel may time differently (the app supports Androi
 relay refuses stays queued on the phone and goes on a later sync, as any group message does, which was read in the code and not run
 for an album); and whether it feels as the owner expects.
 
+## A faster protected store and photos fetched together (0.7.1)
+
+**No relay change, no new permission and nothing new on the wire.** One place was slow that no screen could hide: saving. A message, a receipt,
+a reaction and a contact are each one commit of the whole protected store, and until 0.7.0 every commit, and every opening of the store, was
+encrypted by a hardware-backed Keystore key, which takes its data in small pieces. On the test emulator that cost about a quarter of a second for
+each megabyte, so a phone holding a few megabytes of photos (the 16 MB soft limit makes that ordinary) spent seconds on a reaction, or on a photo
+that had just arrived, while the screen waited behind the save. Two changes, both on the phone:
+
+- **The store is encrypted under a data key that the Keystore wraps (store file version 4).** The file is encrypted inside the app with
+  AES-256-GCM under a random 256-bit data key. Only that key (32 bytes) goes through the Keystore: the same nonexportable key that protected the
+  file before encrypts ("wraps") it, and the wrapped key is the file's header. The header and a context that names the file are authenticated
+  together with the contents, so a changed header, a changed or cut-off file, or a file moved to another name fails to open (the storage error,
+  "Secure storage is unavailable") and is left as it was, never reset. Without the Keystore key, which cannot be exported and is deleted with
+  the account, a copy of the file cannot be read, as before.
+- **The data key lasts as long as the store is open.** A new one is made at the first commit after each opening, is held in memory only while the
+  store is open (where the store's own plaintext already is) and is overwritten when the store closes; the one found in a file that was just
+  opened is not kept. The buffer the store is written into before it is sealed is made as big as the store, so that it never has to grow, and
+  is overwritten once the file is sealed (if it ever had to grow, the array left behind is overwritten too). What the app cannot overwrite is
+  the copy of a key that the runtime's cipher keeps while it is in use.
+- **The unlocked-phone rule is the same, enforced in one more place by the app and in one less by the Keystore.** Opening the store, every commit
+  and every use of a content key still need the phone to be secure and unlocked, checked each time. What changed is who refuses the second and later
+  commits of one opening: they no longer call the Keystore, so on Android 15 and later the Keystore's own unlocked-device requirement is met when
+  the store is opened and when a new data key is wrapped, and between those the app's own check refuses a commit while the phone is locked. Code
+  running inside the app while the store is open already holds the store's plaintext and its data key, so this does not widen what a compromised
+  running app can read; it moves which check stops a write. A test shows that a commit makes no Keystore call after the first of an opening. The
+  existing test that a locked phone is refused reads and transactions once the 250 ms reuse of a successful check has ended still passes; the
+  check inside the commit itself (which never uses that reuse) was read in the code and is not proven by a test of its own.
+- **Per-message and per-photo keys are untouched.** Each message and photo still has its own Keystore key, deleted at its deadline, so expiry still
+  erases it cryptographically. Only the file's encryption changed.
+- **Upgrading and going back.** The first opening after the update reads the old file as before (versions 1 to 3, each with its own Keystore key)
+  and writes it again at once in the new format. The keys of versions 1 and 2 are deleted only after that write, as in earlier migrations, so a
+  store of those versions that cannot be written does not open; the key of version 3 stays, because it is now the one that wraps the data key. A
+  failure leaves the old file and its key. A store of version 3 (the one 0.7.0 wrote) does not need the new file to be read, so if the phone has
+  no room to write it that opening still succeeds, the file stays as it was, and the next commit writes the new format (a phone that is locked
+  still refuses, as always). **An older build cannot read a version 4 file**: it stops with the storage error and resets nothing. Google Play
+  does not put an older build over a newer one, but a sideloaded older APK would be refused the same way, so going back is not supported.
+- **Photos of one sync are fetched together.** A sync handled an album one message at a time: wait for the picture, decrypt it, store it, and only
+  then ask for the next. Now up to three downloads run ahead of the message being handled, in the order of the messages (`MediaPrefetch`), while
+  each message is still checked, decrypted and stored one at a time, on the same thread and in the same order. An early download decides
+  nothing:
+  - it starts only for a message that passes the checks the ordinary path makes before it fetches (the sender is not blocked or retired and is a
+    saved or verified contact, or a member of the approved group with its key, the device is the one known, the message was not seen and its
+    deadline is valid), so **a blocked sender's picture is not requested, not even early**; a test counts the requests;
+  - if an early download fails for any reason, the ordinary download runs afterwards on the sync thread, so the failure that is reported, and
+    what is kept and retried, are the ones that always were (tests: an early failure that still gives the whole album, and the relay's own 404);
+  - it never renews the session, because renewing replaces the refresh credential and must stay on one thread;
+  - the relay's media request only reads: the relay deletes a picture when its message is acknowledged or expires, so an early download that is
+    then dropped cannot lose a photo;
+  - at most three encrypted pictures (each at most 2 MiB) wait in memory at a time, still encrypted for their own message, and what is not taken
+    is dropped when the batch ends or the connection is cancelled;
+  - an early download can be made for nothing: the phone may be full of unread messages so that the message is not stored, a user action may
+    interrupt the sync, a sender may be blocked a moment later, or an earlier message of the batch may fail. That costs at most three pictures in
+    a pass, is not kept, and loses nothing.
+  The relay sees the same requests for the same media ids as before; only the timing differs, up to three at once instead of one after another.
+
+Unchanged: no relay change, no new logging, no plaintext cache, the per-message keys and every deadline, and fail-closed behavior for expired
+content, changed identities, failed authentication and unavailable secure storage. The store is still one file of at most 32 MB, rewritten whole
+at each commit.
+
+Not claimed: every number in [VERIFICATION.md](VERIFICATION.md#release-071--a-faster-protected-store-and-photos-that-arrive-together-2026-11-19) comes from an
+emulator with a software-backed Keystore, a stand-in relay that adds a fixed delay to each request, and a store padded to the size named. A
+phone whose Keystore is hardware-backed or StrongBox-backed is likely to gain more, and that was not measured. A commit still rewrites the whole
+file (about 40 ms for 4 MB and 73 ms for 8 MB on the emulator), so a very large store is still slower than a small one; making commits
+incremental is a larger change that was not made. Making a message's own key (about 17 ms on the emulator) and sealing with it are unchanged and
+slower on a StrongBox. No physical phone was used.
+
 ## Account erasure, blocks and safety reports
 
 Account erasure requires a fresh account-only password/Google sign-in, never a
@@ -1007,7 +1073,11 @@ app process is compromised. Android app isolation and filesystem encryption
 remain relevant, but are not equivalent to Keystore authorization. New keys on
 Android 15 and above retain unlocked-device-required, with no timed in-app
 authentication. Key authorizations are fixed at creation, including after an OS
-upgrade; the app's lock checks apply to every supported Android version.
+upgrade; the app's lock checks apply to every supported Android version. Since
+0.7.1 the Keystore requirement is met when the store is opened and when a new
+data key is wrapped (the first commit of an opening); the commits after that do
+not call the Keystore, and the app's own check refuses them while the phone is
+locked (see [the faster store](#a-faster-protected-store-and-photos-fetched-together-071)).
 
 Protected-record versions 1 and 2 migrate to version 3 keys using authenticated
 decryption and encrypted atomic writes. Active and signed-out accounts retain
@@ -1187,8 +1257,9 @@ the whole vault, and tapping the automatic admin chat queued behind the sync on 
 same worker. These are bounded now without weakening the access rules:
 
 - **Lock check.** Opening the vault and every Keystore operation (sealing, decrypting
-  message content, writing the vault) check that the phone is secure and unlocked
-  each time. Reads of the vault's records that are already decrypted in memory
+  message content) check that the phone is secure and unlocked each time, and so does
+  every write of the vault (since 0.7.1 that check is the app's own after the first write
+  of an opening, because the write no longer uses the Keystore). Reads of the vault's records that are already decrypted in memory
   (contacts, message metadata, and the Signal state and session tokens the open vault
   holds) reuse a successful check for at most 250 ms. After the phone locks, those
   reads can still succeed for up to 250 ms; message text cannot be decrypted and
@@ -1224,8 +1295,11 @@ authentication, changed identities and unavailable secure storage.
 
 Not claimed: the measurements in [VERIFICATION.md](VERIFICATION.md#release-059--startup-and-tap-responsiveness)
 come from an emulator with software-backed Keystore. A phone whose Keystore is
-hardware-backed (including StrongBox) encrypts and decrypts more slowly, and the vault
-is still re-encrypted whole on each commit; that was not measured and is not addressed.
+hardware-backed (including StrongBox) encrypts and decrypts more slowly, and until 0.7.0 the vault
+was re-encrypted whole through the Keystore on each commit; that was not measured then. 0.7.1 encrypts the file
+in the app and wraps only a data key with the Keystore
+([the faster store](#a-faster-protected-store-and-photos-fetched-together-071)), which still has not
+been measured on a hardware-backed Keystore.
 
 ### Long chats, the message limit and the keyboard (0.6.1)
 
@@ -1298,7 +1372,7 @@ Not claimed: the numbers in [VERIFICATION.md](VERIFICATION.md#release-061--long-
 are from an emulator with a software Keystore. On a phone with hardware-backed or StrongBox
 keys each Keystore operation is slower, so the first screen of a long chat is the part that
 matters, and the commit of a large vault (many photos) is still the cost this release does not
-remove.
+remove (0.7.1 removes most of it, see [the faster store](#a-faster-protected-store-and-photos-fetched-together-071)).
 
 ### Message reply, reactions, edit and delete for everyone (unreleased)
 

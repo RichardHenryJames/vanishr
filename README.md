@@ -12,6 +12,18 @@ license notices at **https://vanishr-download.vercel.app**.
 The public [update feed](https://vanishr-download.vercel.app/updates.json), not
 the latest Git version, determines which release users can download and discover.
 
+Release **0.7.1/code 53** makes the app feel faster, and what it changes is the protected store rather than the screens. On the test emulator the
+whole store file was encrypted by the Android Keystore, which takes about a quarter of a second for each megabyte, at every save and again when
+the app opened it: with 4 MB of pictures on the phone a reaction took about 3 s to be saved and an album of six photos about 19 s to arrive. The
+file (now version 4) is encrypted inside the app under a random data key that only the Keystore wraps, and the photos of one sync are fetched up
+to three at a time. Measured the same way, a save of the 4 MB store takes 40 ms instead of 1,030 ms, and six photos take 2.5 s to receive and
+3.7 s to send instead of 18.8 s and 20.7 s. The release also carries the work on start-up (the logo with a progress bar), the light chat
+wallpaper and the quicker return from a chat to the list, and a fix for messages that moved while a photo above them took its shape.
+**An older build cannot read the new store file** (it fails closed and does not reset it), so a phone that has opened 0.7.1 cannot go back.
+No relay change, no new permission, nothing new on the wire. Emulator tests only: no physical phone, no hardware-backed Keystore measured, no
+Google Play install. See the [threat model](docs/THREAT-MODEL.md#a-faster-protected-store-and-photos-fetched-together-071) and the
+[verification](docs/VERIFICATION.md#release-071--a-faster-protected-store-and-photos-that-arrive-together-2026-11-19).
+
 Release **0.7.0/code 52** brings photos and emoji closer to the messengers people already know. A photo that is not view-once is now drawn in
 the chat as a small picture, and touching it opens it full screen as before; a view-once photo stays a row of text that opens only when
 touched, and nothing is decoded or marked read until then. Up to six photos can be chosen at once and arrive as one album, drawn as a

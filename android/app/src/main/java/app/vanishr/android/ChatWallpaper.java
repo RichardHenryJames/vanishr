@@ -21,7 +21,7 @@ final class ChatWallpaper {
             rendered.setDensity(DisplayMetrics.DENSITY_DEFAULT);
             Canvas canvas = new Canvas(rendered);
             canvas.drawColor(Ui.CANVAS);
-            Drawable doodles = context.getDrawable(R.drawable.chat_doodles);
+            Drawable doodles = androidx.appcompat.content.res.AppCompatResources.getDrawable(context, R.drawable.chat_doodles);
             doodles.setBounds(0, 0, edge, edge);
             doodles.draw(canvas);
             rendered.setHasAlpha(false);

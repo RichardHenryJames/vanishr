@@ -1136,7 +1136,32 @@ final class ChatEngine implements AutoCloseable {
         });
     }
 
-    private void receive(Incoming message) throws Exception {
+    /**
+     * Starts fetching the pictures of the messages that {@link #receive} will certainly fetch, so that the network wait of one overlaps the
+     * work on another. A message is left out unless it passes every check that receive makes before it fetches (and that can be made
+     * without side effects), so nothing is fetched early for a sender that is blocked, retired, unknown or unverified, or for a message
+     * that has been seen or has expired; those are fetched, if at all, by receive itself, as before.
+     */
+    private MediaPrefetch prefetchMedia(Incoming[] pending) {
+        MediaPrefetch media = new MediaPrefetch();
+        RelayApi relay = api;
+        long now = System.currentTimeMillis();
+        for (Incoming message : pending) {
+            if (message.mediaId() == null || message.expiresAt() <= now || !fetchesItsPicture(message)) continue;
+            media.expect(message.mediaId(), () -> relay.downloadBesideOthers(message.mediaId()));
+        }
+        media.start();
+        return media;
+    }
+
+    private boolean fetchesItsPicture(Incoming message) {
+        if (safety.isBlocked(message.senderId()) || onboarding.fromRetiredContact(message.senderId(), message.senderDeviceId())) return false;
+        if (!signal.isVerified(message.senderId()) || onboarding.rotationPending(message.senderId())) return false;
+        Peer sender = read("contact/" + message.senderId(), Peer.class);
+        return sender != null && sender.deviceId().equals(message.senderDeviceId()) && vault.get("seen/" + message.id()) == null;
+    }
+
+    private void receive(Incoming message, MediaPrefetch media) throws Exception {
         if (message.expiresAt() <= System.currentTimeMillis()) return;
         if (safety.isBlocked(message.senderId())) { discard(message); return; }
         // From the device that was the official admin's until the pin moved: not read, and deleted at the relay, so that it neither stops every
@@ -1154,7 +1179,7 @@ final class ChatEngine implements AutoCloseable {
         }
         if (vault.get("seen/" + message.id()) != null) return;
         if (!makeRoom(0)) return;
-        byte[] imageCiphertext = message.mediaId() == null ? null : api.download(message.mediaId());
+        byte[] imageCiphertext = message.mediaId() == null ? null : media.take(message.mediaId(), () -> api.download(message.mediaId()));
         if (imageCiphertext != null && !makeRoom(imageCiphertext.length * 2L)) return;
         try {
             vault.transaction(() -> {
@@ -1238,10 +1263,12 @@ final class ChatEngine implements AutoCloseable {
             if (yield.getAsBoolean()) return false;
             unverifiedIncoming = false;
             Incoming[] pending = api.call("GET", "/messages/pending", null, Incoming[].class);
-            for (Incoming message : pending) {
-                receive(message);
-                received.accept(message.senderId());
-                if (yield.getAsBoolean()) return false;
+            try (MediaPrefetch media = prefetchMedia(pending)) {
+                for (Incoming message : pending) {
+                    receive(message, media);
+                    received.accept(message.senderId());
+                    if (yield.getAsBoolean()) return false;
+                }
             }
             if (!flushAcks(yield) || yield.getAsBoolean()) return false;
             if (!syncStatuses(yield) || yield.getAsBoolean()) return false;

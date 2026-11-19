@@ -308,6 +308,28 @@ phone is unlocked each time; reads of the already-open in-memory records reuse a
 successful check for at most 250 ms. See the
 [threat model](THREAT-MODEL.md#responsiveness-and-the-open-vault).
 
+The store is one encrypted file, written whole at every commit. Until 0.7.0 the
+Android Keystore encrypted all of it, and the Keystore moves data in small pieces:
+on the test emulator that cost about a quarter of a second for each megabyte, for
+every commit and again for opening the store, so a reaction or a received photo
+took seconds once the phone held a few megabytes of pictures. From 0.7.1 the file
+is encrypted in the app with AES-256-GCM under a random data key, and only that
+32-byte key is wrapped by the same Keystore key (`VaultEnvelope`, `AndroidVault`).
+A commit then costs milliseconds whatever the size (40 ms for 4 MB on the emulator).
+The first opening after an update reads the old file and writes the new format at
+once; an older build cannot read the new file and fails closed. Per-message
+content keys are unchanged. See the
+[threat model](THREAT-MODEL.md#a-faster-protected-store-and-photos-fetched-together-071).
+
+Receiving several photos no longer waits for the network once for each of them. A
+sync fetches the encrypted pictures of its batch up to three at a time, ahead of
+the message being handled (`MediaPrefetch`), while each message is still checked,
+decrypted and stored one at a time on the `work` lane in the order it came. An
+early download is only a head start: it starts for a message that has passed the
+checks made before a fetch, never renews the session, and if it fails the
+ordinary download is made as before. A picture that sits above the screen and
+takes its real shape once it is decoded no longer moves the messages being read.
+
 ## Retention semantics
 
 Expiry modes: `VIEW_ONCE`, `HOUR_1`, `HOURS_6`, `HOURS_24`. Client expiry starts

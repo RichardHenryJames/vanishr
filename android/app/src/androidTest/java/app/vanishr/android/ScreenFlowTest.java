@@ -3757,7 +3757,8 @@ public class ScreenFlowTest {
             scenario.onActivity(activity -> {
                 inject(activity);
                 int edge = Math.round(17 * context.getResources().getDisplayMetrics().density);
-                View toolbar=((ViewGroup)root(activity)).getChildAt(0);
+                View toolbar = descendants(root(activity)).stream().filter(view -> "Chats".contentEquals(view.getContentDescription() == null ? "" : view.getContentDescription()))
+                    .findFirst().orElseThrow();
                 assertTrue(toolbar.getPaddingLeft() >= edge);
                 assertTrue(toolbar.getPaddingRight() >= edge);
                 assertTrue(descendants(root(activity)).stream().anyMatch(view -> "My profile".contentEquals(view.getContentDescription() == null ? "" : view.getContentDescription())));
@@ -4746,7 +4747,7 @@ public class ScreenFlowTest {
         vault.unlock(); engine = new ChatEngine(vault);
         String prefix = AndroidVault.savedAccountPrefix(userId);
         assertNull(engine.account());
-        assertEquals(AndroidVault.RECORD_VERSION, java.nio.file.Files.readAllBytes(new File(context.getNoBackupFilesDir(), "vault.bin").toPath())[0]);
+        assertEquals(AndroidVault.VAULT_VERSION, java.nio.file.Files.readAllBytes(new File(context.getNoBackupFilesDir(), "vault.bin").toPath())[0]);
         assertEquals(AndroidVault.RECORD_VERSION, vault.get(prefix + "body/" + once.id())[0]);
         KeyStore store = KeyStore.getInstance("AndroidKeyStore"); store.load(null);
         assertFalse(store.containsAlias(AndroidVault.MASTER));
@@ -4775,7 +4776,7 @@ public class ScreenFlowTest {
         vault.unlock(); engine = new ChatEngine(vault);
         String prefix = AndroidVault.savedAccountPrefix(userId);
         assertNull(engine.account());
-        assertEquals(AndroidVault.RECORD_VERSION, java.nio.file.Files.readAllBytes(new File(context.getNoBackupFilesDir(), "vault.bin").toPath())[0]);
+        assertEquals(AndroidVault.VAULT_VERSION, java.nio.file.Files.readAllBytes(new File(context.getNoBackupFilesDir(), "vault.bin").toPath())[0]);
         assertEquals(AndroidVault.RECORD_VERSION, vault.get(prefix + "body/" + once.id())[0]);
         KeyStore store = KeyStore.getInstance("AndroidKeyStore"); store.load(null);
         assertFalse(store.containsAlias(AndroidVault.phoneAlias(AndroidVault.MASTER)));
@@ -4787,6 +4788,205 @@ public class ScreenFlowTest {
         assertEquals(once.expiresAt(), retained.expiresAt()); assertEquals("DELIVERED", retained.state());
         assertEquals("This message is visible once.", engine.content(retained, true).envelope().text());
         assertNull(vault.get("body/" + once.id())); assertFalse(store.containsAlias(AndroidVault.currentAlias(alias)));
+    }
+
+    // ---- The store's file is encrypted in this process under a data key that the Keystore protects ----
+
+    private File storeFile() { return new File(context.getNoBackupFilesDir(), "vault.bin"); }
+
+    private static byte[] wrappedKeyOf(File file) throws IOException {
+        byte[] bytes = java.nio.file.Files.readAllBytes(file.toPath());
+        return Arrays.copyOfRange(bytes, 2, 2 + (bytes[1] & 0xFF));
+    }
+
+    /** The store as the release before this one wrote it: all of it encrypted by the Keystore key, as one record of version 3. */
+    private void storeAsThePreviousReleaseWroteIt() throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (DataOutputStream output = new DataOutputStream(bytes)) {
+            List<String> names = vault.names("");
+            output.writeInt(names.size());
+            for (String name : names) {
+                byte[] value = vault.get(name);
+                try { output.writeUTF(name); output.writeInt(value.length); output.write(value); }
+                finally { Arrays.fill(value, (byte) 0); }
+            }
+        }
+        byte[] plaintext = bytes.toByteArray();
+        byte[] encrypted;
+        try { encrypted = vault.seal(AndroidVault.MASTER, plaintext); }
+        finally { Arrays.fill(plaintext, (byte) 0); }
+        vault.close();
+        java.nio.file.Files.write(storeFile().toPath(), encrypted);
+    }
+
+    @Test public void aStoreWrittenByTheReleaseBeforeThisOneOpensAndIsWrittenAgainInTheNewFormat() throws Exception {
+        signedInFixture(); conversationsFixture();
+        String identity = engine.identityCode();
+        Map<String, byte[]> expected = new TreeMap<>();
+        for (String name : vault.names("")) expected.put(name, vault.get(name));
+        assertTrue(expected.size() > 10);
+        storeAsThePreviousReleaseWroteIt();
+        assertEquals("The fixture is in the earlier format", AndroidVault.RECORD_VERSION, java.nio.file.Files.readAllBytes(storeFile().toPath())[0]);
+        vault.unlock();
+        assertEquals(expected.keySet(), new TreeSet<>(vault.names("")));
+        for (var record : expected.entrySet()) assertArrayEquals(record.getKey(), record.getValue(), vault.get(record.getKey()));
+        assertEquals("Written again at once, in the new format", AndroidVault.VAULT_VERSION, java.nio.file.Files.readAllBytes(storeFile().toPath())[0]);
+        // The new file gives back the same store, and an engine on it has the same identity and the same messages.
+        vault.close(); vault = new AndroidVault(context); vault.unlock();
+        for (var record : expected.entrySet()) assertArrayEquals(record.getKey(), record.getValue(), vault.get(record.getKey()));
+        engine = new ChatEngine(vault);
+        assertEquals(identity, engine.identityCode());
+        assertEquals(7, engine.entries(peerId).size());
+        KeyStore store = KeyStore.getInstance("AndroidKeyStore"); store.load(null);
+        assertTrue("The Keystore key of the earlier format stays: it protects the data key now", store.containsAlias(AndroidVault.currentAlias(AndroidVault.MASTER)));
+    }
+
+    @Test public void aCommitDoesNotUseTheKeystoreAfterTheFirstOneOfAnOpening() throws Exception {
+        signedInFixture();
+        vault.transaction(() -> { vault.put("probe/count", new byte[]{0}); return null; });
+        long used = vault.keystoreUses();
+        for (int index = 1; index <= 25; index++) {
+            byte[] value = {(byte) index, 1, 2, 3};
+            vault.transaction(() -> { vault.put("probe/count", value); return null; });
+        }
+        assertEquals("Twenty-five commits and not one use of a Keystore key", used, vault.keystoreUses());
+        vault.close();
+        assertArrayEquals(new byte[]{25, 1, 2, 3}, reopened().get("probe/count"));
+    }
+
+    private AndroidVault reopened() throws Exception { vault = new AndroidVault(context); vault.unlock(); return vault; }
+
+    @Test public void theStoreFileIsInTheNewFormatAndShowsNothingOfWhatIsInIt() throws Exception {
+        signedInFixture();
+        byte[] sentinel = "a recognisable synthetic sentence about coffee".getBytes(StandardCharsets.UTF_8);
+        vault.transaction(() -> { vault.put("probe/sentinel", sentinel); return null; });
+        byte[] file = java.nio.file.Files.readAllBytes(storeFile().toPath());
+        assertEquals(AndroidVault.VAULT_VERSION, file[0]);
+        assertEquals("The wrapped data key is a nonce, the 32-byte key and a tag", 60, file[1] & 0xFF);
+        String text = new String(file, StandardCharsets.ISO_8859_1);
+        assertFalse(text.contains("coffee")); assertFalse(text.contains("probe/sentinel")); assertFalse(text.contains("account"));
+    }
+
+    @Test public void aStoreFileThatWasChangedOrCutFailsClosedAndIsLeftAsItWas() throws Exception {
+        signedInFixture();
+        vault.close();
+        File target = storeFile();
+        byte[] original = java.nio.file.Files.readAllBytes(target.toPath());
+        for (int place : new int[]{0, 1, 2, 30, 61, 62, 70, 73, original.length / 2, original.length - 17, original.length - 1}) {
+            byte[] changed = original.clone(); changed[place] ^= 0x01;
+            java.nio.file.Files.write(target.toPath(), changed);
+            AndroidVault attempt = new AndroidVault(context);
+            assertThrows("Byte " + place + " was changed and the store still opened", Exception.class, attempt::unlock);
+            assertThrows(SecurityException.class, () -> attempt.get("account"));
+            assertArrayEquals("The file is left as it was", changed, java.nio.file.Files.readAllBytes(target.toPath()));
+        }
+        byte[] cut = Arrays.copyOf(original, original.length - 1);
+        java.nio.file.Files.write(target.toPath(), cut);
+        assertThrows(Exception.class, () -> new AndroidVault(context).unlock());
+        assertArrayEquals(cut, java.nio.file.Files.readAllBytes(target.toPath()));
+        java.nio.file.Files.write(target.toPath(), original);
+        assertNotNull("The unchanged file still opens", reopened().get("account"));
+    }
+
+    @Test public void eachOpeningOfTheStoreMakesANewDataKeyAndAnOpeningKeepsItBetweenCommits() throws Exception {
+        signedInFixture();
+        byte[] first = wrappedKeyOf(storeFile());
+        vault.transaction(() -> { vault.put("probe/a", new byte[]{1}); return null; });
+        assertArrayEquals("Within one opening the same data key is used", first, wrappedKeyOf(storeFile()));
+        vault.close(); reopened();
+        vault.transaction(() -> { vault.put("probe/a", new byte[]{2}); return null; });
+        assertFalse("A new opening makes a new data key", Arrays.equals(first, wrappedKeyOf(storeFile())));
+    }
+
+    @Test public void aStoreFileOfTheNewFormatDoesNotOpenWithoutItsKeystoreKeyAndIsNotReset() throws Exception {
+        signedInFixture();
+        vault.close();
+        byte[] before = java.nio.file.Files.readAllBytes(storeFile().toPath());
+        KeyStore store = KeyStore.getInstance("AndroidKeyStore"); store.load(null);
+        store.deleteEntry(AndroidVault.currentAlias(AndroidVault.MASTER));
+        assertThrows(SecurityException.class, () -> new AndroidVault(context).unlock());
+        assertArrayEquals(before, java.nio.file.Files.readAllBytes(storeFile().toPath()));
+    }
+
+    @Test public void aCommitOfAStoreSeveralMegabytesBigTakesAFractionOfWhatTheKeystoreNeededForIt() throws Exception {
+        signedInFixture();
+        Random random = new Random(3);
+        while (vault.sizeBytes() < 4L * 1024 * 1024) {
+            byte[] bytes = new byte[200 * 1024]; random.nextBytes(bytes);
+            String name = "probe/" + UUID.randomUUID();
+            vault.transaction(() -> { vault.put(name, bytes); return null; });
+        }
+        long[] millis = new long[7];
+        for (int index = 0; index < millis.length; index++) {
+            byte[] small = {(byte) index};
+            long started = System.nanoTime();
+            vault.transaction(() -> { vault.put("probe/small", small); return null; });
+            millis[index] = (System.nanoTime() - started) / 1_000_000;
+        }
+        Arrays.sort(millis);
+        perf("store_4MB_commit_median_ms", millis[3]);
+        // Through the Keystore the same commit took about 1,000 ms on this emulator, and opening the store as long again.
+        assertTrue("A commit of a 4 MB store took " + millis[3] + " ms", millis[3] < 500);
+        long started = System.nanoTime();
+        AndroidVault second = new AndroidVault(context);
+        second.unlock();
+        long unlock = (System.nanoTime() - started) / 1_000_000;
+        second.close();
+        perf("store_4MB_unlock_ms", unlock);
+        assertTrue("Opening a 4 MB store took " + unlock + " ms", unlock < 500);
+    }
+
+    @Test public void aStoreOfThePreviousReleaseStillOpensWhenThePhoneCannotWriteItAgainYet() throws Exception {
+        signedInFixture(); conversationsFixture();
+        Map<String, byte[]> expected = new TreeMap<>();
+        for (String name : vault.names("")) expected.put(name, vault.get(name));
+        storeAsThePreviousReleaseWroteIt();
+        byte[] before = java.nio.file.Files.readAllBytes(storeFile().toPath());
+        AndroidVault full = new AndroidVault(context);
+        // A phone with no room left refuses every write.
+        setField(full, "file", new android.util.AtomicFile(storeFile()) {
+            @Override public java.io.FileOutputStream startWrite() throws IOException { throw new IOException("Synthetic: no space left on device"); }
+        });
+        try {
+            full.unlock();
+            for (var record : expected.entrySet()) assertArrayEquals(record.getKey(), record.getValue(), full.get(record.getKey()));
+            assertArrayEquals("Nothing was written, and the file is as the release before left it", before, java.nio.file.Files.readAllBytes(storeFile().toPath()));
+        } finally { full.close(); }
+        assertNotNull("With room again, the next opening reads it and writes the new format", reopened().get("account"));
+        assertEquals(AndroidVault.VAULT_VERSION, java.nio.file.Files.readAllBytes(storeFile().toPath())[0]);
+    }
+
+    @Test public void aStoreOfAnOlderKindStillDoesNotOpenWhenItCannotBeWrittenInTheNewFormat() throws Exception {
+        signedInFixture();
+        legacyVaultFile(2);
+        byte[] before = java.nio.file.Files.readAllBytes(storeFile().toPath());
+        AndroidVault full = new AndroidVault(context);
+        setField(full, "file", new android.util.AtomicFile(storeFile()) {
+            @Override public java.io.FileOutputStream startWrite() throws IOException { throw new IOException("Synthetic: no space left on device"); }
+        });
+        assertThrows(IOException.class, full::unlock);
+        assertThrows(SecurityException.class, () -> full.get("account"));
+        assertArrayEquals(before, java.nio.file.Files.readAllBytes(storeFile().toPath()));
+        KeyStore store = KeyStore.getInstance("AndroidKeyStore"); store.load(null);
+        assertTrue("Its key stays: the new file could not be written", store.containsAlias(AndroidVault.phoneAlias(AndroidVault.MASTER)));
+    }
+
+    @Test public void theBufferOfACommitIsAsBigAsTheStoreSoItNeverHasToGrowAndLeaveACopyBehind() throws Exception {
+        signedInFixture();
+        Random random = new Random(11);
+        // Names that the store writes in one, two and three bytes a character, and values from nothing to several hundred kilobytes.
+        String[] names = {"probe/plain", "probe/caf\u00e9", "probe/\u20ac", "probe/\u00e9\u20ac\u0000x"};
+        int[] sizes = {0, 17, 5_000, 300_000};
+        for (int index = 0; index < names.length; index++) {
+            byte[] value = new byte[sizes[index]]; random.nextBytes(value);
+            String name = names[index];
+            vault.transaction(() -> { vault.put(name, value); return null; });
+            long onDisk = java.nio.file.Files.size(storeFile().toPath());
+            // The file is the header (2 bytes and the 60-byte wrapped key), the nonce (12) and the tag (16) around the store.
+            assertEquals("The size worked out for the buffer is what was written, after " + name, vault.storeSize(), onDisk - 90);
+        }
+        vault.close();
+        assertEquals(sizes[3], reopened().get(names[3]).length);
     }
 
     @Test public void failedPhoneProtectedVaultMigrationKeepsItsFileAndKey() throws Exception {
@@ -5823,6 +6023,41 @@ public class ScreenFlowTest {
                 View row = (View) readField(rows.get(firstShown.id()), "alignment");
                 assertEquals("The message the user was looking at has not moved", offset[0], row.getTop() - scroll.getScrollY(), 2);
                 assertTrue("Older messages are above it", ((View) readField(rows.get(expected.get(0).id()), "alignment")).getTop() < row.getTop());
+            });
+        }
+    }
+
+    @Test public void aPhotoThatTakesItsShapeAboveTheScreenDoesNotMoveTheMessagesBeingRead() throws Exception {
+        signedInFixture(); conversationsFixture(); longChat(60);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            awaitMainCondition(scenario, activity -> descendants(root(activity)).stream().filter(PhotoTile.class::isInstance)
+                    .map(PhotoTile.class::cast).allMatch(PhotoTile::drawn));
+            View[] anchor = new View[1]; PhotoTile[] tile = new PhotoTile[1];
+            int[] offset = new int[1], before = new int[1];
+            scenario.onActivity(activity -> {
+                ScrollView scroll = messageScroll(activity);
+                ViewGroup list = (ViewGroup) readField(activity, "messages");
+                tile[0] = descendants(root(activity)).stream().filter(PhotoTile.class::isInstance).map(PhotoTile.class::cast).findFirst().orElseThrow();
+                before[0] = tile[0].getLayoutParams().height;
+                // Away from the bottom, reading messages that are below the photo.
+                scroll.scrollTo(0, scroll.getChildAt(0).getHeight() / 2);
+                for (int index = 0; index < list.getChildCount() && anchor[0] == null; index++) {
+                    View child = list.getChildAt(index);
+                    if (child.getBottom() > scroll.getScrollY() && child.getTag() instanceof Long) { anchor[0] = child; offset[0] = child.getTop() - scroll.getScrollY(); }
+                }
+                assertNotNull(anchor[0]);
+                View photoRow = tile[0];
+                while (photoRow.getParent() != list) photoRow = (View) photoRow.getParent();
+                assertTrue("The photo is above what is on the screen", photoRow.getBottom() <= scroll.getScrollY());
+                // The photo is found to have another shape than the one it was drawn with.
+                invoke(activity, "adaptTile", new Class<?>[]{PhotoTile.class, Bitmap.class}, tile[0], Bitmap.createBitmap(60, 240, Bitmap.Config.ARGB_8888));
+            });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertNotEquals("The photo took its shape", before[0], tile[0].getLayoutParams().height);
+                assertEquals("The message at the top of the screen has not moved", offset[0], anchor[0].getTop() - messageScroll(activity).getScrollY(), 2);
             });
         }
     }
@@ -8064,10 +8299,33 @@ public class ScreenFlowTest {
     // A test can make the lookup of the contact fail (as the relay answers when the contact is gone) once this many messages have been sent.
     private volatile int failLookupsAfterSends = -1;
 
+    // What the fixture relay hands out as media, and how long each request takes: a phone's network is not instant. Both are off unless
+    // a test turns them on. The rest is what a test can ask afterwards: how many pictures were asked for, how many at the same time, and
+    // which ones; and a picture that is refused once.
+    private final Map<UUID, byte[]> servedMedia = new java.util.concurrent.ConcurrentHashMap<>();
+    private final List<UUID> mediaRequested = java.util.Collections.synchronizedList(new ArrayList<>());
+    private final Set<UUID> mediaRefusedOnce = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final java.util.concurrent.atomic.AtomicInteger mediaInFlight = new java.util.concurrent.atomic.AtomicInteger(), mediaMostInFlight = new java.util.concurrent.atomic.AtomicInteger();
+    private volatile long relayLatencyMillis;
+
     private void plainTransport(List<ChatEngine.Incoming> incoming, List<ChatEngine.Send> outgoing) {
         engine.groupApi().close();
         setField(engine, "api", syntheticApi(chain -> {
             var request = chain.request(); String path = request.url().encodedPath();
+            if (path.startsWith("/media/") && request.method().equals("GET")) {
+                UUID mediaId = UUID.fromString(path.substring("/media/".length()));
+                mediaMostInFlight.accumulateAndGet(mediaInFlight.incrementAndGet(), Math::max);
+                mediaRequested.add(mediaId);
+                try {
+                    if (relayLatencyMillis > 0) android.os.SystemClock.sleep(relayLatencyMillis);
+                    byte[] served = servedMedia.get(mediaId);
+                    if (mediaRefusedOnce.remove(mediaId)) return syntheticResponse(request, 500, Map.of("error", "fixture_failure"));
+                    if (served == null) return syntheticResponse(request, 404, Map.of("error", "not_found"));
+                    return new okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("Synthetic fixture")
+                        .body(okhttp3.ResponseBody.create(served, okhttp3.MediaType.get("application/octet-stream"))).build();
+                } finally { mediaInFlight.decrementAndGet(); }
+            }
+            if (relayLatencyMillis > 0 && !path.equals("/events")) android.os.SystemClock.sleep(relayLatencyMillis);
             if (path.equals("/account/admin-contacts")) return syntheticResponse(request, 200, new AdminOnboarding.Page(userId, null, List.of(), null));
             if (path.equals("/users/id/" + peerId)) {
                 if (failLookupsAfterSends >= 0 && outgoing.size() >= failLookupsAfterSends) return syntheticResponse(request, 404, Map.of("error", "not_found"));
@@ -11212,14 +11470,19 @@ public class ScreenFlowTest {
             scenario.onActivity(activity -> {
                 before[0] = albumsOf(activity).get(0);
                 assertEquals("The album that grew still shows what it answers", 1, quotesShowing(activity, "Could you send the pictures?"));
-                // A reaction to the other photo draws the row afresh once more.
+                // A reaction to the other photo changes the pill on the row and nothing else.
                 try { vault.transaction(() -> { write("entry/" + second.id(), engine.entry(second.id()).withReaction(true, ChatEnvelope.REACTIONS.iterator().next())); return null; }); }
                 catch (Exception failure) { throw new AssertionError(failure); }
                 invoke(activity, "refreshMessages", new Class<?>[]{ChatEngine.Peer.class}, peer);
             });
-            awaitMainCondition(scenario, activity -> albumsOf(activity).size() == 1 && albumsOf(activity).get(0) != before[0]
-                && albumsOf(activity).get(0).tiles().stream().allMatch(PhotoTile::drawn));
-            scenario.onActivity(activity -> assertEquals("and so does the row drawn afresh for a reaction", 1, quotesShowing(activity, "Could you send the pictures?")));
+            awaitMainCondition(scenario, activity -> {
+                Object row = invoke(activity, "rowOf", new Class<?>[]{UUID.class}, second.id());
+                return row != null && readField(row, "chip") != null;
+            });
+            scenario.onActivity(activity -> {
+                assertSame("The album is not drawn again for a reaction", before[0], albumsOf(activity).get(0));
+                assertEquals("and it still shows what it answers", 1, quotesShowing(activity, "Could you send the pictures?"));
+            });
         }
     }
 
@@ -11334,7 +11597,7 @@ public class ScreenFlowTest {
 
     private View memberRow(MainActivity activity, UUID id) {
         for (Object row : ((Map<?, ?>) readField(activity, "messageRows")).values())
-            for (Object member : (List<?>) readField(row, "members")) if (((ChatEngine.Entry) member).id().equals(id)) return (View) readField(row, "alignment");
+            if (((Albums.Row) readField(row, "item")).holds(id)) return (View) readField(row, "alignment");
         return null;
     }
 
@@ -12734,6 +12997,479 @@ public class ScreenFlowTest {
             awaitMessages(scenario);
             awaitScrollSettled(scenario);
             storeShot(scenario, "08-group");
+        }
+    }
+
+    // ---- Speed probes (made only when asked for) ----
+    //
+    // Skipped unless the instrumentation is given perfProbe=1. They time what a person waits for, on the dedicated test emulator and with
+    // made-up data: views being built, one commit of the protected store, opening a chat and coming back to the list, and a reaction tapped
+    // while a sync keeps the worker busy. The emulator is not a phone: the numbers compare one build with another, they are not what a
+    // phone shows.
+
+    private static boolean perfAsked() { return InstrumentationRegistry.getArguments().getString("perfProbe") != null; }
+
+    private static int perfNumber(String name, int fallback) {
+        String value = InstrumentationRegistry.getArguments().getString(name);
+        return value == null ? fallback : Integer.parseInt(value);
+    }
+
+    private static long perfMedian(long[] values) { long[] copy = values.clone(); Arrays.sort(copy); return copy[copy.length / 2]; }
+
+    private static long perfMicros(int rounds, Runnable action) {
+        long start = System.nanoTime();
+        for (int index = 0; index < rounds; index++) action.run();
+        return (System.nanoTime() - start) / rounds / 1_000;
+    }
+
+    @Test public void probeBuildingViews() throws Exception {
+        Assume.assumeTrue("Speed probes are made only when asked for: perfProbe=1", perfAsked());
+        signedInFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                Ui ui = new Ui(activity);
+                int rounds = 300;
+                Context bare = new android.view.ContextThemeWrapper(activity.getApplicationContext(), android.R.style.Theme_Material_Light);
+                for (int warm = 0; warm < 60; warm++) { ui.text("warm", 14, 500, Color.BLACK); new TextView(activity); ui.feedback(Color.WHITE, 7); }
+                perf("view_text_from_ui_us", perfMicros(rounds, () -> ui.text("Hello world", 14, 500, Color.BLACK)));
+                perf("view_textview_app_theme_us", perfMicros(rounds, () -> new TextView(activity)));
+                perf("view_textview_plain_theme_us", perfMicros(rounds, () -> new TextView(bare)));
+                perf("view_text_without_variation_call_us", perfMicros(rounds, () -> {
+                    TextView text = new TextView(activity); text.setText("Hello world"); text.setTextSize(14); text.setTypeface(ui.font(500));
+                    text.setTextColor(Color.BLACK); text.setLetterSpacing(0); text.setIncludeFontPadding(false); text.setLineSpacing(8, 1);
+                }));
+                TextView sample = new TextView(activity);
+                int[] toggle = {0};
+                perf("view_set_font_variation_us", perfMicros(rounds, () -> sample.setFontVariationSettings("'wght' " + (500 + (toggle[0]++ % 2)))));
+                perf("view_feedback_drawable_us", perfMicros(rounds, () -> ui.feedback(Color.WHITE, 7)));
+                perf("view_avatar_us", perfMicros(rounds, () -> ui.avatar("Aarav", 46, Ui.BLUE)));
+                perf("view_symbol_us", perfMicros(rounds, () -> ui.symbol(R.drawable.ic_chevron_right, 18, Ui.MUTED)));
+                perf("view_logo_us", perfMicros(rounds, () -> ui.logo(46)));
+                perf("view_button_us", perfMicros(100, () -> ui.button("Send", true, () -> { })));
+            });
+        }
+    }
+
+    @Test public void probeCostOfAVaultCommitBySize() throws Exception {
+        Assume.assumeTrue("Speed probes are made only when asked for: perfProbe=1", perfAsked());
+        signedInFixture();
+        Random random = new Random(7);
+        for (long target : new long[]{0, 1024, 4096, 8192}) {
+            while (vault.sizeBytes() < target * 1024) {
+                byte[] bytes = new byte[200 * 1024]; random.nextBytes(bytes);
+                String name = "probe-body/" + UUID.randomUUID();
+                vault.transaction(() -> { vault.put(name, bytes); return null; });
+            }
+            long[] commit = new long[5];
+            for (int index = 0; index < commit.length; index++) {
+                byte[] small = {(byte) index, 1, 2};
+                long started = System.nanoTime();
+                vault.transaction(() -> { vault.put("probe-small", small); return null; });
+                commit[index] = (System.nanoTime() - started) / 1_000_000;
+            }
+            long started = System.nanoTime();
+            AndroidVault second = new AndroidVault(context);
+            second.unlock();
+            long unlock = (System.nanoTime() - started) / 1_000_000;
+            second.close();
+            long kilobytes = vault.sizeBytes() / 1024;
+            perf("vault_" + kilobytes + "KB_commit_median_ms", perfMedian(commit));
+            perf("vault_" + kilobytes + "KB_commit_worst_ms", Arrays.stream(commit).max().orElse(0));
+            perf("vault_" + kilobytes + "KB_unlock_ms", unlock);
+        }
+    }
+
+    // A phone with many chats, one long chat with photos in it, and the lists that the chat list reads on the main thread.
+    private void perfFixture(int contacts, int perContact, int longChat) throws Exception {
+        signedInFixture(); conversationsFixture();
+        manyVerifiedContacts(contacts, perContact);
+        for (int index = 0; index < longChat; index++)
+            entry(index % 2 == 0, "Synthetic message number " + index + " in the long chat, with some more words so that it wraps to a second line on a narrow display",
+                null, ChatEnvelope.Expiry.HOUR_1, "READ", -(longChat - index) * 20_000L);
+        for (int index = 0; index < 6; index++) entry(index % 2 == 0, null, photo, ChatEnvelope.Expiry.HOUR_1, "READ", -(index * 20_000L) - 5_000);
+        perfPadVault();
+    }
+
+    // The store of a phone that has had photos on it is several megabytes; perfVaultMb makes this one as big, with records that the app never reads.
+    private void perfPadVault() throws Exception {
+        long target = perfNumber("perfVaultMb", 0) * 1024L * 1024L;
+        Random random = new Random(11);
+        while (vault.sizeBytes() < target) {
+            byte[] bytes = new byte[256 * 1024]; random.nextBytes(bytes);
+            String name = "probe-pad/" + UUID.randomUUID();
+            vault.transaction(() -> { vault.put(name, bytes); return null; });
+        }
+        perf("fixture_vault_kb", vault.sizeBytes() / 1024);
+    }
+
+    // What the action takes on the main thread, how long until a frame has been drawn with the wanted screen in it, and the longest
+    // stretch in which the main thread did not answer a ping that came every ten milliseconds.
+    private long[] perfMeasure(ActivityScenario<MainActivity> scenario, java.util.function.Consumer<MainActivity> action,
+                               java.util.function.Predicate<MainActivity> wanted) throws Exception {
+        long[] result = new long[3];
+        var drawn = new java.util.concurrent.CountDownLatch(1);
+        var meter = new StallMeter();
+        scenario.onActivity(activity -> {
+            meter.start();
+            View decor = activity.getWindow().getDecorView();
+            long started = System.nanoTime();
+            ViewTreeObserver.OnDrawListener[] listener = new ViewTreeObserver.OnDrawListener[1];
+            listener[0] = () -> {
+                if (result[1] != 0 || !wanted.test(activity)) return;
+                result[1] = Math.max(1, (System.nanoTime() - started) / 1_000_000);
+                drawn.countDown();
+                decor.post(() -> decor.getViewTreeObserver().removeOnDrawListener(listener[0]));
+            };
+            decor.getViewTreeObserver().addOnDrawListener(listener[0]);
+            action.accept(activity);
+            result[0] = (System.nanoTime() - started) / 1_000_000;
+        });
+        assertTrue("The wanted screen was not drawn", drawn.await(20, java.util.concurrent.TimeUnit.SECONDS));
+        android.os.SystemClock.sleep(400);
+        scenario.onActivity(activity -> meter.stop());
+        result[2] = meter.worst;
+        return result;
+    }
+
+    @Test public void probeOpeningAChatAndGoingBackToTheList() throws Exception {
+        Assume.assumeTrue("Speed probes are made only when asked for: perfProbe=1", perfAsked());
+        perfFixture(perfNumber("perfContacts", 40), 6, perfNumber("perfMessages", 100));
+        // What the chat list asks of the engine on the main thread, one call at a time.
+        long[] peers = new long[5], groups = new long[5], unread = new long[5], muted = new long[5];
+        for (int index = 0; index < 5; index++) {
+            long started = System.nanoTime(); engine.peers(); peers[index] = (System.nanoTime() - started) / 1_000;
+            started = System.nanoTime(); engine.groups().conversations(); groups[index] = (System.nanoTime() - started) / 1_000;
+            started = System.nanoTime(); engine.unreadCounts(); unread[index] = (System.nanoTime() - started) / 1_000;
+            started = System.nanoTime(); engine.mutedChats(); muted[index] = (System.nanoTime() - started) / 1_000;
+        }
+        perf("list_reads_peers_us", perfMedian(peers)); perf("list_reads_groups_us", perfMedian(groups));
+        perf("list_reads_unread_counts_us", perfMedian(unread)); perf("list_reads_muted_us", perfMedian(muted));
+        int rounds = perfNumber("perfRounds", 4);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            awaitMainCondition(scenario, activity -> readField(activity, "contactRows") != null
+                && ((LinearLayout) readField(activity, "contactRows")).getChildCount() > 20);
+            android.os.SystemClock.sleep(3_000);
+            for (int round = 1; round <= rounds; round++) {
+                long[] open = perfMeasure(scenario, activity -> contactRow(activity, "Aarav Mehta").performClick(), activity -> {
+                    LinearLayout rows = (LinearLayout) readField(activity, "messages");
+                    return rows != null && rows.isShown() && rows.getChildCount() > 10;
+                });
+                perf("open_round" + round + "_handler_ms", open[0]); perf("open_round" + round + "_drawn_ms", open[1]); perf("open_round" + round + "_stall_ms", open[2]);
+                awaitMessages(scenario);
+                android.os.SystemClock.sleep(1_500);
+                long[] back = perfMeasure(scenario, activity -> activity.getOnBackPressedDispatcher().onBackPressed(), activity -> {
+                    View rows = (View) readField(activity, "contactRows");
+                    return rows != null && rows.isShown() && rows.getHeight() > 0;
+                });
+                perf("back_round" + round + "_handler_ms", back[0]); perf("back_round" + round + "_drawn_ms", back[1]); perf("back_round" + round + "_stall_ms", back[2]);
+                android.os.SystemClock.sleep(1_500);
+            }
+        }
+    }
+
+    @Test public void probeCostOfKeystoreAndSoftwareEncryption() throws Exception {
+        Assume.assumeTrue("Speed probes are made only when asked for: perfProbe=1", perfAsked());
+        signedInFixture();
+        Random random = new Random(5);
+        byte[] small = new byte[300], photoSized = new byte[300 * 1024], vaultSized = new byte[4 * 1024 * 1024];
+        random.nextBytes(small); random.nextBytes(photoSized); random.nextBytes(vaultSized);
+        for (int warm = 0; warm < 3; warm++) { String alias = AndroidVault.contentAlias(System.currentTimeMillis() + 3_600_000, UUID.randomUUID()); createFixtureKey(alias); vault.unseal(alias, vault.seal(alias, small)); }
+        long[] generate = new long[5], sealSmall = new long[5], unsealSmall = new long[5], sealPhoto = new long[3], unsealPhoto = new long[3];
+        for (int index = 0; index < 5; index++) {
+            String alias = AndroidVault.contentAlias(System.currentTimeMillis() + 3_600_000, UUID.randomUUID());
+            long started = System.nanoTime(); createFixtureKey(alias); generate[index] = (System.nanoTime() - started) / 1_000;
+            started = System.nanoTime(); byte[] sealed = vault.seal(alias, small); sealSmall[index] = (System.nanoTime() - started) / 1_000;
+            started = System.nanoTime(); vault.unseal(alias, sealed); unsealSmall[index] = (System.nanoTime() - started) / 1_000;
+            if (index < 3) {
+                started = System.nanoTime(); byte[] big = vault.seal(alias, photoSized); sealPhoto[index] = (System.nanoTime() - started) / 1_000;
+                started = System.nanoTime(); vault.unseal(alias, big); unsealPhoto[index] = (System.nanoTime() - started) / 1_000;
+            }
+        }
+        perf("keystore_generate_key_us", perfMedian(generate));
+        perf("keystore_seal_300B_us", perfMedian(sealSmall)); perf("keystore_unseal_300B_us", perfMedian(unsealSmall));
+        perf("keystore_seal_300KB_us", perfMedian(sealPhoto)); perf("keystore_unseal_300KB_us", perfMedian(unsealPhoto));
+        // The way a small key would be wrapped by a Keystore key: 32 bytes in, 32 bytes out.
+        String wrapAlias = AndroidVault.contentAlias(System.currentTimeMillis() + 3_600_000, UUID.randomUUID()); createFixtureKey(wrapAlias);
+        byte[] dataKey = new byte[32]; random.nextBytes(dataKey);
+        long[] wrap = new long[5], unwrap = new long[5];
+        for (int index = 0; index < 5; index++) {
+            long started = System.nanoTime(); byte[] wrapped = vault.seal(wrapAlias, dataKey); wrap[index] = (System.nanoTime() - started) / 1_000;
+            started = System.nanoTime(); vault.unseal(wrapAlias, wrapped); unwrap[index] = (System.nanoTime() - started) / 1_000;
+        }
+        perf("keystore_wrap_32B_us", perfMedian(wrap)); perf("keystore_unwrap_32B_us", perfMedian(unwrap));
+        // Ordinary AES-GCM in the app's own process, as a comparison.
+        javax.crypto.SecretKey key = new javax.crypto.spec.SecretKeySpec(dataKey, "AES");
+        long[] software = new long[5], softwareOpen = new long[5];
+        for (int index = 0; index < 5; index++) {
+            javax.crypto.Cipher cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, key);
+            long started = System.nanoTime(); byte[] sealed = cipher.doFinal(vaultSized); software[index] = (System.nanoTime() - started) / 1_000;
+            javax.crypto.Cipher open = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+            open.init(javax.crypto.Cipher.DECRYPT_MODE, key, new javax.crypto.spec.GCMParameterSpec(128, cipher.getIV()));
+            started = System.nanoTime(); open.doFinal(sealed); softwareOpen[index] = (System.nanoTime() - started) / 1_000;
+        }
+        perf("software_aesgcm_seal_4MB_us", perfMedian(software)); perf("software_aesgcm_open_4MB_us", perfMedian(softwareOpen));
+        long started = System.nanoTime();
+        java.io.ByteArrayOutputStream copy = new java.io.ByteArrayOutputStream();
+        for (int index = 0; index < 40; index++) copy.write(vaultSized, 0, 100 * 1024);
+        byte[] flat = copy.toByteArray();
+        perf("copy_4MB_stream_us", (System.nanoTime() - started) / 1_000 + flat.length * 0L);
+    }
+
+    @Test public void probeReactingToAMessageWhileASyncHoldsTheWorker() throws Exception {
+        Assume.assumeTrue("Speed probes are made only when asked for: perfProbe=1", perfAsked());
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        for (int index = 0; index < perfNumber("perfMessages", 100); index++)
+            entry(index % 2 == 0, "Synthetic message number " + index + " in a long chat", null, ChatEnvelope.Expiry.HOUR_1, "READ", -(200 - index) * 15_000L);
+        ChatEngine.Entry theirs = entry(false, "Coffee at 4?", null, ChatEnvelope.Expiry.HOUR_1, "READ", -10_000);
+        perfPadVault();
+        plainTransport(new ArrayList<>(), new ArrayList<>());
+        long hold = perfNumber("perfHold", 1_200);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); inject(activity); });
+            awaitMessages(scenario);
+            android.os.SystemClock.sleep(2_000);
+            for (int round = 1; round <= perfNumber("perfRounds", 4); round++) {
+                String emoji = ChatEnvelope.REACTION_CHOICES.get(round % 2 == 0 ? 0 : 1);
+                openActions(scenario, "Coffee at 4?");
+                long[] times = new long[3];
+                var shown = new java.util.concurrent.CountDownLatch(1);
+                scenario.onActivity(activity -> {
+                    if (hold > 0) ((java.util.concurrent.Executor) readField(activity, "work")).execute(() -> android.os.SystemClock.sleep(hold));
+                    View target = descendants(overlay(activity).getWindow().getDecorView()).stream().filter(view -> emoji.equals(text(view))).findFirst().orElseThrow();
+                    long started = System.nanoTime();
+                    target.performClick();
+                    times[0] = (System.nanoTime() - started) / 1_000_000;
+                    Choreographer.getInstance().postFrameCallback(new Choreographer.FrameCallback() {
+                        @Override public void doFrame(long frameTimeNanos) {
+                            long elapsed = (System.nanoTime() - started) / 1_000_000;
+                            LinearLayout holder = (LinearLayout) holderOf(activity, "Coffee at 4?");
+                            if (times[1] == 0 && holder.getChildCount() == 2 && hasText(holder.getChildAt(1), emoji)) times[1] = Math.max(1, elapsed);
+                            MessageActions open = overlay(activity);
+                            if (times[2] == 0 && (open == null || !open.isShowing())) times[2] = Math.max(1, elapsed);
+                            if (times[1] != 0 && times[2] != 0 || elapsed > 15_000) shown.countDown();
+                            else Choreographer.getInstance().postFrameCallback(this);
+                        }
+                    });
+                });
+                assertTrue(shown.await(20, java.util.concurrent.TimeUnit.SECONDS));
+                long committed = System.nanoTime();
+                awaitMainCondition(scenario, activity -> emoji.equals(engine.entry(theirs.id()).reactionMine()));
+                perf("react_round" + round + "_tap_handler_ms", times[0]);
+                perf("react_round" + round + "_pill_visible_ms", times[1]);
+                perf("react_round" + round + "_menu_closed_ms", times[2]);
+                perf("react_round" + round + "_saved_after_pill_ms", (System.nanoTime() - committed) / 1_000_000);
+                android.os.SystemClock.sleep(1_000);
+            }
+        }
+    }
+
+    // A photo about as heavy as one that comes out of SafeImages.encode: a picture with a lot of detail, so that the JPEG is not tiny.
+    private static byte[] perfPhotoJpeg(int seed) throws Exception {
+        Bitmap bitmap = Bitmap.createBitmap(1280, 960, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        paint.setShader(new LinearGradient(0, 0, 0, 960, Color.rgb(90 + seed * 7 % 80, 140, 200), Color.rgb(30, 60 + seed * 13 % 90, 70), Shader.TileMode.CLAMP));
+        canvas.drawRect(0, 0, 1280, 960, paint);
+        paint.setShader(null);
+        Random random = new Random(seed);
+        for (int index = 0; index < 2600; index++) {
+            paint.setColor(Color.argb(60 + random.nextInt(160), random.nextInt(256), random.nextInt(256), random.nextInt(256)));
+            canvas.drawCircle(random.nextInt(1280), random.nextInt(960), 3 + random.nextInt(28), paint);
+        }
+        try { return SafeImages.encode(bitmap); } finally { bitmap.recycle(); }
+    }
+
+    /** {@code count} photos of one album, as the relay would hand them to this phone: each a Signal message and an encrypted picture to download. */
+    private final Map<UUID, byte[]> albumOriginals = new HashMap<>();
+
+    private List<ChatEngine.Incoming> perfAlbumFromThePeer(SignalClient remote, int count) throws Exception {
+        List<ChatEngine.Incoming> result = new ArrayList<>();
+        UUID album = UUID.randomUUID();
+        ChatEnvelope.Expiry expiry = ChatEnvelope.Expiry.HOURS_12;
+        for (int index = 0; index < count; index++) {
+            UUID id = UUID.randomUUID(), mediaId = UUID.randomUUID();
+            long sent = System.currentTimeMillis() - (count - index) * 1_000L, deadline = sent + expiry.milliseconds;
+            byte[] jpeg = perfPhotoJpeg(index);
+            ImageCipher.EncryptedImage encrypted = ImageCipher.encrypt(mediaId, jpeg);
+            int[] size = SafeImages.bounds(jpeg);
+            ChatEnvelope.Attachment attachment = new ChatEnvelope.Attachment(mediaId, encrypted.key(), encrypted.nonce(), "image/jpeg", size[0], size[1],
+                new ChatEnvelope.Album(album, index, count));
+            ChatEnvelope envelope = new ChatEnvelope(1, id, peerId, peerDevice, userId, deviceId, sent, deadline, expiry, null, attachment, null, null, null);
+            SignalClient.Packet packet = remote.encrypt(userId, RelayApi.JSON.toJson(envelope).getBytes(StandardCharsets.UTF_8), Instant.now());
+            servedMedia.put(mediaId, encrypted.ciphertext());
+            albumOriginals.put(id, jpeg);
+            result.add(new ChatEngine.Incoming(id, peerId, peerDevice, userId, deviceId, expiry, sent, deadline, packet.type(), packet.ciphertext(), mediaId));
+            if (index == 0 && perfAsked()) perf("photo_jpeg_kb", jpeg.length / 1024);
+        }
+        return result;
+    }
+
+    /** Every photo of an album that came in is stored, its picture exactly the one that was sent, and the album's places are kept. */
+    private void assertAlbumStoredIntact(int count) throws Exception {
+        List<ChatEngine.Entry> entries = engine.entries(peerId);
+        assertEquals("Every photo of the album arrived", count, entries.size());
+        Set<Integer> places = new HashSet<>();
+        for (ChatEngine.Entry stored : entries) {
+            assertTrue(stored.image()); assertEquals("DELIVERED", stored.state());
+            ChatEngine.Content content = engine.content(stored, false);
+            assertArrayEquals("The picture is the one that was sent", albumOriginals.get(stored.id()), content.image());
+            assertEquals(count, content.envelope().image().album().total());
+            places.add(content.envelope().image().album().index());
+        }
+        assertEquals("Each place of the album is filled once", count, places.size());
+    }
+
+    @Test public void anAlbumIsReceivedWithItsPicturesFetchedAFewAtATimeAndEachOneStoredIntact() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        List<ChatEngine.Incoming> incoming = perfAlbumFromThePeer(remote, 6);
+        plainTransport(incoming, new ArrayList<>());
+        relayLatencyMillis = 150;
+        try {
+            engine.sync();
+            assertAlbumStoredIntact(6);
+            assertEquals("Each picture was asked for once", 6, new HashSet<>(mediaRequested).size());
+            assertEquals(6, mediaRequested.size());
+            assertTrue("Pictures were fetched at the same time: " + mediaMostInFlight.get(), mediaMostInFlight.get() >= 2);
+            assertTrue("But not more than the limit: " + mediaMostInFlight.get(), mediaMostInFlight.get() <= MediaPrefetch.PARALLEL);
+        } finally { relayLatencyMillis = 0; servedMedia.clear(); }
+    }
+
+    @Test public void aPictureThatFailsToDownloadEarlyIsFetchedAgainAndTheAlbumStillArrives() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        List<ChatEngine.Incoming> incoming = perfAlbumFromThePeer(remote, 5);
+        UUID refused = incoming.get(2).mediaId();
+        mediaRefusedOnce.add(refused);
+        plainTransport(incoming, new ArrayList<>());
+        try {
+            engine.sync();
+            assertAlbumStoredIntact(5);
+            assertEquals("The one that failed was asked for twice, the others once", 6, mediaRequested.size());
+            assertEquals(2, Collections.frequency(mediaRequested, refused));
+        } finally { servedMedia.clear(); }
+    }
+
+    @Test public void aPictureThatCannotBeDownloadedAtAllIsTheSameFailureAsBefore() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        List<ChatEngine.Incoming> incoming = perfAlbumFromThePeer(remote, 3);
+        UUID missing = incoming.get(1).id();
+        servedMedia.remove(incoming.get(1).mediaId());
+        plainTransport(incoming, new ArrayList<>());
+        try {
+            RelayApi.ApiFailure failure = assertThrows(RelayApi.ApiFailure.class, engine::sync);
+            assertEquals("The relay's own answer, not something made up by the early fetch", 404, failure.status);
+            assertEquals("The one before it was stored", 1, engine.entries(peerId).size());
+            assertNull("The failed one left no trace", engine.entry(missing));
+        } finally { servedMedia.clear(); }
+    }
+
+    @Test public void aMessageThatWasAlreadyReceivedIsNotFetchedAgain() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        List<ChatEngine.Incoming> incoming = perfAlbumFromThePeer(remote, 4);
+        List<ChatEngine.Incoming> offeredAgain = new ArrayList<>(incoming);
+        plainTransport(incoming, new ArrayList<>());
+        try {
+            engine.sync();
+            assertAlbumStoredIntact(4);
+            assertEquals(4, mediaRequested.size());
+            incoming.addAll(offeredAgain);
+            engine.sync();
+            assertEquals("The relay offered them again: no picture was fetched for any of them", 4, mediaRequested.size());
+            assertEquals("and none was stored twice", 4, engine.entries(peerId).size());
+        } finally { servedMedia.clear(); }
+    }
+
+    @Test public void aBlockedSendersPicturesAreNotAskedForNotEvenEarly() throws Exception {
+        SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+        signedInFixture(); establishedConversation(remote);
+        List<ChatEngine.Incoming> incoming = perfAlbumFromThePeer(remote, 4);
+        plainTransport(incoming, new ArrayList<>());
+        engine.safety().block(peer);
+        try {
+            engine.sync();
+            assertEquals("Nothing was asked for: not by the early fetch, and not by the message", 0, mediaRequested.size());
+            assertTrue("and nothing was stored", engine.entries(peerId).isEmpty());
+        } finally { servedMedia.clear(); }
+    }
+
+    @Test public void probeReceivingAnAlbumOfPhotos() throws Exception {
+        Assume.assumeTrue("Speed probes are made only when asked for: perfProbe=1", perfAsked());
+        try {
+            SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+            signedInFixture(); establishedConversation(remote);
+            perfPadVault();
+            int count = perfNumber("perfPhotos", 6);
+            List<ChatEngine.Incoming> incoming = perfAlbumFromThePeer(remote, count);
+            plainTransport(incoming, new ArrayList<>());
+            relayLatencyMillis = perfNumber("perfLatency", 80);
+            long storeBefore = vault.sizeBytes(), revision = vault.revision();
+            List<Long> shown = Collections.synchronizedList(new ArrayList<>());
+            long started = android.os.SystemClock.elapsedRealtime();
+            engine.sync(() -> false, from -> shown.add(android.os.SystemClock.elapsedRealtime() - started));
+            long total = android.os.SystemClock.elapsedRealtime() - started;
+            perf("receive_total_ms", total);
+            perf("receive_commits", vault.revision() - revision);
+            perf("receive_store_growth_kb", (vault.sizeBytes() - storeBefore) / 1024);
+            for (int index = 0; index < shown.size(); index++) perf("receive_photo" + (index + 1) + "_shown_at_ms", shown.get(index));
+            assertEquals("Every photo of the album arrived", count, engine.entries(peerId).size());
+        } finally { relayLatencyMillis = 0; servedMedia.clear(); }
+    }
+
+    @Test public void probeSendingAnAlbumOfPhotos() throws Exception {
+        Assume.assumeTrue("Speed probes are made only when asked for: perfProbe=1", perfAsked());
+        try {
+            SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
+            signedInFixture(); establishedConversation(remote);
+            perfPadVault();
+            int count = perfNumber("perfPhotos", 6);
+            List<byte[]> photos = new ArrayList<>();
+            for (int index = 0; index < count; index++) photos.add(perfPhotoJpeg(index));
+            List<ChatEngine.Send> outgoing = new ArrayList<>();
+            plainTransport(new ArrayList<>(), outgoing);
+            relayLatencyMillis = perfNumber("perfLatency", 80);
+            UUID album = UUID.randomUUID();
+            long revision = vault.revision();
+            long started = android.os.SystemClock.elapsedRealtime();
+            for (int index = 0; index < count; index++) {
+                engine.send(peer, null, photos.get(index), ChatEnvelope.Expiry.HOURS_12, null, new ChatEnvelope.Album(album, index, count),
+                    UUID.randomUUID(), System.currentTimeMillis(), () -> { });
+                perf("send_photo" + (index + 1) + "_done_at_ms", android.os.SystemClock.elapsedRealtime() - started);
+            }
+            perf("send_total_ms", android.os.SystemClock.elapsedRealtime() - started);
+            perf("send_commits", vault.revision() - revision);
+            assertEquals("Every photo reached the relay", count, outgoing.size());
+        } finally { relayLatencyMillis = 0; }
+    }
+
+    @Test public void probeOpeningAChatThatHoldsAnAlbum() throws Exception {
+        Assume.assumeTrue("Speed probes are made only when asked for: perfProbe=1", perfAsked());
+        signedInFixture();
+        ChatEngine.Peer who = storeContact("Aarav Mehta", 1, 1);
+        int count = perfNumber("perfPhotos", 6);
+        UUID album = UUID.randomUUID();
+        for (int index = 0; index < count; index++) {
+            byte[] jpeg = perfPhotoJpeg(index);
+            storeMessage(who, false, null, jpeg, 1280, 960, new ChatEnvelope.Album(album, index, count), ChatEnvelope.Expiry.HOURS_12, "READ", 600 - index, null, null, null);
+        }
+        perfPadVault();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            awaitMainCondition(scenario, activity -> readField(activity, "contactRows") != null);
+            android.os.SystemClock.sleep(2_000);
+            for (int round = 1; round <= perfNumber("perfRounds", 3); round++) {
+                long[] open = perfMeasure(scenario, activity -> invoke(activity, "navigateChat", new Class<?>[]{UUID.class}, who.userId()),
+                    activity -> { List<PhotoTile> tiles = tilesOf(activity); return tiles.size() == Math.min(4, count) && tiles.stream().allMatch(PhotoTile::drawn); });
+                perf("album_open_round" + round + "_all_drawn_ms", open[1]); perf("album_open_round" + round + "_stall_ms", open[2]);
+                awaitMessages(scenario);
+                scenario.onActivity(activity -> invoke(activity, "navigateChat", new Class<?>[]{UUID.class}, new Object[]{null}));
+                android.os.SystemClock.sleep(1_500);
+            }
         }
     }
 
