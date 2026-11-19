@@ -20,8 +20,10 @@ to three at a time. Measured the same way, a save of the 4 MB store takes 40 ms 
 3.7 s to send instead of 18.8 s and 20.7 s. The release also carries the work on start-up (the logo with a progress bar), the light chat
 wallpaper and the quicker return from a chat to the list, and a fix for messages that moved while a photo above them took its shape.
 **An older build cannot read the new store file** (it fails closed and does not reset it), so a phone that has opened 0.7.1 cannot go back.
-No relay change, no new permission, nothing new on the wire. Emulator tests only: no physical phone, no hardware-backed Keystore measured, no
-Google Play install. See the [threat model](docs/THREAT-MODEL.md#a-faster-protected-store-and-photos-fetched-together-071) and the
+No relay change, no new permission, nothing new on the wire. **The direct-download APK and the website carry 0.7.1 since 2026-11-19** (Vercel deployment
+`dpl_3QPNuseayzsE8WFME2psNihvmvnK`, public release verified); the Google Play bundle is built but not uploaded yet (the owner uploads it).
+Emulator tests only: no physical phone, no hardware-backed Keystore measured, no Google Play install. See the
+[threat model](docs/THREAT-MODEL.md#a-faster-protected-store-and-photos-fetched-together-071) and the
 [verification](docs/VERIFICATION.md#release-071--a-faster-protected-store-and-photos-that-arrive-together-2026-11-19).
 
 Release **0.7.0/code 52** brings photos and emoji closer to the messengers people already know. A photo that is not view-once is now drawn in
@@ -32,8 +34,8 @@ because each is opened on its own). The composer has an emoji panel that takes t
 drawn large and without a bubble; and faces typed with keys (":)", ":D", "<3" and some twenty more) become their emoji when the next
 space is typed, and one press of delete brings the face back. The pictures exist in memory only and are dropped when the app leaves the
 screen. The album's place and the picture's size travel inside the encrypted message, so an earlier app shows the photos one after the
-other as it always did. **The direct-download APK and the website carry 0.7.0 since 2026-11-15** (Vercel deployment
-`dpl_9LXipderuJDMXhQG76SrNssNZncx`, public release verified); the Google Play bundle is built but not uploaded yet (the owner uploads it).
+other as it always did. **The direct-download APK and the website carried 0.7.0 from 2026-11-15 until 0.7.1, above** (Vercel deployment
+`dpl_9LXipderuJDMXhQG76SrNssNZncx`, public release verified); a Google Play bundle was built for the owner to upload.
 No relay change, no new permission and no new network call. Emulator tests only: no physical phone, no
 Google Play install. See the [threat model](docs/THREAT-MODEL.md#photos-in-the-chat-albums-emoji-and-typed-faces-070) and the
 [verification](docs/VERIFICATION.md#release-070--photos-in-the-chat-albums-emoji-and-typed-faces-2026-11-15).

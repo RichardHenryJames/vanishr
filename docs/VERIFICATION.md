@@ -10,7 +10,8 @@ Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#a-faster-protected-store-an
 back from a chat to the list, sending a reaction, and a start that showed "loading chat" as text. They asked for a very light WhatsApp-style
 chat wallpaper and for a startup screen with the logo and a progress bar, had begun the work themselves in commit `774eaca` ("Improve Vanishr
 Android responsiveness and startup", pulled and checked here), and then asked why several photos take long to appear on the receiving side and
-whether the pictures are compressed the way a fast messenger's are. This release is that commit plus what measuring it showed. **No relay change,
+whether the pictures are compressed the way a fast messenger's are. This release is that commit plus what measuring it showed. Commit `cf48189`.
+**No relay change,
 no new permission, nothing new on the wire.** Version 0.7.1 / code 53 in `build.gradle`.
 
 - **What the owner's commit did, measured alone** (`774eaca` built on its own, dedicated emulator, a 4 MB store): going back from a chat to the
@@ -116,6 +117,60 @@ no new permission, nothing new on the wire.** Version 0.7.1 / code 53 in `build.
   (The first attempt at this run was spoiled by the system UI's own "not
   responding" dialog taking the focus and was thrown away; the emulator was then wiped, started afresh with error dialogs turned off, airplane mode
   on, the Play store disabled and the background compiler run to the end before the run above.)
+- **Release gate** (`scripts\verify.ps1 -Android`, run on the tree committed as `cf48189`). JVM: client-core 38 tests and the relay 114 (2 skipped: the
+  live-relay tests), build successful (the one "ERROR" line in the log is a relay test that makes a migration fail on purpose). Android:
+  `:crypto:test` (up to date; its 38 tests had passed on this code), `:app:testDebugUnitTest` **141 tests, 0 failures**, `lintDebug` **0 errors,
+  18 warnings** (`SetTextI18n` 8, `UnusedResources` 6, and one each of `InlinedApi`, `MonochromeLauncherIcon`, `ObsoleteSdkInt` and `ViewConstructor`; the owner's
+  commit had added a nineteenth, `getDrawable`, which is fixed), `assembleDebug` and `assembleDebugAndroidTest`; then the Google release-configuration tests
+  (21), the over-the-air settings tests (25), the admin identity tests (15) and the checks of the committed signed settings file and admin
+  certificate: all passed. `lintRelease` ran again in each of the two release builds below, with no error.
+
+**Play bundle (0.7.1 / code 53, 2026-11-19)** (not uploaded anywhere; the owner uploads it)
+
+- **The bundle.** `.tools\play-store-0.7.1\vanishr-0.7.1.aab`, **46,081,071 bytes** (43.9 MiB), SHA-256
+  `86f738ff92454e0f6dce59e906ee3026a5de5717401b11e66ebb29ec01bf8eee`, built with `-PplayStore=true` from `cf48189` (tree clean) after the direct
+  APK below had been staged. bundletool 1.18.3 `validate` passed; 0.7.1 / code 53, min API 28, target API 36; 14 permissions, identical to the 0.7.0
+  bundle's (compared); 64-bit native libraries 16 KiB aligned; bundled notices match the source; no external updater; the Firebase client
+  configuration present and matching; the settings key file identical to the committed one; JAR signature verified with the same signer (SHA-256
+  `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`); an exhaustive by-value scan of the decompressed bundle (898 entries, eight
+  private values): no findings. The validator's output is in `.tools\play-store-0.7.1\validation\`.
+- **What this does not show.** The new store format and the early downloads were run only in the unminified QA build. The release build is minified by
+  R8: `AndroidVault` is kept under its own name, while `VaultEnvelope`, `VaultEnvelope$KeyWrapper`, `MediaPrefetch` and `AndroidVault$StoreBytes` are renamed (the
+  mapping was read, nothing was run), and none of them uses reflection. Also not shown: a physical phone, a hardware-backed Keystore or a StrongBox (what a
+  Keystore call costs there is not known; the store now makes one when it opens and one at the first commit of an opening, and none after), whether
+  Google Play accepts the bundle, and an install from Play.
+
+**Direct release and website (0.7.1 / code 53, 2026-11-19)**
+
+The owner chose to publish the direct-download APK, the website and the update feed with the Play bundle. The relay needed no change (nothing in this
+release uses a new relay API), so it was not touched; its health was checked by the packaging script before each build.
+
+- **Build and stage** (from `cf48189`, tree clean; the notices were regenerated and left the tree unchanged): signed APK **44,751,054 bytes**, SHA-256
+  `2815a92b4095dd3a8899aec0787613b6a2582b9ba28f6f9bef5bf6e6b3d754a0`, version 0.7.1 / code 53, min API 28, target API 36, the same 15 permissions as
+  0.7.0's APK (compared with `aapt2 dump permissions`: no difference), the same certificate as 0.7.0's (SHA-256
+  `c78586ebe29b1faaf3e828a3928366eb71c560461793ed856608e0eddbc5924c`); the staged APK is byte-identical to the built one. `.tools\vercel-download-0.7.1`: 36
+  files / 62,110,289 bytes (limit 99,000,000), recorded in `.tools\distribution-audit-0.7.1.json`. The content audit of the source ZIP (519 entries, 218 of
+  them dependency sources; 301 source files byte-identical to the commit and none different), the stage and the stored APK bytes searched for nine private
+  values by value and for the script's secret patterns: no findings. Compared with the stage that was last deployed (the website-only 0.7.0 one), 28 of the
+  34 files the two have in common are identical; the six that differ are the home page and `/android/` (the version), the security page (the sentence about
+  0.7.1), `sitemap.xml` (the dates), `updates.json` and `vercel.json` (the page's script hash and the APK's name), which is what was meant to change. The
+  settings file and the admin certificate in the stage are identical to the committed ones. Only `.vercel\project.json` was copied from the 0.7.0 website
+  stage (IDs checked, no `.env*` file). The source ZIP on the site is of `cf48189`; this record and the README entry were committed after it.
+- **In-place upgrade, from the public files.** On the dedicated test emulator (with a screen lock set for the test and cleared afterwards), the public 0.7.0
+  APK (the hash the feed had published, `ff4e0128…`) was installed and started (the sign-in screen), then the public 0.7.1 APK was installed over it with
+  `adb install -r`, no uninstall: version code 52 to 53, `firstInstallTime` unchanged, the same signing certificate (a different one would have refused the
+  update), the app running afterwards (a new process, on the same screen), an empty crash buffer and no fatal exception. The emulator had no account, so this
+  does not show that a store of the old format is read and written again by the release build (the QA build shows it).
+- **Vercel.** Deployment `dpl_3QPNuseayzsE8WFME2psNihvmvnK` (production, READY); the live feed served 0.7.0 / 52 before, so 53 is no downgrade. The deployment
+  alone did not move the canonical domain, so `vanishr-download.vercel.app` was moved to it explicitly (`vercel alias set`), as in the earlier releases.
+- **Public verification** (`.tools\public-release-verification-0.7.1.json`). The canonical feed reports 0.7.1 / 53 with `no-store`; all 35 audited files
+  fetched anonymously (`vercel.json` is not served) are byte-identical (HTTP 200); the public APK is byte-identical to the staged one and has the original
+  certificate; 22 private or missing paths return 404; security headers pass; the signed settings file (sequence 1) and the admin identity certificate
+  (sequence 3) are live and identical to the committed files (the settings file still expires on **2026-12-01**, 12.1 days away at the check, and needs
+  renewing before then); no problems. The home page and `/android/` name 0.7.1 and the download link is `vanishr-0.7.1.apk`, which is served as an attachment
+  with the right type and length (44,751,054); the earlier `vanishr-0.7.0.apk` is no longer served (404), as after earlier releases.
+- **What this does not show.** The in-app "Check for updates" banner on an older direct-download app with an account (the emulator had none), a physical
+  phone, and a browser download of the APK.
 
 ## Website only / New screenshots on the home page and for the store listing (2026-11-15)
 
