@@ -341,6 +341,17 @@ the one that carries all four and must not be uploaded.
   `MonochromeLauncherIcon`, `ObsoleteSdkInt` and `ViewConstructor`: the eighteen of 0.7.1 less one `SetTextI18n`); then the Google release-configuration
   tests (21), the over-the-air settings tests (25), the admin identity tests (15) and the checks of the committed signed settings file and admin
   certificate: all passed. **The signed settings file expires on 2026-12-01 at 06:28 UTC (10.4 days from the run) and has to be renewed before then.**
+- **The Play bundle** (`.tools\play-store-0.7.2\vanishr-0.7.2.aab`, made from the clean committed tree `3704be3` by `package-apk.ps1 -Bundle -PlayStore` against
+  the development relay): **SHA-256 `0866d24a91df0e588e3aaf2fe491efcfa4f6dfd1c316c3f110615327ec36befc`, 46,111,992 bytes**, version code 54, version name 0.7.2,
+  `minSdk` 28, `targetSdk` 36. bundletool 1.18.3 validates it; its JAR signature verifies and the signer certificate's SHA-256 is `c78586eb…924c`, the signer
+  expected. It asks for the same permissions as 0.7.1, no new one (the foreground-service permission for data sync is among them, as before). Its native
+  libraries are 16 KiB aligned, its notices match the source, no external updater is in it, and its Firebase client values match the validated
+  configuration. A scan of all 914 entries (128 MB decompressed) for the eight private values that exist on this machine (the signing password, the
+  service-account key, the deployment e-mail, the over-the-air and admin-authority key material) found nothing, and the over-the-air key list in it is the
+  committed one. The R8 map holds the new classes (`Palette`, `FlowBar`, `ExtendedFab`, the nested classes of `ChatListModel`; `ListMotion` and the top of
+  `ChatListModel` were inlined away). **It replaces the bundle of the chat-open work alone (`f541dc1c…2701`, from `e60ffe2`), which must not be uploaded.**
+  It has not been uploaded to Google Play: nothing is known of Play's review of it or of an install from Play. Nothing was published to the website or the
+  update feed.
 - **What this does not show.** Everything was measured on one emulator with a software-backed Keystore, in the QA build (debuggable, not minified), with made-up
   messages. No physical phone, no hardware-backed Keystore or StrongBox (a Keystore call costs more there, so memory should gain more; not measured), no
   Google Play install. The battery and heat cost of reading ahead (at most 28 Keystore calls each time the list is drawn, not more often than every
