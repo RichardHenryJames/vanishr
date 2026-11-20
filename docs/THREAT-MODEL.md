@@ -565,7 +565,7 @@ drawn again under the finger, the next pass does it.
 
 - **A pull erases nothing.** Clear chat, Remove contact and Block user open the same confirmation as before (the long press and the chat's
   menu use them too) and their effects are unchanged, so the confirmation is the only thing that acts; cancelling changes nothing.
-  The old "let go past a mark" action no longer exists in this build. The long press on a chat still asks to remove the contact. A mostly
+  The old "let go past a mark" action no longer exists in this build. The long press on a chat still asks to remove the contact (from 0.7.2 it chooses the chat instead; see [the chat list](#the-chat-list-latest-activity-first-a-line-under-each-name-pins-marks-and-selection-072)). A mostly
   vertical drag is left to the list's scrolling, and a drag is judged by how far and how fast it went (a short or slow one falls back,
   one past halfway or a quick flick stays). The buttons are controls with their names as descriptions, they cannot be reached while the
   row is closed, and a screen-reader user also gets the four as actions on the row. Touches are dropped when the window is obscured, like
@@ -866,13 +866,100 @@ Unchanged: no relay change, no new logging, nothing written to disk for any of t
 newest 100 messages and the paging of older ones, and fail-closed behavior for expired content, blocked senders, changed identities, failed
 authentication and unavailable secure storage.
 
-Not claimed: every number in [VERIFICATION.md](VERIFICATION.md#release-072--a-chat-that-opens-at-once-2026-11-19) comes from an emulator with a
+Not claimed: every number in [VERIFICATION.md](VERIFICATION.md#release-072--a-chat-that-opens-at-once-a-startup-bar-that-keeps-flowing-and-a-dark-look-2026-11-20) comes from an emulator with a
 software-backed Keystore and the QA build (debuggable, not minified), with made-up messages. A phone whose Keystore is hardware-backed or StrongBox-backed
 decrypts more slowly, so it should gain more from memory; that was not measured. A chat that was not read ahead and not opened before still has to
 decrypt the words of its first screen, about 14 calls to the Keystore, and the rest of its window of 100 still decrypts in the background after the
 first screen is drawn (two to three seconds on the emulator, invisible unless the person scrolls up at once). The cost of running the code for the first
 time after the app starts (class loading, building the first rows) is not removed: about 100 to 300 ms on the emulator on the first chat opened. Messages
 older than the window are decrypted when the person scrolls to them, as before. No physical phone was used.
+
+## The look of the app and the startup bar (0.7.2)
+
+**No relay change, no new permission and nothing on the wire.** The app has a dark look, chosen in My profile under *Theme* (System, Light or Dark),
+and the bar shown while the app opens flows without stopping. What this means for what the app protects:
+
+- **The choice is one word** (`system`, `light` or `dark`) in the app's ordinary `preferences` file, with the other plain switches kept there (the
+  notification ones), and not in the protected store. It says nothing about a message, a contact, an account or a key, and it is sent nowhere. Both
+  backup rule files exclude the `sharedpref` domain, so it is not part of an Android backup or a device transfer: a phone that the app is installed on
+  afresh starts at System.
+- **A change of look keeps nothing.** It recreates the activity. Pausing the old one is what `onPause` always does (`hideContent`: the open chat, the
+  composer and the pending sends are dropped and the engine is closed, which empties the words kept in memory), and the new one opens the store as at a
+  start, under the same checks. So what is carried across the change is the choice and nothing else: a person who changes the look is where one is who
+  left the app and came back, and a message that was still being sent, or that failed and waits for Retry, is lost as it would be then (no guard
+  against that was added). This follows from the code and was not given a test of its own; the tests show that the choice is kept, that a new activity
+  replaces the old one, and that it shows the chat list in the new look.
+- **Screen protection is unchanged.** `FLAG_SECURE` is set in `onCreate` of both activities and on every sheet and viewer that had it, with the
+  overlay and recents settings next to it; the dark look draws the same content as the light one. No new window, sheet or dialog was added for it that
+  lacks the flag (the Theme control is a row of the profile sheet, which has it).
+- **The window drawn before the activity chooses** takes the phone's mode (`values-night`), so a person who chose Dark on a phone that is in its light
+  mode may see the light window for a moment as the app starts, and one who chose Light on a phone in its dark mode the dark window. The keyboard and the
+  system's own dialogs follow the phone, not the choice.
+
+Unchanged: no relay change, no new logging, nothing written to disk but the one word above, the per-message keys and every deadline, and fail-closed
+behavior for expired content, blocked senders, changed identities, failed authentication and unavailable secure storage.
+
+Not claimed: that the dark look reads well on every phone. Its contrasts are computed from the palette (`PaletteTest`) and its screens were looked at by
+eye and measured by brightness on one emulator, not on a physical phone, whose panel, brightness and the owner's eyes may say otherwise. The startup
+bar was shown to flow on an emulator whose animations are switched off; why the bar it replaces was seen to stop on a phone was not established here, and
+the new one was not seen on a physical phone.
+
+## The chat list: latest activity first, a line under each name, pins, marks and selection (0.7.2)
+
+**No relay change, no new permission and nothing on the wire.** The home screen's list was redrawn: the chat with the newest message first with the
+time of that message, a line under each name, filter chips (All, Unread, Groups, Muted), a search that opens from its icon, a *New chat* button,
+pins, unread marks, a long press that chooses chats for the actions of a bar, and some motion. What this means for what the app protects:
+
+- **The list still shows no message text.** What stands under a name is worked out from the stored message *records* alone (`ChatEngine.chatSummaries`,
+  `ChatListModel`): for each chat, how many live messages it has, how many incoming ones are not read yet and whether the newest of those is a photo or
+  a view-once message, when the newest message was written, whether it came or went and how far an outgoing one got (sending, sent, delivered, read),
+  and when the next message vanishes. The line is one of a fixed few ("2 new messages", "New photo", "New view-once message", "Message", "View once",
+  "Photo", "No messages"; a group says who is in it, or its invitation or its problem, until there is something to say about its messages), never a word of
+  a message. Nothing is decrypted for it: it is one pass over the records that the unread counts already read, with no Keystore call (an emulator test
+  counts the Keystore's uses), and a JVM test holds the vocabulary.
+- **The list does show more metadata than it did**, on the person's own screen: the order of the list and the time beside a name say which chat was
+  active last and when, the line says whether the newest message is a photo or a view-once one and how far one's own message got, and a countdown (only in
+  the last hour before a chat's next message vanishes) says when that will be. Before, a row showed a name and an unread count. It is the same window,
+  with `FLAG_SECURE` as before, and the person can have the plain list back: *Show details in the chat list* in My profile (one word in the plain
+  `preferences` file, on by default) turns the order, the times, the lines and the countdowns off, and the list is groups and then contacts by name, as it was
+  (the counts, the pins and the marks stay).
+- **A pin and an unread mark are preferences kept on this phone**, as a mute is: one record each in the encrypted store (`pinned/<chat id>`,
+  `unread-mark/<chat id>`), never sent anywhere, not part of the encrypted backup (a restored account has none), erased with the account, and removed
+  with the chat when its contact is removed, blocked and discarded, or its group is left or removed; a cleared chat loses its mark and keeps its pin.
+  At most three chats are pinned, and the pin of a chat that no longer exists does not count. Showing a chat takes its mark off, however it was reached (from
+  the list, from a notification, or from an invitation).
+- **"Mark as read" sends read receipts, for more than opening the chat would.** It makes every new message from the other side that is not a view-once one
+  read and queues its receipt, in one commit with the removal of the mark (`ChatEngine.markChatRead`), so the other person is told that their messages were
+  read without the chat having been opened. Opening a chat reads what it draws: text as it is read for the screen, a photo only once it is drawn as a
+  picture, and nothing of the earlier history of a long chat until the person asks for it. "Mark as read" does not wait for any of that, so it also reads photos
+  that were never drawn and messages further back than opening would have shown, and the receipts for those go too. A view-once message is not read this way,
+  only by viewing it. "Mark as unread" is offered for a chat with nothing new, puts a dot on the list, and sends nothing.
+- **A failed send and a group message's progress are said in words from the records too.** A newest message that is outgoing and was not sent shows "Not sent"
+  (in the error colour, with its own icon) when nothing is new in the chat; a group message shows how far it got from its counts ("N delivered / M of K read":
+  read when everyone but the sender has read it, delivered when anyone has had it, sent before that). Nothing is read from a message for this.
+- **What erases still asks first.** *More* in the bar offers Clear chat and Remove contact (for contacts only; a group cannot be cleared or removed from
+  there, and cannot be muted); for several chats the sheet says how many ("Clear 2 chats", "Remove 2 contacts") and the same confirmation is asked, naming
+  up to three of them and counting the rest ("Maya, Noah and Aarav", "A, B, C and 4 more"). They do what the swipe buttons do (`clearChat`, `forget`), and
+  cancelling changes nothing. A chat that a chip or a search hides, or that is gone, is dropped from the choice before anything is asked, so a confirmation
+  never speaks for a chat the person cannot see. The long press no longer opens the removal of a contact (or the group's information): it chooses the chat.
+  While chats are chosen the rows cannot be pulled open, and a pull sideways is not a touch.
+- **What a screen reader is told, and a large font.** A row's line says in words what its icon says ("Message, read", "Photo, delivered", "Not sent"), the
+  countdown says when the next message vanishes ("The next message vanishes in 5 minutes"), the count of the Unread chip is spoken with the chip, and a
+  chosen row or chip says that it is chosen. These are strings set from the same records, nothing more. Rows, chips and counts wrap their content instead of
+  holding fixed heights, so text is not cut at a large font; an emulator test sets the largest font scale and checks that no line of a row is cut. The chips
+  are 44 dp to touch.
+- **The motion is decoration.** It starts after a screen has been laid out and never delays drawing it; a row that was somewhere else is drawn first where it
+  was and glides to its place, a new one fades in, a count that rose bounces, the search and the bar of a choice come in softly, and moving between the list and a
+  chat is a short slide. None of it runs when the phone's animation scale is 0 (what is shown is then the end state at once), and nothing is kept for it.
+
+Unchanged: no relay change, no new logging, nothing written to disk but the one word above and the pins and marks above (in the encrypted store), the
+per-message keys and every deadline, and fail-closed behavior for expired content, blocked senders, changed identities, failed authentication and unavailable
+secure storage.
+
+Not claimed: that the list feels right on a physical phone or with a real finger (the gestures are injected on an emulator), in a right-to-left language or
+with a screen reader in use (the descriptions are checked as strings; TalkBack was not run), or at a font size other than the default and the largest that
+the emulator test sets; that the times, the countdowns and the order are what the owner wants on a day-to-day basis (the switch is there for that); and that a
+person who marks chats read understands that the others are told, including for photos they have not seen drawn.
 
 ## Account erasure, blocks and safety reports
 

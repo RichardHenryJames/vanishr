@@ -192,6 +192,7 @@ final class GroupChat {
         }
         vault.transaction(() -> {
             vault.remove("group/"+id); vault.remove("group-title/"+id); vault.remove("group-allowed/"+id); vault.remove("group-invitation/"+id);
+            vault.remove("pinned/"+id); vault.remove("unread-mark/"+id);
             for (String prefix : List.of("group-approval/","group-signal/","group-key/","group-mark/","group-packet/","group-distribution/")) for (String name : vault.names(prefix+id+"/")) vault.remove(name);
             for (String name : vault.names("group-out/")) if (read(name,Outbox.class).groupId().equals(id)) vault.remove(name);
             for (String name : vault.names("group-control-out/")) if (read(name,QueuedControl.class).groupId().equals(id)) vault.remove(name);

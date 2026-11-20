@@ -24,7 +24,7 @@ final class SecureSheet extends BottomSheetDialog {
     private LinearLayout content;
 
     private SecureSheet(Builder spec) {
-        super(spec.context, R.style.ThemeOverlay_Vanishr_BottomSheet);
+        super(spec.context, Ui.dark ? R.style.ThemeOverlay_Vanishr_BottomSheet_Dark : R.style.ThemeOverlay_Vanishr_BottomSheet);
         this.spec = spec;
         design = new Ui(getContext());
         setDismissWithAnimation(true);
@@ -55,7 +55,7 @@ final class SecureSheet extends BottomSheetDialog {
         content.setPadding(design.dp(22), design.dp(8), design.dp(22), design.dp(26));
         content.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
         content.setSaveEnabled(false); content.setSaveFromParentEnabled(false);
-        View handle = new View(getContext()); handle.setBackground(design.background(Color.rgb(213, 221, 216), 2, 0));
+        View handle = new View(getContext()); handle.setBackground(design.background(Ui.dark ? Ui.OUTLINE : Color.rgb(213, 221, 216), 2, 0));
         LinearLayout.LayoutParams handleSize = new LinearLayout.LayoutParams(design.dp(30), design.dp(4));
         handleSize.gravity = Gravity.CENTER_HORIZONTAL; handleSize.topMargin = design.dp(1); handleSize.bottomMargin = design.dp(12);
         content.addView(handle, handleSize);
@@ -85,7 +85,7 @@ final class SecureSheet extends BottomSheetDialog {
                 Button neutral = action(BUTTON_NEUTRAL); neutral.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
                 MaterialButton textAction = (MaterialButton) neutral;
                 textAction.setStrokeWidth(0); textAction.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.TRANSPARENT));
-                textAction.setTextColor(Ui.PRIMARY); neutral.setPadding(0, 0, 0, 0);
+                textAction.setTextColor(Ui.ACCENT); neutral.setPadding(0, 0, 0, 0);
                 content.addView(neutral, new LinearLayout.LayoutParams(-1, -2));
                 content.addView(design.spacer(8));
             }
@@ -141,7 +141,7 @@ final class SecureSheet extends BottomSheetDialog {
         button.setMinWidth(0); button.setMinimumWidth(0); button.setCornerRadius(design.dp(6));
         if (!primary) {
             button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Ui.SURFACE));
-            button.setTextColor(Ui.INK); button.setStrokeWidth(design.dp(1)); button.setStrokeColor(android.content.res.ColorStateList.valueOf(Ui.LINE));
+            button.setTextColor(Ui.INK); button.setStrokeWidth(design.dp(1)); button.setStrokeColor(android.content.res.ColorStateList.valueOf(Ui.OUTLINE));
         }
         buttons.put(role, button); return button;
     }

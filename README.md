@@ -23,7 +23,34 @@ about 1 s; a chat that is neither still decrypts its first screen (about 0.5 s t
 few chats that are not open are now decrypted into memory while the list is shown, in memory only, as described in the threat model. No relay
 change, no new permission, nothing new on the wire. Emulator tests only: no physical phone, no hardware-backed Keystore measured, no Google Play
 install. See the [threat model](docs/THREAT-MODEL.md#the-words-of-messages-kept-in-memory-and-a-chat-that-opens-at-once-072) and the
-[verification](docs/VERIFICATION.md#release-072--a-chat-that-opens-at-once-2026-11-19).
+[verification](docs/VERIFICATION.md#release-072--a-chat-that-opens-at-once-a-startup-bar-that-keeps-flowing-and-a-dark-look-2026-11-20).
+
+The same release also changes how the app looks. **The bar under the logo while the app opens now flows without stopping**: the Material bar
+it replaces was seen to stop on a phone (why was not established), and the new one is drawn from the clock frame by frame, with no animator and
+no pause between rounds, so it keeps flowing whatever the phone's animation settings are, a person's "remove animations" included (the emulator the
+tests run on has its animations switched off and the test shows the bar being drawn again and again there; it was not seen on a physical phone).
+**There is a dark theme**, chosen in My profile under *Theme* (System, Light or Dark). Until the person chooses, the app follows the phone's
+dark mode, which is a change for phones that are in it: the app was always light before. The light look is unchanged, color for color (a
+test holds every light color to its old value); the dark look is a second palette whose text and fills each reach a contrast of at least
+4.5 to 1, checked by a JVM test. Seven screens and sheets (the chat list, the profile, a chat and four sheets) are measured to be dark by an emulator
+test, and the rest were looked at in a run of the whole test class in the dark look; that every text and icon can be read on the dark page is something
+that looking found faults in (two icons) and no test asserts for all of them. Choosing a look makes the screen again (the app opens its chat list, and
+what was waiting to be sent is lost, as when the app is left), because every view takes its colors when it is built. Emulator only; the
+website is unchanged. See the [verification](docs/VERIFICATION.md#release-072--a-chat-that-opens-at-once-a-startup-bar-that-keeps-flowing-and-a-dark-look-2026-11-20).
+
+**The chat list was redrawn in the same release.** The chat with the newest message is first and shows the time of that message. A line under each name says
+what is new, worked out from the stored message records alone ("2 new messages", "New photo", "New view-once message", or how far your own last message
+got), never a word of a message, and a countdown shows in the last hour before a chat's next message vanishes. Chips (All, Unread with its count, Groups,
+Muted) take the place of the funnel, the search opens from its icon, and a *New chat* button takes the place of the two toolbar buttons. A long press
+chooses chats, and a bar acts on them: Pin (up to three), Mute, Mark as read or unread, and More (Clear chat, Remove contact, each asked about first). Rows glide
+when the order changes and counts bounce, and none of that runs when the phone's animations are off. *Show details in the chat list* in My profile
+turns the order, the times, the lines and the countdowns off and brings back the plain list by name. **Two things to know:** the list now shows more about
+each chat on the screen than it did (which was active when, what kind its newest message is, when its next one vanishes), and *Mark as read* sends read
+receipts for every new message at once, including photos and older messages that opening the chat would not have drawn yet. Pins and unread marks stay on the
+phone, like a mute: never sent, not in the encrypted backup, removed with the chat.
+Emulator tests only: no physical phone, no real finger, no screen reader in use. See the
+[threat model](docs/THREAT-MODEL.md#the-chat-list-latest-activity-first-a-line-under-each-name-pins-marks-and-selection-072) and the
+[verification](docs/VERIFICATION.md#release-072--a-chat-that-opens-at-once-a-startup-bar-that-keeps-flowing-and-a-dark-look-2026-11-20).
 
 Release **0.7.1/code 53** makes the app feel faster, and what it changes is the protected store rather than the screens. On the test emulator the
 whole store file was encrypted by the Android Keystore, which takes about a quarter of a second for each megabyte, at every save and again when

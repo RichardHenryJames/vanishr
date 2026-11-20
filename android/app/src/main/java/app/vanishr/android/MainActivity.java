@@ -54,9 +54,10 @@ public final class MainActivity extends AppCompatActivity {
         photoPermissionPending = false;
         if (resumed) { if (engine == null) load(); else continuePhotoChoice(); }
     }
-    private static final int INK = Ui.INK;
-    private static final int GREEN = Ui.PRIMARY;
-    private static final int MUTED = Ui.MUTED;
+    // The look in use (see Ui.configure), copied when the activity is created: a change of look makes a new activity, so they never change under views.
+    private int INK = Ui.INK;
+    private int GREEN = Ui.ACCENT;
+    private int MUTED = Ui.MUTED;
     private Ui design;
     private final Handler ui = new Handler(Looper.getMainLooper());
     // Let queued image results recycle themselves even when ordinary UI callbacks are cleared.
@@ -251,9 +252,18 @@ public final class MainActivity extends AppCompatActivity {
     private UUID homeOwner;
     private String homeOwnerName;
     private record ChatListContents(java.util.List<ChatEngine.Peer> peers, java.util.List<GroupChat.Conversation> groups,
-                                    Set<UUID> muted, long directory) {
+                                    Set<UUID> muted, long directory, Set<UUID> pinned, Set<UUID> marked, Map<UUID, ChatListModel.Summary> summaries) {
         static ChatListContents read(ChatEngine current) {
-            return new ChatListContents(current.peers(), current.groups().conversations(), current.mutedChats(), current.onboarding().generation());
+            return new ChatListContents(current.peers(), current.groups().conversations(), current.mutedChats(), current.onboarding().generation(),
+                    current.pinnedChats(), current.unreadMarks(), current.chatSummaries());
+        }
+        static ChatListContents none() { return new ChatListContents(java.util.List.of(), java.util.List.of(), Set.of(), 0, Set.of(), Set.of(), Map.of()); }
+        ChatListModel.Summary summary(UUID id) { return summaries.getOrDefault(id, ChatListModel.Summary.EMPTY); }
+        /** Incoming messages not read yet, per chat that has any. */
+        Map<UUID, Long> unreadCounts() {
+            Map<UUID, Long> counts = new HashMap<>();
+            summaries.forEach((id, summary) -> { if (summary.unread() > 0) counts.put(id, summary.unread()); });
+            return counts;
         }
     }
     private ChatListContents shownChats;
@@ -278,9 +288,44 @@ public final class MainActivity extends AppCompatActivity {
     private LinearLayout contactRows;
     private SwipeActions.Group rowSwipes = new SwipeActions.Group();
     private View homeConnection;
-    private ImageButton unreadFilter;
-    private boolean unreadOnly;
+    // The filter chip that shows only unread chats (kept under this name for the tests), and the filter chosen.
+    private View unreadFilter;
+    private ChatListModel.Filter listFilter = ChatListModel.Filter.ALL;
     private String homeQuery = "";
+    private final Map<ChatListModel.Filter, LinearLayout> filterChips = new java.util.EnumMap<>(ChatListModel.Filter.class);
+    private TextView unreadChipCount;
+    private FrameLayout toolbarHost;
+    private LinearLayout homeToolbar, selectionBar, searchRow;
+    private ExtendedFab newChat;
+    private boolean searchOpen;
+    // The chats selected by a long press, in the order they were chosen, and the buttons of the bar that shows while there are some.
+    private final java.util.Set<UUID> selectedChats = new java.util.LinkedHashSet<>();
+    private TextView selectionCount;
+    private ImageButton selectionPin, selectionMute, selectionMark, selectionMore;
+    // The rows as drawn: their views by chat, what each row is (to know whether they must be built again), and when the next message of any row vanishes.
+    private final Map<UUID, View> rowHolders = new HashMap<>();
+    private final Map<UUID, View> rowDividers = new HashMap<>();
+    private final Map<UUID, RowViews> rowViews = new HashMap<>();
+    private java.util.List<RowKey> shownKeys = java.util.List.of();
+    private long listSoonestExpiry = Long.MAX_VALUE, nextListTick;
+    // What one row is, as far as drawing it goes: when this changes for any row, or the rows are another list, they are built again.
+    private record RowKey(UUID id, boolean group, String name, boolean muted, boolean pinned, boolean reviewing, boolean details) { }
+    // What one row says. It can change without the row being built again: the views that are there are made to say it.
+    private record RowText(long unread, boolean marked, boolean selected, boolean emphasis, int icon, int iconColor, String text, int textColor,
+                           String time, String countdown, String spoken, String countdownSpoken) { }
+    private record PlannedRow(RowKey key, RowText text, ChatEngine.Peer peer, GroupChat.Conversation group, long newestAt, long nextExpiryAt) { }
+    private static final class RowViews {
+        LinearLayout row, statusLine, endRow;
+        // The countdown and the count are made when a row first has something to show in them: most rows never do.
+        LinearLayout countdownGroup;
+        TextView name, status, time, countdown, badge;
+        ImageView icon, pin, check;
+        RowText shown;
+        boolean emphasised;
+        long newestAt, nextExpiryAt;
+    }
+    // Set when moving between the list and a chat, used once the next screen is in place: 1 forward into a chat, -1 back to the list.
+    private int screenDirection;
     private int screenInset = 20;
     private androidx.core.graphics.Insets systemInsets = androidx.core.graphics.Insets.NONE;
     private boolean chatScreen;
@@ -405,6 +450,8 @@ public final class MainActivity extends AppCompatActivity {
             resumeAfterPhoneUnlock();
             refreshProfileAvatars();
             refreshContactStatus();
+            // The times and countdowns of the chat list move on with the clock.
+            if (resumed && contactRows != null && selectedPeer == null) tickChatList();
             // The words of a message that has expired leave memory with its row, not at the next sync.
             ChatEngine reading = engine;
             if (reading != null) reading.dropExpiredWords();
@@ -449,12 +496,18 @@ public final class MainActivity extends AppCompatActivity {
     };
 
     @Override protected void onCreate(Bundle state) {
+        // Which look this screen has, light or dark, is worked out first: every view is built from it.
+        Ui.configure(this);
+        setTheme(Ui.theme());
+        INK = Ui.INK; GREEN = Ui.ACCENT; MUTED = Ui.MUTED;
         super.onCreate(null);
         design = new Ui(this);
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override public void handleOnBackPressed() {
                 if ((emojiShown || emojiPending) && emojiPanel != null && emojiPanel.isAttachedToWindow()) { hideEmoji(false); return; }
+                if (selectedPeer == null && !selectedChats.isEmpty()) { endSelection(); return; }
                 if (selectedPeer == null && rowSwipes.closeOpen()) return;
+                if (selectedPeer == null && searchOpen) { closeSearch(); return; }
                 if (selectedPeer != null && engine != null) navigateChat(null);
                 else { hideContent(); finish(); }
             }
@@ -657,15 +710,11 @@ public final class MainActivity extends AppCompatActivity {
             LinearLayout center = vertical();
             center.setGravity(Gravity.CENTER);
             center.addView(design.logo(80), new LinearLayout.LayoutParams(dp(80), dp(80)));
-            var progress = new com.google.android.material.progressindicator.LinearProgressIndicator(this);
+            // A light that flows along the bar round after round and never stops, whatever the phone's animation settings are.
+            var progress = new FlowBar(this);
             progress.setId(R.id.startup_progress);
             progress.setContentDescription(getString(R.string.opening_vanishr));
-            progress.setTrackThickness(dp(4));
-            progress.setTrackCornerRadius(dp(2));
-            progress.setIndicatorColor(GREEN);
-            progress.setTrackColor(Ui.LINE);
-            progress.setIndeterminate(true);
-            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(dp(132), -2);
+            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(dp(132), dp(4));
             size.topMargin = dp(18);
             center.addView(progress, size);
             root.addView(center, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -795,12 +844,18 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void navigateChat(UUID peer) {
-        if (peer != null) rowSwipes.closeOpen();
+        if (peer != null) {
+            rowSwipes.closeOpen();
+            selectedChats.clear();
+        }
+        screenDirection = peer != null ? 1 : -1;
         selectedPeer = peer;
         render(true);
     }
 
     private void render(boolean keepHome) {
+        int direction = screenDirection;
+        screenDirection = 0;
         if (!resumed) return;
         ChatEngine current = engine;
         if (current == null) { storageState(); return; }
@@ -835,6 +890,8 @@ public final class MainActivity extends AppCompatActivity {
             finally { restoringDraft = false; }
         }
         maybePromptUpdate(false);
+        // Moving between the list and a chat is a short slide, started once the screen is in place.
+        if (direction != 0 && ListMotion.enabled()) ListMotion.screenIn(root, direction * dp(24));
     }
 
     private void checkForUpdates(boolean manual) {
@@ -1069,7 +1126,7 @@ public final class MainActivity extends AppCompatActivity {
     private View noticeCard(String title, String body, boolean strong, String actionLabel, Runnable action, Runnable dismiss) {
         LinearLayout card = vertical();
         card.setPadding(dp(14), dp(12), dp(14), dp(4));
-        card.setBackground(design.background(strong ? Ui.ERROR_TINT : Ui.TINT, 8, strong ? Ui.ERROR : Ui.PRIMARY));
+        card.setBackground(design.background(strong ? Ui.ERROR_TINT : Ui.TINT, 8, strong ? Ui.ERROR : Ui.ACCENT));
         card.setContentDescription("Notice");
         card.addView(design.text(title, 13, 700, INK));
         TextView text = design.text(body, 12, 500, INK);
@@ -1214,7 +1271,7 @@ public final class MainActivity extends AppCompatActivity {
         if (homeLayout != null) {
             refreshProfileAvatars();
             root.addView(homeLayout, new LinearLayout.LayoutParams(-1, -1));
-            updateContacts(ChatListContents.read(engine), engine.unreadCounts());
+            updateContacts(ChatListContents.read(engine), false);
             renderNotice();
             homeStatus();
             readAhead();
@@ -1224,26 +1281,29 @@ public final class MainActivity extends AppCompatActivity {
         homeOwnerName = displayName;
         homeLayout = vertical();
         root.addView(homeLayout, new LinearLayout.LayoutParams(-1, -1));
-        LinearLayout toolbar = horizontal(); toolbar.setPadding(dp(17), 0, dp(17), 0);
-        toolbar.setContentDescription("Chats");
+        homeToolbar = horizontal(); homeToolbar.setPadding(dp(17), 0, dp(17), 0);
+        homeToolbar.setContentDescription("Chats");
         LinearLayout brand = horizontal();
         brand.addView(design.logo(28));
-        brand.addView(design.text("vanishr", 25, 800, INK));
+        brand.addView(design.text("vanishr", 24, 800, INK));
         homeConnection = new View(this);
         LinearLayout.LayoutParams indicator = new LinearLayout.LayoutParams(dp(6), dp(6)); indicator.setMarginStart(dp(9));
         brand.addView(homeConnection, indicator);
-        toolbar.addView(brand, new LinearLayout.LayoutParams(0, -1, 1));
-        toolbar.addView(icon(R.drawable.ic_users_round, "New group", this::newGroupDialog));
-        ImageButton add = icon(R.drawable.ic_square_pen, "New conversation", this::newConversationDialog); add.setPadding(dp(10), dp(10), dp(10), dp(10));
-        add.setBackground(design.feedback(Ui.PRIMARY, 7)); add.setColorFilter(Color.WHITE);
-        LinearLayout.LayoutParams composeSize = new LinearLayout.LayoutParams(dp(40), dp(40)); composeSize.setMarginStart(dp(4)); toolbar.addView(add, composeSize);
+        homeToolbar.addView(brand, new LinearLayout.LayoutParams(0, -1, 1));
+        homeToolbar.addView(icon(R.drawable.ic_search, "Search chats", this::toggleSearch));
         View profile = profileAvatar(homeOwner, displayName, 40, Ui.BLUE);
         profile.setContentDescription("My profile"); profile.setTooltipText("My profile"); profile.setFocusable(true);
         profile.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES); profile.setFilterTouchesWhenObscured(true);
         profile.setOnClickListener(view -> accountDialog());
-        LinearLayout.LayoutParams profileSize = new LinearLayout.LayoutParams(dp(40), dp(40)); profileSize.setMarginStart(dp(7)); toolbar.addView(profile, profileSize);
-        homeLayout.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(60)));
-        LinearLayout searchRow = horizontal(); searchRow.setGravity(Gravity.TOP); searchRow.setPadding(dp(17), dp(2), dp(17), dp(10));
+        LinearLayout.LayoutParams profileSize = new LinearLayout.LayoutParams(dp(40), dp(40)); profileSize.setMarginStart(dp(6)); homeToolbar.addView(profile, profileSize);
+        // The bar of a selection takes the place of the toolbar while chats are selected.
+        toolbarHost = new FrameLayout(this); toolbarHost.setSaveEnabled(false);
+        toolbarHost.addView(homeToolbar, new FrameLayout.LayoutParams(-1, -1));
+        selectionBar = selectionBar(); selectionBar.setVisibility(View.GONE);
+        toolbarHost.addView(selectionBar, new FrameLayout.LayoutParams(-1, -1));
+        homeLayout.addView(toolbarHost, new LinearLayout.LayoutParams(-1, dp(56)));
+        // The search opens from its icon; a search that is under way (the text is kept while a chat is open) keeps it open.
+        searchRow = horizontal(); searchRow.setGravity(Gravity.TOP); searchRow.setPadding(dp(16), dp(2), dp(16), dp(8));
         LinearLayout searchBox = horizontal(); searchBox.setPadding(dp(12), 0, dp(4), 0); searchBox.setBackground(design.background(Ui.SURFACE, 7, Ui.LINE));
         searchBox.addView(design.symbol(R.drawable.ic_search, 18, MUTED));
         contactSearch = field("Search chats", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
@@ -1254,25 +1314,58 @@ public final class MainActivity extends AppCompatActivity {
         clear.setPadding(dp(8), dp(10), dp(8), dp(10)); clear.setVisibility(homeQuery.isEmpty() ? View.GONE : View.VISIBLE);
         searchBox.addView(clear, new LinearLayout.LayoutParams(dp(32), -1));
         searchRow.addView(searchBox, new LinearLayout.LayoutParams(0, dp(44), 1));
-        unreadFilter = icon(R.drawable.ic_list_filter, "Unread chats", () -> { unreadOnly = !unreadOnly; renderContacts(); });
-        LinearLayout.LayoutParams filterSize = new LinearLayout.LayoutParams(dp(44), dp(44)); filterSize.setMarginStart(dp(7)); searchRow.addView(unreadFilter, filterSize);
-        homeLayout.addView(searchRow, new LinearLayout.LayoutParams(-1, dp(56)));
+        searchOpen = !homeQuery.isEmpty();
+        searchRow.setVisibility(searchOpen ? View.VISIBLE : View.GONE);
+        homeLayout.addView(searchRow, new LinearLayout.LayoutParams(-1, dp(54)));
+        // Filter chips: what the funnel icon was, with its choices spelled out.
+        android.widget.HorizontalScrollView chipScroll = new android.widget.HorizontalScrollView(this);
+        chipScroll.setHorizontalScrollBarEnabled(false); chipScroll.setOverScrollMode(View.OVER_SCROLL_NEVER); chipScroll.setSaveEnabled(false);
+        LinearLayout chipRow = horizontal(); chipRow.setPadding(dp(16), 0, dp(16), 0);
+        filterChips.clear();
+        for (ChatListModel.Filter filter : ChatListModel.Filter.values()) {
+            LinearLayout chip = filterChip(filter);
+            filterChips.put(filter, chip);
+            LinearLayout.LayoutParams chipSize = new LinearLayout.LayoutParams(-2, -2); chipSize.setMarginEnd(dp(8));
+            chipRow.addView(chip, chipSize);
+        }
+        unreadFilter = filterChips.get(ChatListModel.Filter.UNREAD);
+        chipScroll.addView(chipRow, new android.widget.FrameLayout.LayoutParams(-2, -2));
+        homeLayout.addView(chipScroll, new LinearLayout.LayoutParams(-1, -2));
         noticeHost = vertical();
         // A notice can never take more than part of the space that is left, whatever it says: the chat list below it stays reachable.
         noticeArea = new BoundedScrollView(this, .4f);
         noticeArea.addView(noticeHost);
         homeLayout.addView(noticeArea, new LinearLayout.LayoutParams(-1, -2));
         renderNotice();
+        FrameLayout listFrame = new FrameLayout(this); listFrame.setSaveEnabled(false);
         ScrollView scroll = new ScrollView(this);
         rowSwipes = new SwipeActions.Group();
         closeRowsOnTouch(scroll);
         contactRows = vertical(); scroll.setFillViewport(true); scroll.addView(contactRows);
-        homeLayout.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        // Room under the last row for the button that floats over the list.
+        contactRows.setPadding(0, 0, 0, dp(88));
+        listFrame.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
+        newChat = new ExtendedFab(this, design, R.drawable.ic_square_pen, "New chat");
+        newChat.setContentDescription("New conversation"); newChat.setTooltipText("New conversation");
+        newChat.setOnClickListener(view -> newConversationDialog());
+        FrameLayout.LayoutParams chatButtonSize = new FrameLayout.LayoutParams(-2, dp(56), Gravity.BOTTOM | Gravity.END);
+        chatButtonSize.setMargins(0, 0, dp(16), dp(16));
+        listFrame.addView(newChat, chatButtonSize);
+        // The button keeps only its icon while the list is scrolled down and brings its label back when it is scrolled up or at its top.
+        scroll.setOnScrollChangeListener((view, x, y, oldX, oldY) -> {
+            if (newChat == null) return;
+            if (y <= dp(4) || y - oldY < -dp(2)) newChat.setExtended(true, true);
+            else if (y - oldY > dp(2)) newChat.setExtended(false, true);
+        });
+        homeLayout.addView(listFrame, new LinearLayout.LayoutParams(-1, 0, 1));
         renderContacts();
         contactSearch.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence value, int start, int count, int after) { }
             @Override public void onTextChanged(CharSequence value, int start, int before, int count) {
-                homeQuery = value.toString(); clear.setVisibility(value.length() == 0 ? View.GONE : View.VISIBLE); renderContacts();
+                homeQuery = value.toString(); clear.setVisibility(value.length() == 0 ? View.GONE : View.VISIBLE);
+                // Text that arrives by itself (a restored search) is never left behind a closed search row.
+                if (value.length() > 0 && !searchOpen) { searchOpen = true; searchRow.setVisibility(View.VISIBLE); }
+                renderContacts();
             }
             @Override public void afterTextChanged(Editable value) { }
         });
@@ -1316,6 +1409,10 @@ public final class MainActivity extends AppCompatActivity {
         homeLayout = null; homeOwner = null; homeOwnerName = null; shownChats = null; shownUnread = Map.of();
         contactRows = null; contactSearch = null; unreadLabels.clear();
         homeConnection = null; unreadFilter = null; noticeHost = null; noticeArea = null;
+        filterChips.clear(); unreadChipCount = null; toolbarHost = null; homeToolbar = null; selectionBar = null; searchRow = null; newChat = null;
+        searchOpen = false; selectedChats.clear(); rowHolders.clear(); rowDividers.clear(); rowViews.clear();
+        shownKeys = java.util.List.of(); listSoonestExpiry = Long.MAX_VALUE;
+        selectionCount = null; selectionPin = null; selectionMute = null; selectionMark = null; selectionMore = null;
         rowSwipes = new SwipeActions.Group();
     }
 
@@ -1464,90 +1561,140 @@ public final class MainActivity extends AppCompatActivity {
 
     private void renderContacts() {
         if (contactRows == null || engine == null) return;
-        renderContacts(ChatListContents.read(engine), engine.unreadCounts());
+        renderContacts(ChatListContents.read(engine), true);
     }
 
-    private void updateContacts(ChatListContents contents, Map<UUID, Long> unreadCounts) {
-        if (contactRows == null || rowSwipes.active()) return;
-        if (!contents.equals(shownChats) || (unreadOnly && !unreadCounts.keySet().equals(shownUnread.keySet()))) {
-            renderContacts(contents, unreadCounts);
+    private boolean updateContacts(ChatListContents contents, boolean animate) {
+        if (contactRows == null || rowSwipes.active()) return false;
+        renderContacts(contents, animate);
+        return true;
+    }
+
+    // Whether the list shows more than the names: the order of latest activity, a time and a line under each name (the person's choice, on
+    // by default). Off is the plain list: groups, then contacts, each by name.
+    private boolean listDetails() { return getSharedPreferences("preferences", MODE_PRIVATE).getBoolean("list-details", true); }
+
+    private static java.util.Set<UUID> chatIds(ChatListContents contents) {
+        java.util.Set<UUID> ids = new java.util.HashSet<>();
+        for (ChatEngine.Peer peer : contents.peers()) ids.add(peer.userId());
+        for (GroupChat.Conversation group : contents.groups()) ids.add(group.id());
+        return ids;
+    }
+
+    // The rows to draw, in order: those that pass the search and the chosen filter chip, pinned first, then (with details) latest first.
+    private java.util.List<PlannedRow> planRows(ChatListContents contents) {
+        boolean details = listDetails();
+        long now = System.currentTimeMillis();
+        String query = contactSearch == null ? "" : contactSearch.getText().toString().toLowerCase(Locale.ROOT);
+        java.util.Set<UUID> reviewing = engine.onboarding().changedContacts();
+        Map<UUID, PlannedRow> byId = new java.util.LinkedHashMap<>();
+        for (GroupChat.Conversation group : contents.groups()) {
+            if (!group.name().toLowerCase(Locale.ROOT).contains(query)) continue;
+            byId.put(group.id(), plannedRow(contents, group.id(), group.name(), null, group, false, details, now));
+        }
+        for (ChatEngine.Peer peer : contents.peers()) {
+            if (!peer.name().toLowerCase(Locale.ROOT).contains(query) && !peer.username().contains(query)
+                    && (peer.profileName() == null || !peer.profileName().toLowerCase(Locale.ROOT).contains(query))) continue;
+            byId.put(peer.userId(), plannedRow(contents, peer.userId(), peer.name(), peer, null, reviewing.contains(peer.userId()), details, now));
+        }
+        java.util.List<ChatListModel.Row> rows = new ArrayList<>();
+        for (PlannedRow planned : byId.values()) {
+            UUID id = planned.key().id();
+            ChatListModel.Summary summary = contents.summary(id);
+            if (!ChatListModel.passes(listFilter, planned.key().group(), ChatListModel.unread(summary, contents.marked().contains(id)), planned.key().muted())) continue;
+            rows.add(new ChatListModel.Row(id, planned.key().pinned(), summary.newestAt()));
+        }
+        java.util.List<PlannedRow> ordered = new ArrayList<>(rows.size());
+        for (ChatListModel.Row row : ChatListModel.order(rows, details)) ordered.add(byId.get(row.id()));
+        return ordered;
+    }
+
+    private PlannedRow plannedRow(ChatListContents contents, UUID id, String name, ChatEngine.Peer peer, GroupChat.Conversation group,
+                                  boolean reviewing, boolean details, long now) {
+        ChatListModel.Summary summary = contents.summary(id);
+        RowKey key = new RowKey(id, group != null, name, group == null && contents.muted().contains(id), contents.pinned().contains(id), reviewing, details);
+        RowText text = rowText(summary, contents.marked().contains(id), selectedChats.contains(id), group == null ? null : engine.groups().status(group),
+                reviewing, details, now);
+        return new PlannedRow(key, text, peer, group, details ? summary.newestAt() : 0, details ? summary.nextExpiryAt() : 0);
+    }
+
+    private RowText rowText(ChatListModel.Summary summary, boolean marked, boolean selected, String groupStatus, boolean reviewing, boolean details, long now) {
+        boolean emphasis = details && ChatListModel.unread(summary, marked);
+        String time = details ? ChatListModel.time(summary.newestAt(), now, java.time.ZoneId.systemDefault(), Locale.getDefault()) : "";
+        String countdown = details ? ChatListModel.countdown(summary.nextExpiryAt(), now) : "";
+        int icon = 0, iconColor = MUTED, textColor = emphasis ? INK : MUTED;
+        String text = "", deliveryWord = "";
+        if (reviewing) {
+            text = "Identity changed. Tap to review"; textColor = Ui.ERROR;
+        } else if (groupStatus != null && (!details || summary.live() == 0 || !groupStatus.endsWith(" members"))) {
+            // What the group is (its members, an invitation, a problem) is what shows until there is something to say about its messages.
+            text = groupStatus; icon = R.drawable.ic_users_round;
+        } else if (details) {
+            ChatListModel.Line line = ChatListModel.line(summary);
+            text = line.text();
+            switch (line.icon()) {
+                case PHOTO -> icon = R.drawable.ic_image;
+                case VIEW_ONCE -> icon = R.drawable.ic_eye;
+                case SENDING -> { icon = R.drawable.ic_clock_3; deliveryWord = "sending"; }
+                case SENT -> { icon = R.drawable.ic_check; deliveryWord = "sent"; }
+                case DELIVERED -> { icon = R.drawable.ic_check_check; deliveryWord = "delivered"; }
+                case READ -> { icon = R.drawable.ic_check_check; iconColor = Ui.ACCENT; deliveryWord = "read"; }
+                case FAILED -> { icon = R.drawable.ic_circle_alert; iconColor = Ui.ERROR; textColor = Ui.ERROR; }
+                case NONE -> { }
+            }
+            if (emphasis && icon != 0 && line.icon() != ChatListModel.Icon.FAILED) iconColor = INK;
+        }
+        String spoken = deliveryWord.isEmpty() ? "" : text + ", " + deliveryWord;
+        return new RowText(summary.unread(), marked, selected, emphasis, icon, iconColor, text, textColor, time, countdown, spoken,
+            details ? ChatListModel.countdownSpoken(summary.nextExpiryAt(), now) : "");
+    }
+
+    private void renderContacts(ChatListContents contents, boolean animate) {
+        java.util.List<PlannedRow> plan = planRows(contents);
+        java.util.List<RowKey> keys = new ArrayList<>(plan.size());
+        for (PlannedRow planned : plan) keys.add(planned.key());
+        // A chat that is gone, or that a search or a chip hides, is no longer chosen: what the bar acts on is what the person can see.
+        java.util.Set<UUID> listed = new java.util.HashSet<>();
+        for (RowKey key : keys) listed.add(key.id());
+        selectedChats.retainAll(listed);
+        ChatListContents previous = shownChats;
+        Map<UUID, Long> countsBefore = shownUnread;
+        shownChats = contents; shownUnread = contents.unreadCounts();
+        updateChips(contents);
+        updateSelectionBar();
+        // The same rows, and only what they say has changed, or the order they are in: the views that are there are made to say it and put in
+        // their order, which also keeps a list that was scrolled, and the views of its rows, as they were when the person comes back to it.
+        // Nothing is made, so a chat that moved to the top because of a message costs no more than one that only changed its count.
+        if (previous != null && !plan.isEmpty() && contactRows.getChildCount() > 0 && previous.directory() == contents.directory() && sameRows(keys)) {
+            boolean moved = !keys.equals(shownKeys);
+            Map<UUID, Float> tops = moved && animate && ListMotion.enabled() && contactRows.isAttachedToWindow() ? recordTops() : null;
+            long soonest = Long.MAX_VALUE;
+            for (PlannedRow planned : plan) {
+                RowViews views = rowViews.get(planned.key().id());
+                if (views == null) continue;
+                views.newestAt = planned.newestAt(); views.nextExpiryAt = planned.nextExpiryAt();
+                if (planned.nextExpiryAt() > 0) soonest = Math.min(soonest, planned.nextExpiryAt());
+                bindRow(views, planned.key(), planned.text());
+                if (tops == null && animate && ListMotion.enabled() && views.badge != null && planned.text().unread() > countsBefore.getOrDefault(planned.key().id(), 0L)) ListMotion.pop(views.badge);
+            }
+            if (moved) { moveRows(keys); shownKeys = keys; }
+            listSoonestExpiry = soonest;
+            if (tops != null) playMotion(tops, countsBefore);
             return;
         }
-        for (var unread : unreadLabels.entrySet()) {
-            long count = unreadCounts.getOrDefault(unread.getKey(), 0L);
-            if (count == shownUnread.getOrDefault(unread.getKey(), 0L)) continue;
-            TextView badge = unread.getValue();
-            badge.setText(Long.toString(count)); badge.setVisibility(count == 0 ? View.GONE : View.VISIBLE);
-        }
-        shownUnread = unreadCounts;
-    }
-
-    private void renderContacts(ChatListContents contents, Map<UUID, Long> unreadCounts) {
+        // The rows are built again; the ones that were there glide from where they were to where they are, and the new ones fade in.
+        boolean motion = animate && previous != null && ListMotion.enabled() && contactRows.isAttachedToWindow() && !rowHolders.isEmpty();
+        Map<UUID, Float> tops = motion ? recordTops() : null;
         rowSwipes.begin();
-        contactRows.removeAllViews(); unreadLabels.clear();
-        if (unreadFilter != null) {
-            unreadFilter.setSelected(unreadOnly); unreadFilter.setColorFilter(unreadOnly ? GREEN : INK);
-            unreadFilter.setBackground(design.feedback(unreadOnly ? Ui.TINT : Ui.SURFACE, 7));
-            androidx.core.view.ViewCompat.setStateDescription(unreadFilter, unreadOnly ? "Unread only" : "All chats");
-        }
+        contactRows.removeAllViews(); unreadLabels.clear(); rowHolders.clear(); rowDividers.clear(); rowViews.clear();
+        shownKeys = keys;
         String filter = contactSearch == null ? "" : contactSearch.getText().toString().toLowerCase(Locale.ROOT);
-        shownChats = contents; shownUnread = unreadCounts;
-        for (GroupChat.Conversation group : contents.groups()) {
-            if (!group.name().toLowerCase(Locale.ROOT).contains(filter)) continue;
-            long count = unreadCounts.getOrDefault(group.id(), 0L);
-            if (unreadOnly && count == 0) continue;
-            LinearLayout row=horizontal(); row.setMinimumHeight(dp(78)); row.setPadding(dp(18),dp(12),dp(18),dp(12)); row.setBackground(design.feedback(Color.TRANSPARENT,0));
-            row.addView(design.groupAvatar(46, Ui.BLUE));
-            LinearLayout details=vertical(); details.setPadding(dp(12),0,dp(8),0);
-            TextView title=design.text(group.name(),14,700,INK); title.setSingleLine(true); title.setEllipsize(android.text.TextUtils.TruncateAt.END); details.addView(title);
-            LinearLayout subtitle=horizontal(); subtitle.setPadding(0,dp(5),0,0); subtitle.addView(design.symbol(R.drawable.ic_users_round,12,MUTED));
-            TextView state=design.text(engine.groups().status(group),11,500,MUTED); state.setPadding(dp(5),0,0,0); state.setSingleLine(true); subtitle.addView(state); details.addView(subtitle);
-            row.addView(details,new LinearLayout.LayoutParams(0,-2,1));
-            row.addView(unreadBadge(group.id(),count));
-            row.addView(design.symbol(R.drawable.ic_chevron_right,16,MUTED));
-            row.setOnClickListener(view -> {
-                GroupChat.Conversation current=engine.groups().get(group.id());
-                if (current==null) return;
-                if (engine.groups().invited(current)) groupInvitationDialog(current);
-                else navigateChat(group.id());
-            });
-            row.setOnLongClickListener(view -> { groupInfo(group.id()); return true; });
-            addChatRow(row);
-        }
-        java.util.Set<UUID> reviewing = engine.onboarding().changedContacts();
-        for (ChatEngine.Peer peer : contents.peers()) {
-            if (!peer.name().toLowerCase(Locale.ROOT).contains(filter) && !peer.username().contains(filter)
-                    && (peer.profileName() == null || !peer.profileName().toLowerCase(Locale.ROOT).contains(filter))) {
-                continue;
-            }
-            long unread = unreadCounts.getOrDefault(peer.userId(), 0L);
-            if (unreadOnly && unread == 0) {
-                continue;
-            }
-            LinearLayout row = horizontal();
-            boolean quiet = contents.muted().contains(peer.userId());
-            // Opaque, so that the actions behind the row do not show through while it moves.
-            row.setMinimumHeight(dp(78)); row.setPadding(dp(18), dp(12), dp(18), dp(12)); row.setBackground(design.feedback(Ui.CANVAS, 0));
-            row.addView(profileAvatar(peer.userId(), peer.name(), 46, design.avatarColor(peer.userId())));
-            LinearLayout identity = vertical(); identity.setPadding(dp(12), 0, dp(8), 0);
-            TextView title=design.text(peer.name(),14,700,INK); title.setSingleLine(true); title.setEllipsize(android.text.TextUtils.TruncateAt.END); identity.addView(title);
-            if (reviewing.contains(peer.userId())) {
-                TextView review = design.text("Identity changed. Tap to review", 11, 600, Ui.ERROR);
-                review.setSingleLine(true); review.setEllipsize(android.text.TextUtils.TruncateAt.END); review.setPadding(0, dp(3), 0, 0); identity.addView(review);
-            }
-            row.addView(identity, new LinearLayout.LayoutParams(0, -2, 1));
-            if (quiet) {
-                LinearLayout.LayoutParams bellSize = new LinearLayout.LayoutParams(dp(14), dp(14)); bellSize.setMarginEnd(dp(8));
-                row.addView(design.symbol(R.drawable.ic_bell_off, 14, MUTED), bellSize);
-                androidx.core.view.ViewCompat.setStateDescription(row, "Muted");
-            }
-            row.addView(unreadBadge(peer.userId(), unread, quiet));
-            row.addView(design.symbol(R.drawable.ic_chevron_right, 16, MUTED));
-            row.setOnClickListener(view -> openContact(peer));
-            row.setOnLongClickListener(view -> { forgetDialog(peer); return true; });
-            addChatRow(chatActions(row, peer, quiet));
-        }
+        for (PlannedRow planned : plan) buildRow(planned);
         rowSwipes.end();
+        long soonest = Long.MAX_VALUE;
+        for (PlannedRow planned : plan) if (planned.nextExpiryAt() > 0) soonest = Math.min(soonest, planned.nextExpiryAt());
+        listSoonestExpiry = soonest;
+        if (tops != null) playMotion(tops, countsBefore);
         if (engine.onboarding().admin()) {
             ChatEngine current = engine;
             if (current.onboarding().hasPrevious()) contactRows.addView(command("First new accounts", () ->
@@ -1559,10 +1706,16 @@ public final class MainActivity extends AppCompatActivity {
             LinearLayout empty = vertical(); empty.setGravity(Gravity.CENTER); empty.setPadding(dp(20), dp(64), dp(20), dp(32));
             ImageView image = design.symbol(R.drawable.ic_message_circle, 64, Ui.BLUE); image.setPadding(dp(12), dp(12), dp(12), dp(12));
             image.setBackground(design.background(Ui.BLUE_TINT, 8, 0)); empty.addView(image); empty.addView(design.spacer(20));
-            TextView message = design.text(unreadOnly && filter.isEmpty() ? "All caught up" : filter.isEmpty() ? "No conversations yet" : "No matching conversations", 18, 700, INK);
+            boolean searching = !filter.isEmpty();
+            TextView message = design.text(searching ? "No matching conversations" : switch (listFilter) {
+                case UNREAD -> "All caught up";
+                case GROUPS -> "No groups yet";
+                case MUTED -> "No muted chats";
+                case ALL -> "No conversations yet";
+            }, 18, 700, INK);
             message.setGravity(Gravity.CENTER);
             empty.addView(message, new LinearLayout.LayoutParams(-1, -2));
-            if (filter.isEmpty() && !unreadOnly) { empty.addView(design.spacer(20)); empty.addView(design.button("Add a contact", true, this::addContactDialog)); }
+            if (!searching && listFilter == ChatListModel.Filter.ALL) { empty.addView(design.spacer(20)); empty.addView(design.button("Add a contact", true, this::addContactDialog)); }
             contactRows.addView(empty, new LinearLayout.LayoutParams(-1, -2));
         }
         if (engine.onboarding().problem() != null) {
@@ -1570,6 +1723,482 @@ public final class MainActivity extends AppCompatActivity {
             warning.setPadding(dp(18), dp(12), dp(18), dp(12));
             contactRows.addView(warning, 0);
         }
+    }
+
+    // ---- The chat list: rows, filter chips, search, selection and the motion between states (0.7.2) ----
+
+    // Whether the rows to draw are the rows that are drawn, in whatever order, each with its views still in the list.
+    private boolean sameRows(java.util.List<RowKey> keys) {
+        if (keys.size() != shownKeys.size() || rowHolders.size() != keys.size() || rowDividers.size() != keys.size()) return false;
+        if (!keys.equals(shownKeys) && !new java.util.HashSet<>(keys).equals(new java.util.HashSet<>(shownKeys))) return false;
+        for (RowKey key : keys) {
+            View holder = rowHolders.get(key.id()), divider = rowDividers.get(key.id());
+            if (holder == null || divider == null || holder.getParent() != contactRows || divider.getParent() != contactRows) return false;
+        }
+        return true;
+    }
+
+    // The views of the rows, each with its divider, are taken out and put back in the new order where the first of them was; what stands
+    // before them (a warning) and after them (the buttons of an administrator) stays where it is.
+    private void moveRows(java.util.List<RowKey> keys) {
+        int first = Integer.MAX_VALUE;
+        for (RowKey key : keys) first = Math.min(first, contactRows.indexOfChild(rowHolders.get(key.id())));
+        for (RowKey key : keys) { contactRows.removeView(rowHolders.get(key.id())); contactRows.removeView(rowDividers.get(key.id())); }
+        int at = first;
+        for (RowKey key : keys) { contactRows.addView(rowHolders.get(key.id()), at++); contactRows.addView(rowDividers.get(key.id()), at++); }
+    }
+
+    private Map<UUID, Float> recordTops() {
+        Map<UUID, Float> tops = new HashMap<>();
+        for (Map.Entry<UUID, View> holder : rowHolders.entrySet()) tops.put(holder.getKey(), holder.getValue().getTop() + holder.getValue().getTranslationY());
+        return tops;
+    }
+
+    // Once the new rows have been laid out and before they are drawn: a row that was somewhere else is put back there and glides to its
+    // place, a row that is new fades in, and a count that went up bounces. Nothing is drawn differently from the first frame on.
+    private void playMotion(Map<UUID, Float> tops, Map<UUID, Long> countsBefore) {
+        LinearLayout rows = contactRows;
+        rows.getViewTreeObserver().addOnPreDrawListener(new android.view.ViewTreeObserver.OnPreDrawListener() {
+            @Override public boolean onPreDraw() {
+                rows.getViewTreeObserver().removeOnPreDrawListener(this);
+                if (contactRows != rows) return true;
+                int glided = 0;
+                for (Map.Entry<UUID, View> holder : rowHolders.entrySet()) {
+                    UUID id = holder.getKey(); View view = holder.getValue(); View line = rowDividers.get(id);
+                    Float was = tops.get(id);
+                    if (was == null) {
+                        ListMotion.appear(view, dp(14));
+                        if (line != null) ListMotion.appear(line, dp(14));
+                        continue;
+                    }
+                    float delta = was - view.getTop();
+                    if (Math.abs(delta) < dp(2) || glided >= 30) continue;
+                    glided++;
+                    ListMotion.glide(view, delta);
+                    if (line != null) ListMotion.glide(line, delta);
+                }
+                for (Map.Entry<UUID, RowViews> entry : rowViews.entrySet()) {
+                    RowViews views = entry.getValue();
+                    if (views.badge != null && views.shown != null && views.shown.unread() > countsBefore.getOrDefault(entry.getKey(), 0L)) ListMotion.pop(views.badge);
+                }
+                return true;
+            }
+        });
+    }
+
+    private void setWeight(TextView text, int weight) {
+        text.setTypeface(design.font(weight));
+        text.setFontVariationSettings("'wght' " + weight);
+    }
+
+    // One row. The name is a direct child of the column that holds it, and that column is a child of the row: the swipe actions wrap the row.
+    private void buildRow(PlannedRow planned) {
+        RowKey key = planned.key();
+        RowViews views = new RowViews();
+        LinearLayout row = horizontal();
+        views.row = row;
+        row.setMinimumHeight(dp(76)); row.setPadding(dp(16), dp(10), dp(16), dp(10));
+        View avatar = key.group() ? design.groupAvatar(52, Ui.BLUE) : profileAvatar(key.id(), key.name(), 52, design.avatarColor(key.id()));
+        FrameLayout avatarFrame = new FrameLayout(this); avatarFrame.setSaveEnabled(false);
+        avatarFrame.addView(avatar, new FrameLayout.LayoutParams(dp(52), dp(52)));
+        views.check = checkBadge();
+        avatarFrame.addView(views.check, new FrameLayout.LayoutParams(dp(22), dp(22), Gravity.BOTTOM | Gravity.END));
+        row.addView(avatarFrame, new LinearLayout.LayoutParams(dp(52), dp(52)));
+        LinearLayout identity = vertical(); identity.setPadding(dp(14), 0, dp(10), 0);
+        views.name = design.text(key.name(), 16, 600, INK);
+        views.name.setSingleLine(true); views.name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        views.name.setLineSpacing(0, 1); views.name.setGravity(Gravity.CENTER_VERTICAL); views.name.setMinHeight(dp(22));
+        identity.addView(views.name, new LinearLayout.LayoutParams(-1, -2));
+        views.statusLine = horizontal(); views.statusLine.setGravity(Gravity.CENTER_VERTICAL); views.statusLine.setMinimumHeight(dp(20));
+        views.icon = design.symbol(R.drawable.ic_check, 14, MUTED);
+        LinearLayout.LayoutParams iconSize = new LinearLayout.LayoutParams(dp(14), dp(14)); iconSize.setMarginEnd(dp(5));
+        views.statusLine.addView(views.icon, iconSize);
+        views.status = design.text("", 13, 500, MUTED);
+        views.status.setSingleLine(true); views.status.setEllipsize(android.text.TextUtils.TruncateAt.END); views.status.setLineSpacing(0, 1);
+        views.statusLine.addView(views.status, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams lineSize = new LinearLayout.LayoutParams(-1, -2); lineSize.topMargin = dp(3);
+        identity.addView(views.statusLine, lineSize);
+        row.addView(identity, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout end = vertical(); end.setGravity(Gravity.END);
+        views.time = design.text("", 12, 600, MUTED); views.time.setLineSpacing(0, 1); views.time.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        views.time.setMinHeight(dp(22));
+        end.addView(views.time, new LinearLayout.LayoutParams(-2, -2));
+        views.endRow = horizontal(); views.endRow.setGravity(Gravity.END | Gravity.CENTER_VERTICAL); views.endRow.setMinimumHeight(dp(20));
+        if (key.muted()) {
+            LinearLayout.LayoutParams bellSize = new LinearLayout.LayoutParams(dp(14), dp(14)); bellSize.setMarginEnd(dp(8));
+            views.endRow.addView(design.symbol(R.drawable.ic_bell_off, 14, MUTED), bellSize);
+        }
+        views.pin = design.symbol(R.drawable.ic_pin, 16, MUTED);
+        views.endRow.addView(views.pin, new LinearLayout.LayoutParams(dp(16), dp(16)));
+        LinearLayout.LayoutParams endRowSize = new LinearLayout.LayoutParams(-2, -2); endRowSize.topMargin = key.details() ? dp(3) : 0;
+        end.addView(views.endRow, endRowSize);
+        if (!key.details()) views.time.setVisibility(View.GONE);
+        row.addView(end, new LinearLayout.LayoutParams(-2, -2));
+        row.setOnClickListener(view -> {
+            if (!selectedChats.isEmpty()) { toggleSelection(key.id()); return; }
+            if (key.group()) {
+                GroupChat.Conversation current = engine.groups().get(key.id());
+                if (current == null) return;
+                if (engine.groups().invited(current)) groupInvitationDialog(current);
+                else navigateChat(key.id());
+            } else openContact(planned.peer());
+        });
+        row.setOnLongClickListener(view -> { toggleSelection(key.id()); return true; });
+        androidx.core.view.ViewCompat.addAccessibilityAction(row, "Select chat", (view, arguments) -> { toggleSelection(key.id()); return true; });
+        androidx.core.view.ViewCompat.addAccessibilityAction(row, key.pinned() ? "Unpin chat" : "Pin chat", (view, arguments) -> {
+            pinChats(java.util.List.of(key.id()), !key.pinned()); return true;
+        });
+        views.newestAt = planned.newestAt(); views.nextExpiryAt = planned.nextExpiryAt();
+        bindRow(views, key, planned.text());
+        rowViews.put(key.id(), views);
+        // A group has no swipe actions (a contact's are mute, clear, remove and block); both can be selected.
+        addChatRow(key.id(), key.group() ? row : chatActions(row, planned.peer(), key.muted()));
+    }
+
+    // Makes the views of a row say what it says. The row stays opaque (the actions behind it must not show through), tinted while selected.
+    private void bindRow(RowViews views, RowKey key, RowText text) {
+        if (text.equals(views.shown)) return;
+        views.shown = text;
+        views.row.setBackground(design.feedback(text.selected() ? Ui.TINT : Ui.CANVAS, 0));
+        views.check.setVisibility(text.selected() ? View.VISIBLE : View.GONE);
+        // What the row is, besides what it says, for a screen reader: the picture of a check or a pin or a bell says nothing to it.
+        String state = key.pinned() ? "Pinned" : null;
+        if (key.muted()) state = state == null ? "Muted" : state + ", muted";
+        if (text.selected()) state = state == null ? "Selected" : state + ", selected";
+        androidx.core.view.ViewCompat.setStateDescription(views.row, state);
+        // The views were made with the weights of a row with nothing new; they are changed only when that changes.
+        if (text.emphasis() != views.emphasised) {
+            views.emphasised = text.emphasis();
+            setWeight(views.name, text.emphasis() ? 800 : 600);
+            setWeight(views.status, text.emphasis() ? 700 : 500);
+            setWeight(views.time, text.emphasis() ? 800 : 600);
+        }
+        boolean line = !text.text().isEmpty();
+        views.statusLine.setVisibility(line ? View.VISIBLE : View.GONE);
+        views.status.setText(text.text()); views.status.setTextColor(text.textColor());
+        // The picture before the line says how far a message got; a screen reader is told in words.
+        views.status.setContentDescription(text.spoken().isEmpty() ? null : text.spoken());
+        if (text.icon() == 0) views.icon.setVisibility(View.GONE);
+        else { views.icon.setVisibility(View.VISIBLE); views.icon.setImageResource(text.icon()); views.icon.setColorFilter(text.iconColor()); }
+        showCountdown(views, text.countdown(), text.countdownSpoken());
+        views.time.setText(text.time()); views.time.setTextColor(text.emphasis() ? Ui.ACCENT : MUTED);
+        boolean counted = text.unread() > 0 || text.marked();
+        if (counted || views.badge != null) applyBadge(badgeOf(views, key.id()), text.unread(), text.marked(), key.muted());
+        // A pin shows where the count would, so a pinned chat with something new shows the count.
+        views.pin.setVisibility(key.pinned() && !counted ? View.VISIBLE : View.GONE);
+    }
+
+    // The countdown of a row is made when the row first has one: most rows never do.
+    private void showCountdown(RowViews views, String countdown, String spoken) {
+        if (countdown.isEmpty()) {
+            if (views.countdownGroup != null) views.countdownGroup.setVisibility(View.GONE);
+            return;
+        }
+        if (views.countdownGroup == null) {
+            LinearLayout group = horizontal(); group.setGravity(Gravity.CENTER_VERTICAL);
+            group.addView(design.symbol(R.drawable.ic_timer, 12, Ui.WARM), new LinearLayout.LayoutParams(dp(12), dp(12)));
+            views.countdown = design.text("", 11, 700, Ui.WARM); views.countdown.setLineSpacing(0, 1); views.countdown.setPadding(dp(3), 0, 0, 0);
+            views.countdown.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            group.addView(views.countdown);
+            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-2, -2); size.setMarginStart(dp(6));
+            views.statusLine.addView(group, size);
+            views.countdownGroup = group;
+        }
+        if (!countdown.contentEquals(views.countdown.getText())) views.countdown.setText(countdown);
+        views.countdownGroup.setContentDescription(spoken);
+        views.countdownGroup.setVisibility(View.VISIBLE);
+    }
+
+    // The count of a row is made when the row first has something to count: most rows never do.
+    private TextView badgeOf(RowViews views, UUID id) {
+        if (views.badge == null) {
+            views.badge = unreadBadge(id);
+            views.endRow.addView(views.badge, views.endRow.indexOfChild(views.pin));
+        }
+        return views.badge;
+    }
+
+    private ImageView checkBadge() {
+        ImageView badge = design.symbol(R.drawable.ic_check, 14, Color.WHITE);
+        badge.setPadding(dp(4), dp(4), dp(4), dp(4));
+        badge.setBackground(design.background(Ui.PRIMARY, 11, Ui.CANVAS));
+        badge.setVisibility(View.GONE);
+        return badge;
+    }
+
+    // The count of what is new, the dot of a chat marked unread (nothing is new in it), or nothing. It is as tall as its text needs, and at least 22 dp.
+    private void applyBadge(TextView badge, long count, boolean marked, boolean muted) {
+        badge.setBackground(design.background(muted ? Ui.MUTED_FILL : Ui.PRIMARY, 11, 0));
+        LinearLayout.LayoutParams size = (LinearLayout.LayoutParams) badge.getLayoutParams();
+        if (count > 0) {
+            badge.setText(String.format(Locale.getDefault(), "%d", count)); size.width = -2; size.height = -2;
+            badge.setMinWidth(dp(22)); badge.setMinHeight(dp(22)); badge.setPadding(dp(6), 0, dp(6), 0);
+            badge.setContentDescription(count + " unread"); badge.setVisibility(View.VISIBLE);
+        } else if (marked) {
+            badge.setText(""); size.width = dp(12); size.height = dp(12);
+            badge.setMinWidth(0); badge.setMinHeight(0); badge.setPadding(0, 0, 0, 0);
+            badge.setContentDescription("Marked as unread"); badge.setVisibility(View.VISIBLE);
+        } else {
+            badge.setText(""); badge.setContentDescription(null); badge.setVisibility(View.GONE);
+        }
+        badge.setLayoutParams(size);
+    }
+
+    // A chip is 32 dp of pill in a touch target of 44 dp, and taller when its text is.
+    private LinearLayout filterChip(ChatListModel.Filter filter) {
+        LinearLayout chip = horizontal(); chip.setGravity(Gravity.CENTER); chip.setPadding(dp(14), dp(12), dp(14), dp(12)); chip.setMinimumHeight(dp(44));
+        chip.setClickable(true); chip.setFocusable(true); chip.setFilterTouchesWhenObscured(true); chip.setSaveEnabled(false);
+        chip.addView(design.text(switch (filter) { case ALL -> "All"; case UNREAD -> "Unread"; case GROUPS -> "Groups"; case MUTED -> "Muted"; }, 13, 700, MUTED));
+        if (filter == ChatListModel.Filter.UNREAD) {
+            unreadChipCount = design.text("0", 11, 800, Color.WHITE); unreadChipCount.setGravity(Gravity.CENTER);
+            unreadChipCount.setBackground(design.background(Ui.PRIMARY, 9, 0)); unreadChipCount.setMinWidth(dp(18)); unreadChipCount.setMinHeight(dp(18));
+            unreadChipCount.setPadding(dp(5), 0, dp(5), 0);
+            unreadChipCount.setLineSpacing(0, 1); unreadChipCount.setVisibility(View.GONE);
+            LinearLayout.LayoutParams countSize = new LinearLayout.LayoutParams(-2, -2); countSize.setMarginStart(dp(6));
+            chip.addView(unreadChipCount, countSize);
+        }
+        chip.setContentDescription(switch (filter) { case ALL -> "All chats"; case UNREAD -> "Unread chats"; case GROUPS -> "Group chats"; case MUTED -> "Muted chats"; });
+        // Touching the chip that is chosen goes back to all chats.
+        chip.setOnClickListener(view -> { listFilter = listFilter == filter ? ChatListModel.Filter.ALL : filter; renderContacts(); });
+        return chip;
+    }
+
+    private void updateChips(ChatListContents contents) {
+        int unread = 0;
+        for (UUID id : chatIds(contents)) if (ChatListModel.unread(contents.summary(id), contents.marked().contains(id))) unread++;
+        for (Map.Entry<ChatListModel.Filter, LinearLayout> entry : filterChips.entrySet()) {
+            boolean chosen = listFilter == entry.getKey();
+            LinearLayout chip = entry.getValue();
+            chip.setSelected(chosen);
+            chip.setBackground(new android.graphics.drawable.InsetDrawable(design.background(chosen ? Ui.TINT : Ui.SURFACE, 16, chosen ? 0 : Ui.LINE), 0, dp(6), 0, dp(6)));
+            // A background that has insets sets the view's padding to its own, so the room around the text is put back.
+            chip.setPadding(dp(14), dp(12), dp(14), dp(12));
+            ((TextView) chip.getChildAt(0)).setTextColor(chosen ? Ui.ACCENT : MUTED);
+            // The count is part of what the Unread chip says, so a screen reader is told it too.
+            String count = entry.getKey() == ChatListModel.Filter.UNREAD && unread > 0 ? ", " + unread + (unread == 1 ? " chat has" : " chats have") + " something new" : "";
+            androidx.core.view.ViewCompat.setStateDescription(chip, (chosen ? "Selected" : "Not selected") + count);
+        }
+        if (unreadChipCount == null) return;
+        unreadChipCount.setText(String.format(Locale.getDefault(), "%d", unread));
+        unreadChipCount.setVisibility(unread > 0 ? View.VISIBLE : View.GONE);
+    }
+
+    private void toggleSearch() {
+        if (searchOpen) closeSearch(); else openSearch();
+    }
+
+    private void openSearch() {
+        if (searchRow == null || searchOpen) return;
+        searchOpen = true;
+        if (ListMotion.enabled() && searchRow.isAttachedToWindow()) ListMotion.reveal(searchRow, dp(54), null);
+        else searchRow.setVisibility(View.VISIBLE);
+        contactSearch.requestFocus();
+        contactSearch.post(() -> {
+            android.view.inputmethod.InputMethodManager keyboard = getSystemService(android.view.inputmethod.InputMethodManager.class);
+            if (keyboard != null && contactSearch != null) keyboard.showSoftInput(contactSearch, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+        });
+    }
+
+    private void closeSearch() {
+        if (searchRow == null || !searchOpen) return;
+        searchOpen = false;
+        android.view.inputmethod.InputMethodManager keyboard = getSystemService(android.view.inputmethod.InputMethodManager.class);
+        if (keyboard != null) keyboard.hideSoftInputFromWindow(contactSearch.getWindowToken(), 0);
+        contactSearch.clearFocus();
+        contactSearch.setText("");
+        if (ListMotion.enabled() && searchRow.isAttachedToWindow()) ListMotion.conceal(searchRow, dp(54), null);
+        else searchRow.setVisibility(View.GONE);
+    }
+
+    // The bar that takes the toolbar's place while chats are selected.
+    private LinearLayout selectionBar() {
+        LinearLayout bar = horizontal(); bar.setPadding(dp(4), 0, dp(8), 0); bar.setBackgroundColor(Ui.TINT);
+        bar.addView(icon(R.drawable.ic_x, "Close selection", this::endSelection));
+        selectionCount = design.text("", 17, 700, INK); selectionCount.setPadding(dp(8), 0, 0, 0);
+        bar.addView(selectionCount, new LinearLayout.LayoutParams(0, -2, 1));
+        selectionPin = icon(R.drawable.ic_pin, "Pin", this::pinSelected);
+        selectionMute = icon(R.drawable.ic_bell_off, "Mute", this::muteSelected);
+        selectionMark = icon(R.drawable.ic_message_square_dot, "Mark as unread", this::markSelected);
+        selectionMore = icon(R.drawable.ic_ellipsis_vertical, "More", this::moreSelected);
+        bar.addView(selectionPin); bar.addView(selectionMute); bar.addView(selectionMark); bar.addView(selectionMore);
+        return bar;
+    }
+
+    private static void setAction(ImageButton button, int image, String description) {
+        button.setImageResource(image); button.setContentDescription(description); button.setTooltipText(description);
+    }
+
+    // What the bar offers depends on what is selected: a group has no mute, clear or remove; a choice that holds for all of them is a choice to undo.
+    private void updateSelectionBar() {
+        if (selectionBar == null || homeToolbar == null || shownChats == null) return;
+        boolean active = !selectedChats.isEmpty();
+        rowSwipes.lock(active);
+        if (!active) {
+            if (selectionBar.getVisibility() == View.VISIBLE) { selectionBar.setVisibility(View.GONE); homeToolbar.setVisibility(View.VISIBLE); }
+            return;
+        }
+        ChatListContents contents = shownChats;
+        java.util.Set<UUID> groups = new java.util.HashSet<>();
+        for (GroupChat.Conversation group : contents.groups()) groups.add(group.id());
+        boolean allContacts = true, allPinned = true, allMuted = true, allUnread = true;
+        for (UUID id : selectedChats) {
+            allContacts &= !groups.contains(id);
+            allPinned &= contents.pinned().contains(id);
+            allMuted &= contents.muted().contains(id);
+            allUnread &= ChatListModel.unread(contents.summary(id), contents.marked().contains(id));
+        }
+        selectionCount.setText(getResources().getQuantityString(R.plurals.chats_selected, selectedChats.size(), selectedChats.size()));
+        setAction(selectionPin, allPinned ? R.drawable.ic_pin_off : R.drawable.ic_pin, allPinned ? "Unpin" : "Pin");
+        setAction(selectionMute, allMuted ? R.drawable.ic_bell : R.drawable.ic_bell_off, allMuted ? "Unmute" : "Mute");
+        selectionMute.setVisibility(allContacts ? View.VISIBLE : View.GONE);
+        setAction(selectionMark, allUnread ? R.drawable.ic_check_check : R.drawable.ic_message_square_dot, allUnread ? "Mark as read" : "Mark as unread");
+        selectionMore.setVisibility(allContacts ? View.VISIBLE : View.GONE);
+        if (selectionBar.getVisibility() != View.VISIBLE) {
+            homeToolbar.setVisibility(View.INVISIBLE);
+            selectionBar.setVisibility(View.VISIBLE);
+            if (ListMotion.enabled()) { selectionBar.setAlpha(0f); selectionBar.animate().alpha(1f).setDuration(ListMotion.FADE_MILLIS).start(); }
+        }
+    }
+
+    private void toggleSelection(UUID id) {
+        if (shownChats == null || contactRows == null) return;
+        if (!selectedChats.remove(id)) selectedChats.add(id);
+        renderContacts(shownChats, false);
+    }
+
+    private void endSelection() {
+        if (selectedChats.isEmpty()) return;
+        selectedChats.clear();
+        if (shownChats != null && contactRows != null) renderContacts(shownChats, false);
+        else updateSelectionBar();
+    }
+
+    private void pinSelected() {
+        if (shownChats == null || selectedChats.isEmpty()) return;
+        java.util.List<UUID> chats = new ArrayList<>(selectedChats);
+        pinChats(chats, !chats.stream().allMatch(shownChats.pinned()::contains));
+    }
+
+    // At most three chats are pinned: asking for more changes nothing and says so.
+    private void pinChats(java.util.List<UUID> chats, boolean pin) {
+        ChatEngine current = engine;
+        if (current == null || shownChats == null || chats.isEmpty() || !resumed) return;
+        ChatListContents contents = shownChats;
+        java.util.Set<UUID> existing = chatIds(contents);
+        long pinned = contents.pinned().stream().filter(existing::contains).count();
+        long adding = chats.stream().filter(id -> !contents.pinned().contains(id)).count();
+        if (pin && pinned + adding > ChatListModel.MAX_PINNED) { problem("You can pin up to " + ChatListModel.MAX_PINNED + " chats."); return; }
+        submit(() -> { for (UUID id : chats) current.pin(id, pin); }, () -> { selectedChats.clear(); renderContacts(); });
+    }
+
+    private void muteSelected() {
+        ChatEngine current = engine;
+        if (current == null || shownChats == null || selectedChats.isEmpty() || !resumed) return;
+        java.util.List<UUID> chats = new ArrayList<>(selectedChats);
+        boolean mute = !chats.stream().allMatch(shownChats.muted()::contains);
+        submit(() -> { for (UUID id : chats) current.mute(id, mute); }, () -> {
+            selectedChats.clear(); renderContacts();
+            Toast.makeText(this, mute ? "Muted. The count stays grey; the phone's alert still says only \u201cNew message\u201d." : "Unmuted", Toast.LENGTH_LONG).show();
+        });
+    }
+
+    // Marking chats read does what opening them would (their read receipts are sent); marking them unread only puts a dot on those that have nothing new.
+    private void markSelected() {
+        ChatEngine current = engine;
+        if (current == null || shownChats == null || selectedChats.isEmpty() || !resumed) return;
+        ChatListContents contents = shownChats;
+        java.util.List<UUID> chats = new ArrayList<>(selectedChats);
+        boolean read = chats.stream().allMatch(id -> ChatListModel.unread(contents.summary(id), contents.marked().contains(id)));
+        submit(() -> {
+            for (UUID id : chats) {
+                if (read) current.markChatRead(id);
+                else if (!ChatListModel.unread(contents.summary(id), contents.marked().contains(id))) current.markUnread(id, true);
+            }
+        }, () -> { selectedChats.clear(); renderContacts(); if (read) queueSync(); });
+    }
+
+    private void moreSelected() {
+        if (shownChats == null || selectedChats.isEmpty()) return;
+        java.util.List<ChatEngine.Peer> peers = new ArrayList<>();
+        for (ChatEngine.Peer peer : shownChats.peers()) if (selectedChats.contains(peer.userId())) peers.add(peer);
+        if (peers.size() != selectedChats.size()) return;
+        LinearLayout actions = vertical(); actions.setPadding(dp(22), 0, dp(22), dp(8));
+        actions.addView(profileAction(peers.size() == 1 ? "Clear chat" : "Clear " + peers.size() + " chats", R.drawable.ic_eraser, () -> {
+            dismissContent(); endSelection();
+            if (peers.size() == 1) clearChatDialog(peers.get(0)); else clearChatsDialog(peers);
+        }));
+        actions.addView(profileAction(peers.size() == 1 ? "Remove contact" : "Remove " + peers.size() + " contacts", R.drawable.ic_user_round_x, () -> {
+            dismissContent(); endSelection();
+            if (peers.size() == 1) forgetDialog(peers.get(0)); else forgetContactsDialog(peers);
+        }));
+        showDialog(new SecureSheet.Builder(this).setTitle("More").setView(actions).setNegativeButton("Cancel", null).create());
+    }
+
+    // Who a confirmation is about: "Maya", "Maya and Noah", "Maya, Noah and Priya", "Maya, Noah, Priya and 2 more".
+    private static String namesOf(java.util.List<ChatEngine.Peer> peers) {
+        java.util.List<String> names = new ArrayList<>();
+        for (ChatEngine.Peer peer : peers) names.add(peer.name());
+        if (names.size() <= 3) return names.size() == 1 ? names.get(0) : String.join(", ", names.subList(0, names.size() - 1)) + " and " + names.get(names.size() - 1);
+        return String.join(", ", names.subList(0, 3)) + " and " + (names.size() - 3) + " more";
+    }
+
+    private void clearChatsDialog(java.util.List<ChatEngine.Peer> peers) {
+        ChatEngine current = engine;
+        int generation = screenGeneration;
+        if (current == null || busy || !resumed) return;
+        showDialog(new SecureSheet.Builder(this).setTitle("Clear " + peers.size() + " chats?")
+                .setMessage("Remove the messages and unsent items of " + namesOf(peers) + " from this phone? The contacts stay, and the other people's copies are unchanged.")
+                .setNegativeButton("Cancel", null).setPositiveButton("Clear", (dialog, which) -> {
+                    if (!resumed || engine != current || generation != screenGeneration || busy) return;
+                    java.util.Set<UUID> ids = new java.util.HashSet<>();
+                    for (ChatEngine.Peer peer : peers) ids.add(peer.userId());
+                    pendingSends.removeIf(pending -> {
+                        if (!ids.contains(pending.peer.userId())) return false;
+                        pending.clear(); return true;
+                    });
+                    if (composerPeer != null && ids.contains(composerPeer) && composer != null) composer.setText("");
+                    submit(() -> { for (ChatEngine.Peer peer : peers) current.clearChat(peer.userId()); }, this::render);
+                }).create());
+    }
+
+    private void forgetContactsDialog(java.util.List<ChatEngine.Peer> peers) {
+        ChatEngine current = engine;
+        if (current == null || !resumed) return;
+        showDialog(new SecureSheet.Builder(this).setTitle("Remove " + peers.size() + " contacts?")
+                .setMessage("Remove " + namesOf(peers) + "? Their messages on this phone and the saved identities will be erased.")
+                .setNegativeButton("Cancel", null).setPositiveButton("Remove", (dialog, which) ->
+                        submit(() -> { for (ChatEngine.Peer peer : peers) current.forget(peer); }, this::render)).create());
+    }
+
+    // The times and the countdowns on the rows move on with the clock, and the list is read again when the next message in it vanishes.
+    private void tickChatList() {
+        long now = System.currentTimeMillis();
+        if (now >= listSoonestExpiry) { listSoonestExpiry = Long.MAX_VALUE; refreshChatList(); }
+        if (now < nextListTick) return;
+        nextListTick = now + 15_000;
+        if (!listDetails()) return;
+        for (RowViews views : rowViews.values()) {
+            String time = ChatListModel.time(views.newestAt, now, java.time.ZoneId.systemDefault(), Locale.getDefault());
+            if (!time.contentEquals(views.time.getText())) views.time.setText(time);
+            showCountdown(views, ChatListModel.countdown(views.nextExpiryAt, now), ChatListModel.countdownSpoken(views.nextExpiryAt, now));
+        }
+    }
+
+    // Reads the list on the reader lane and draws what it finds, as a sync does.
+    private void refreshChatList() {
+        ChatEngine current = engine;
+        if (current == null || contactRows == null || selectedPeer != null || !resumed) return;
+        int generation = screenGeneration;
+        onReader(() -> {
+            ChatListContents contents;
+            try { contents = ChatListContents.read(current); }
+            catch (RuntimeException unavailable) { return; }
+            ui.post(() -> {
+                if (!resumed || engine != current || generation != screenGeneration || selectedPeer != null || contactRows == null) return;
+                // A finger on a row holds the redraw back; the list is read again at the next tick, so a message that vanished is not left on it.
+                if (!updateContacts(contents, true)) listSoonestExpiry = 0;
+            });
+        });
     }
 
     // A saved contact is checked here against local state only, so the tap never waits for a sync or an upload on the work lane.
@@ -1629,10 +2258,10 @@ public final class MainActivity extends AppCompatActivity {
         Runnable remove = () -> forgetDialog(peer);
         Runnable block = () -> blockUserDialog(peer);
         SwipeActions holder = new SwipeActions(this, design, row,
-                java.util.List.of(new SwipeActions.Action(muted ? R.drawable.ic_bell : R.drawable.ic_bell_off, muteLabel, Ui.BLUE, mute),
-                        new SwipeActions.Action(R.drawable.ic_eraser, "Clear chat", Ui.MUTED, clear)),
-                java.util.List.of(new SwipeActions.Action(R.drawable.ic_user_round_x, "Remove contact", Ui.WARM, remove),
-                        new SwipeActions.Action(R.drawable.ic_ban, "Block user", Ui.ERROR, block)),
+                java.util.List.of(new SwipeActions.Action(muted ? R.drawable.ic_bell : R.drawable.ic_bell_off, muteLabel, Ui.BLUE_FILL, mute),
+                        new SwipeActions.Action(R.drawable.ic_eraser, "Clear chat", Ui.MUTED_FILL, clear)),
+                java.util.List.of(new SwipeActions.Action(R.drawable.ic_user_round_x, "Remove contact", Ui.WARM_FILL, remove),
+                        new SwipeActions.Action(R.drawable.ic_ban, "Block user", Ui.ERROR_FILL, block)),
                 rowSwipes, peer.userId());
         androidx.core.view.ViewCompat.addAccessibilityAction(row, muteLabel + " chat", (view, arguments) -> { mute.run(); return true; });
         androidx.core.view.ViewCompat.addAccessibilityAction(row, "Clear chat", (view, arguments) -> { clear.run(); return true; });
@@ -1662,18 +2291,19 @@ public final class MainActivity extends AppCompatActivity {
         });
     }
 
-    private TextView unreadBadge(UUID id, long count) { return unreadBadge(id, count, false); }
-
-    private TextView unreadBadge(UUID id, long count, boolean muted) {
-        TextView badge=design.text(Long.toString(count),10,800,Color.WHITE); badge.setGravity(Gravity.CENTER);
-        badge.setBackground(design.background(muted ? MUTED : GREEN,11,0)); badge.setPadding(dp(5),0,dp(5),0); badge.setMinWidth(dp(21));
-        LinearLayout.LayoutParams size=new LinearLayout.LayoutParams(-2,dp(21)); size.setMarginEnd(dp(7)); badge.setLayoutParams(size);
-        badge.setVisibility(count==0 ? View.GONE : View.VISIBLE); unreadLabels.put(id,badge); return badge;
+    // The count of a row; applyBadge says what it shows. It is made when a row first has something to count, and kept, hidden, after that.
+    private TextView unreadBadge(UUID id) {
+        TextView badge = design.text("0", 12, 800, Color.WHITE); badge.setGravity(Gravity.CENTER); badge.setLineSpacing(0, 1);
+        badge.setLayoutParams(new LinearLayout.LayoutParams(-2, -2));
+        badge.setVisibility(View.GONE); unreadLabels.put(id, badge); return badge;
     }
 
-    private void addChatRow(View row) {
-        contactRows.addView(row,new LinearLayout.LayoutParams(-1,-2));
-        LinearLayout.LayoutParams size=new LinearLayout.LayoutParams(-1,dp(1)); size.setMarginStart(dp(78)); size.setMarginEnd(dp(18)); contactRows.addView(design.divider(),size);
+    private void addChatRow(UUID id, View row) {
+        contactRows.addView(row, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-1, dp(1)); size.setMarginStart(dp(82)); size.setMarginEnd(dp(16));
+        View divider = design.divider();
+        contactRows.addView(divider, size);
+        rowHolders.put(id, row); rowDividers.put(id, divider);
     }
 
     private String statusText() {
@@ -1685,6 +2315,11 @@ public final class MainActivity extends AppCompatActivity {
 
     private void conversation(ChatEngine.Peer peer) {
         chatScreen = true;
+        // A chat that was marked unread has the mark read away by showing it, whichever way it was reached: the list, a notification, an invitation.
+        ChatEngine marking = engine;
+        UUID shownChat = peer.userId();
+        if (marking != null && marking.unreadMarks().contains(shownChat))
+            act(() -> { try { marking.markUnread(shownChat, false); } catch (Exception unavailable) { /* the mark stays until the chat is shown again */ } });
         screenPadding(0); composerPeer=peer.userId();
         GroupChat.Conversation group=engine.groups().get(peer.userId());
         shownConversationPeer = peer; shownConversationGroup = group;
@@ -1746,7 +2381,7 @@ public final class MainActivity extends AppCompatActivity {
         if (group == null) {
             pendingReplyTo = null; pendingReplySnippet = null;
             LinearLayout strip = horizontal(); strip.setGravity(Gravity.CENTER_VERTICAL); strip.setVisibility(View.GONE);
-            replyQuote = new QuoteBlock(this, design, QuoteBlock.ON_SURFACE, 2, Math.max(dp(120), getResources().getDisplayMetrics().widthPixels - dp(140)));
+            replyQuote = new QuoteBlock(this, design, Ui.QUOTE_SURFACE, 2, Math.max(dp(120), getResources().getDisplayMetrics().widthPixels - dp(140)));
             strip.addView(replyQuote, new LinearLayout.LayoutParams(0, -2, 1));
             strip.addView(icon(R.drawable.ic_x, "Cancel reply", () -> { pendingReplyTo = null; pendingReplySnippet = null; updateReplyStrip(); }), new LinearLayout.LayoutParams(dp(40), dp(40)));
             replyStrip = strip;
@@ -2174,7 +2809,7 @@ public final class MainActivity extends AppCompatActivity {
         if (pending.reference != null) {
             Boolean own = pending.reference.ownMessage();
             UUID quotedId = pending.reference.messageId();
-            QuoteBlock quote = new QuoteBlock(this, design, QuoteBlock.ON_TINT, 3, Math.max(dp(120), root.getWidth() - root.getPaddingLeft() - root.getPaddingRight() - dp(80)))
+            QuoteBlock quote = new QuoteBlock(this, design, Ui.QUOTE_TINT, 3, Math.max(dp(120), root.getWidth() - root.getPaddingLeft() - root.getPaddingRight() - dp(80)))
                 .show(own == null ? null : own ? "You" : pending.peer.name(), own != null && own, pending.reference.snippet());
             quote.opens(() -> jumpToQuoted(pending.peer, quotedId));
             bubble.addView(quote, quoteParams(true, picture));
@@ -2687,7 +3322,7 @@ public final class MainActivity extends AppCompatActivity {
         if (entries.isEmpty() && pendingSends.stream().noneMatch(pending -> pending.peer.userId().equals(peer.userId()))) {
             if (messageEmpty == null) {
                 LinearLayout empty = vertical(); empty.setGravity(Gravity.CENTER); empty.setPadding(dp(10), dp(48), dp(10), dp(36));
-                empty.addView(design.symbol(R.drawable.ic_shield_check, 40, Ui.PRIMARY)); empty.addView(design.spacer(14));
+                empty.addView(design.symbol(R.drawable.ic_shield_check, 40, Ui.ACCENT)); empty.addView(design.spacer(14));
                 TextView greeting = design.text(shownConversationGroup == null ? "Just the two of you" : "Your private group", 18, 700, INK);
                 greeting.setGravity(Gravity.CENTER); empty.addView(greeting, new LinearLayout.LayoutParams(-1, -2));
                 empty.setLayoutParams(new LinearLayout.LayoutParams(-1, -2)); messageEmpty = empty;
@@ -2835,7 +3470,7 @@ public final class MainActivity extends AppCompatActivity {
                 // Whose words are quoted: the reply says whether they were its own writer's; an older app's reply does not say.
                 Boolean own = reference.ownMessage();
                 boolean mine = own != null && entry.outgoing() == own;
-                QuoteBlock quote = new QuoteBlock(this, design, entry.outgoing() ? QuoteBlock.ON_TINT : QuoteBlock.ON_SURFACE, 3, limit)
+                QuoteBlock quote = new QuoteBlock(this, design, entry.outgoing() ? Ui.QUOTE_TINT : Ui.QUOTE_SURFACE, 3, limit)
                     .show(own == null ? null : mine ? "You" : peer.name(), mine, reference.snippet());
                 // The copy that the message actions show is only a picture of the message: nothing in it opens.
                 if (interactive) quote.opens(() -> jumpToQuoted(peer, reference.messageId()));
@@ -2860,6 +3495,7 @@ public final class MainActivity extends AppCompatActivity {
             } else if (entry.image()) {
                 body = design.text("Photo", 13, 600, GREEN); body.setMinHeight(dp(44)); body.setGravity(Gravity.CENTER_VERTICAL);
                 body.setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_image, 0, 0, 0);
+                androidx.core.widget.TextViewCompat.setCompoundDrawableTintList(body, android.content.res.ColorStateList.valueOf(INK));
                 body.setCompoundDrawablePadding(dp(8));
                 if (interactive) body.setOnClickListener(view -> viewContent(entry));
             } else {
@@ -2867,7 +3503,11 @@ public final class MainActivity extends AppCompatActivity {
                 if (jumbo > 0) body.setTextSize(Emoji.jumboSize(jumbo));
             }
             body.setMaxWidth(Math.max(dp(120), root.getWidth() - root.getPaddingLeft() - root.getPaddingRight() - dp(80)));
-            if (entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE) { body.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_eye, 0, 0, 0); body.setCompoundDrawablePadding(dp(8)); }
+            if (entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE) {
+                body.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_eye, 0, 0, 0);
+                androidx.core.widget.TextViewCompat.setCompoundDrawableTintList(body, android.content.res.ColorStateList.valueOf(INK));
+                body.setCompoundDrawablePadding(dp(8));
+            }
             row.addView(collage != null ? collage : tiles.isEmpty() ? body : tiles.get(0));
             LinearLayout metadata = horizontal(); metadata.setGravity(Gravity.END);
             if (photo) metadata.setPadding(dp(10), 0, dp(10), 0);
@@ -3192,7 +3832,7 @@ public final class MainActivity extends AppCompatActivity {
     private static final long QUOTE_FLASH_MS = 2_000;
     private void flashRow(View row) {
         stopQuoteFlash();
-        android.graphics.drawable.ColorDrawable band = new android.graphics.drawable.ColorDrawable(Ui.PRIMARY);
+        android.graphics.drawable.ColorDrawable band = new android.graphics.drawable.ColorDrawable(Ui.ACCENT);
         band.setAlpha(0);
         row.setForeground(band);
         quoteFlashRow = row;
@@ -3730,7 +4370,24 @@ public final class MainActivity extends AppCompatActivity {
         }));
         panel.addView(profileAction("Verify identity", R.drawable.ic_shield_check, this::identityDialog));
         panel.addView(profileAction("Backup & restore", R.drawable.ic_lock_keyhole, this::backupDialog));
-        panel.addView(design.spacer(8)); panel.addView(design.divider()); panel.addView(design.spacer(8));
+        panel.addView(design.spacer(8)); panel.addView(design.divider()); panel.addView(design.spacer(14));
+        TextView themeLabel = design.text("Theme", 11, 700, MUTED); themeLabel.setPadding(dp(16), 0, 0, 0);
+        panel.addView(themeLabel); panel.addView(design.spacer(8)); panel.addView(themeChoice()); panel.addView(design.spacer(10));
+        panel.addView(design.divider()); panel.addView(design.spacer(8));
+        // What the chat list shows besides the names (the order of latest activity, times, a line under each name); off is the plain list.
+        SwitchMaterial detailsSwitch = new SwitchMaterial(this);
+        detailsSwitch.setTextSize(13); detailsSwitch.setTypeface(design.font(500)); detailsSwitch.setMinHeight(dp(58));
+        detailsSwitch.setText(R.string.list_details);
+        detailsSwitch.setChecked(listDetails());
+        detailsSwitch.setOnCheckedChangeListener((button, enabled) -> {
+            getSharedPreferences("preferences", MODE_PRIVATE).edit().putBoolean("list-details", enabled).apply();
+            renderContacts();
+        });
+        panel.addView(detailsSwitch);
+        TextView listDetailsNote = design.text("The latest chats first, the time of the newest message and a line under each name. Off: a plain A to Z list.", 12, 500, MUTED);
+        listDetailsNote.setPadding(0, 0, dp(8), dp(8));
+        panel.addView(listDetailsNote);
+        panel.addView(design.divider()); panel.addView(design.spacer(8));
         SwitchMaterial notifications = new SwitchMaterial(this);
         notifications.setTextSize(13); notifications.setTypeface(design.font(500)); notifications.setMinHeight(dp(58));
         notifications.setText(R.string.notifications);
@@ -3778,6 +4435,40 @@ public final class MainActivity extends AppCompatActivity {
             if (resumed && !busy && engine == current && selectedPeer == null) render();
         });
         showDialog(dialog);
+    }
+
+    // Three choices side by side: follow the phone (until the person chooses, this is what the app does), always light, always dark.
+    private LinearLayout themeChoice() {
+        Palette.Choice chosen = Ui.choice(this);
+        LinearLayout group = horizontal();
+        group.setPadding(dp(3), dp(3), dp(3), dp(3));
+        group.setBackground(design.background(Ui.CANVAS, 9, Ui.OUTLINE));
+        group.setContentDescription("Theme");
+        String[] labels = {"System", "Light", "Dark"};
+        Palette.Choice[] choices = {Palette.Choice.SYSTEM, Palette.Choice.LIGHT, Palette.Choice.DARK};
+        for (int index = 0; index < choices.length; index++) {
+            Palette.Choice choice = choices[index];
+            boolean selected = choice == chosen;
+            TextView segment = design.text(labels[index], 13, 700, selected ? Ui.ACCENT : MUTED);
+            segment.setGravity(Gravity.CENTER);
+            segment.setMinHeight(dp(42));
+            segment.setBackground(selected ? design.background(Ui.TINT, 7, 0) : design.feedback(Color.TRANSPARENT, 7));
+            segment.setSelected(selected);
+            segment.setContentDescription(labels[index] + " theme" + (selected ? ", selected" : ""));
+            segment.setFilterTouchesWhenObscured(true);
+            segment.setOnClickListener(view -> chooseTheme(choice));
+            group.addView(segment, new LinearLayout.LayoutParams(0, -2, 1));
+        }
+        return group;
+    }
+
+    // Every view takes its colors when it is built, so a new look is a new activity, not a repaint: the sheet is closed, the choice is
+    // kept, and the screen is made again (the chat list, as when the app is opened).
+    private void chooseTheme(Palette.Choice choice) {
+        if (Ui.choice(this) == choice) return;
+        Ui.choose(this, choice);
+        dismissContent();
+        recreate();
     }
 
     private void profilePhotoDialog() {
@@ -4796,7 +5487,7 @@ public final class MainActivity extends AppCompatActivity {
     private void notificationIntent(Intent intent) {
         if (intent == null || !PushService.OPEN_NOTIFICATION.equals(intent.getAction())) return;
         notificationOpen = null;
-        selectedPeer = null; homeQuery = ""; unreadOnly = false;
+        selectedPeer = null; homeQuery = ""; listFilter = ChatListModel.Filter.ALL;
         dismissContent();
         try {
             String reference = intent.getStringExtra(PushService.REFERENCE);
@@ -4872,15 +5563,12 @@ public final class MainActivity extends AppCompatActivity {
         int conversation = conversationGeneration;
         UUID selected = selectedPeer;
         ChatListContents contents;
-        Map<UUID, Long> unreadCounts = new HashMap<>();
         GroupChat.Conversation selectedGroup;
         ChatEngine.Peer selectedContact;
         String groupStatus;
         boolean groupCanSend;
         try {
-            contents = current.authenticated() ? ChatListContents.read(current)
-                    : new ChatListContents(java.util.List.of(), java.util.List.of(), Set.of(), 0);
-            if (current.authenticated()) unreadCounts.putAll(current.unreadCounts());
+            contents = current.authenticated() ? ChatListContents.read(current) : ChatListContents.none();
             selectedGroup = contents.groups().stream().filter(group -> group.id().equals(selected) && !current.groups().invited(group)).findFirst().orElse(null);
             selectedContact = selectedGroup == null ? contents.peers().stream().filter(peer -> peer.userId().equals(selected)).findFirst().orElse(null)
                     : new ChatEngine.Peer(selectedGroup.id(), selectedGroup.snapshot().epoch(), "", selectedGroup.name());
@@ -4898,7 +5586,7 @@ public final class MainActivity extends AppCompatActivity {
             else if (conversation != conversationGeneration) return;
             else if (selectedPeer == null) {
                 if (connection != null) connection.setText(statusText());
-                updateContacts(contents, unreadCounts);
+                updateContacts(contents, true);
             }
             else {
                 if (!Objects.equals(selected, selectedPeer)) return;
@@ -5044,7 +5732,7 @@ public final class MainActivity extends AppCompatActivity {
         quoteJump = null; stopQuoteFlash();
         composerPeer=null;
         sendControl=null; attachmentControl=null;
-        homeQuery=""; unreadOnly=false;
+        homeQuery=""; listFilter = ChatListModel.Filter.ALL;
         conversationName = null; conversationUsername = null;
         contactStatus = null;
         messageScroll = null; shownEntries = java.util.List.of(); actionError = null;

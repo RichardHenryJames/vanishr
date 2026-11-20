@@ -345,6 +345,62 @@ likeliest to be opened next (unread first, then most recent; muted ones last), m
 that was read ahead, or opened before, is drawn without a Keystore call. See the
 [threat model](THREAT-MODEL.md#the-words-of-messages-kept-in-memory-and-a-chat-that-opens-at-once-072).
 
+## The look of the app (0.7.2)
+
+The screens are built in code, and every view takes its colors when it is built, so the look is chosen before anything is built. `Palette`
+holds the numbers of the two looks (light, which is what the app always was, and dark) and `Ui` copies the look in use into its color fields
+(`Ui.configure`, called first thing in `MainActivity.onCreate` and `RemotePhotosActivity.onCreate`, which then set the theme
+`Theme.Vanishr.Light` or `Theme.Vanishr.Dark`). Which look is in use is what the person chose under *Theme* in My profile (System, Light or
+Dark, kept in the `preferences` file under `theme`), and until they choose, whether the phone is in its dark mode. A change of look is made by
+recreating the activity: the sheet is closed, the choice is kept and the screen is built again, so there is no repaint of views already made and no
+cache of colors that could be stale (the chat wallpaper is the one cached drawing, one tile per look). Where the light look had one color, the
+dark look has two when it has to: `accent` (text and icons) against `primary` (a fill that carries white), and the `*Fill` colors of the unread
+count and the swipe buttons. `PaletteTest` holds each text and fill of the dark look to a contrast of 4.5 to 1, holds the light look to its old
+values, and checks that `themes.xml` says what the palette says. The window that is drawn before the activity chooses is the dark one when the
+phone is in its dark mode (`values-night`); a person who chose dark on a phone that is in its light mode may see the light window for a moment
+as the app starts, and one who chose light on a phone in its dark mode the dark one. A change of look is a restart of the screen, so it drops what the
+screen holds as leaving the app does (the open chat, the composer, and what is waiting to be sent, including a message that failed and waits for Retry).
+Nothing about the look is secret or sent anywhere. The startup bar (`FlowBar`) draws its own light from the clock each
+frame, round after round with no pause, so it keeps flowing when the phone's animations are switched off, and also when a person has asked for them to be
+removed; it always crosses from left to right and a screen reader is told only "Opening Vanishr".
+
+## The chat list (0.7.2)
+
+The home screen's list is drawn from one reading of what the phone holds (`ChatListContents`): the contacts and groups, the mutes, the pins and unread
+marks, and a `ChatListModel.Summary` for every chat. The summaries come from `ChatEngine.chatSummaries()`, a single pass over the live entry records that
+the unread counts already read, so it makes no Keystore call and cannot tell what a message says: for each chat it knows how many live messages there are,
+how many incoming ones are not read yet (and whether the newest of those is a photo or a view-once message), when the newest message was written, whether it
+came or went and how far an outgoing one got, and when the next one vanishes. `ChatListModel` (plain Java, with JVM tests) turns a summary into what a row
+says: the line under the name (a small fixed vocabulary), the time ("14:05", "Yesterday", a weekday, a date), the countdown (shown in the last hour only),
+which chats pass a filter chip (All, Unread, Groups, Muted), and the order (pinned chats first, at most three; then the newest message first, chats with no
+message last and ties in the order given). With *Show details in the chat list* off (`list-details` in the plain `preferences` file) the order is the plain
+one (groups, then contacts by name, pinned first still) and the rows show names and counts only.
+
+`MainActivity` plans the rows (`planRows`) and draws them by one of two paths. If the rows are the same rows (`RowKey`: the chat, its name, whether it is muted,
+pinned, under review, and whether details are on) and the directory has not changed, the views that are there are told what they now say (`bindRow`), and if
+the order is another (a message made a chat the newest) they are put in it: `moveRows` takes each row and its divider out and puts them back, and nothing is made.
+That keeps the list's scroll position and its rows' views, and it is what makes going back to the list after sending a message cost no more than a change of
+a count. Otherwise (a contact added, removed or renamed, a pin or a mute changed, the details switched) the rows are built again. In both, when the phone's
+animations are on, a row that was somewhere else is placed where it was before the first frame and glides to its place, a new one fades in and a count that
+rose bounces (`ListMotion`;
+`playMotion` records the tops of the rows before and compares them after the layout, inside a pre-draw listener, so nothing jumps). A tick of the screen
+(`expiryTick` calling `tickChatList`) moves the times and countdowns on with the clock, and reads the list again, on the reader lane, when the next message in
+it vanishes. A row is the chat's avatar, a column with the name over its line, and a column with the time over the count (or the dot of a mark, or the pin);
+the name's view is a direct child of the column that is a child of the row, which is how the screen's tests and the swipe actions find a row. A row's count badge
+and its countdown (icon and text) are made the first time the row has one (`badgeOf`, `showCountdown`), so the many rows that have neither stay cheap to build;
+a row's parts are wrap-content with minimum heights, so a large font grows a row instead of cutting its text, and the line and the countdown carry spoken
+descriptions (`RowText.spoken`, `ChatListModel.countdownSpoken`). The line also says "Not sent" for a newest outgoing message that failed, and how far a
+group message got, both from the records' states alone (`ChatListModel.Delivery`).
+
+Pins and unread marks are records in the encrypted store (`pinned/<chat id>`, `unread-mark/<chat id>`, the value `true`) beside `muted/<id>`: preferences kept
+on this phone, never sent, not in the backup, erased with the account, and removed with the chat. A mark is taken off where a chat is shown
+(`conversation(peer)`), which every way into a chat passes (a row, a notification, an invitation), and by *Mark as read* (`ChatEngine.markChatRead`, which reads
+every new message that is not view-once, including those that opening would not have drawn, and queues their receipts). A long press chooses a chat; a bar takes
+the toolbar's place and acts on all that are chosen (Pin or Unpin, Mute or Unmute for contacts, Mark as read or unread, and More: Clear chat and Remove contact,
+each asked about first, naming up to three of the chats, for one chat or for several). Every time the rows are planned, a chat that is not among them (hidden by a
+chip or a search, or gone) is dropped from the choice. While chats are chosen the rows' swipe actions are locked (`SwipeActions.Group.lock`), a sideways pull on
+a row is swallowed instead of ending as a touch on it, and Back, the close button or choosing nothing again leaves the choice before it leaves the screen. See the [threat model](THREAT-MODEL.md#the-chat-list-latest-activity-first-a-line-under-each-name-pins-marks-and-selection-072).
+
 ## Retention semantics
 
 Expiry modes: `VIEW_ONCE`, `HOUR_1`, `HOURS_6`, `HOURS_24`. Client expiry starts

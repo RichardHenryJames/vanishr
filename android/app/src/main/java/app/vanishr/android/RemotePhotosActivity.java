@@ -29,6 +29,8 @@ public final class RemotePhotosActivity extends AppCompatActivity {
     };
 
     @Override protected void onCreate(Bundle state) {
+        Ui.configure(this);
+        setTheme(Ui.theme());
         super.onCreate(null);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         if (Build.VERSION.SDK_INT >= 31) getWindow().setHideOverlayWindows(true);
@@ -111,14 +113,21 @@ public final class RemotePhotosActivity extends AppCompatActivity {
                 thumbnail.setLayoutParams(new AbsListView.LayoutParams(-1, design.dp(96))); thumbnail.setSaveEnabled(false); thumbnail.setFilterTouchesWhenObscured(true);
             }
             thumbnail.setImageDrawable(null);
+            thumbnail.clearColorFilter();
             thumbnail.setContentDescription("Photo " + (position + 1));
             byte[] bytes = session == null ? null : session.thumbnail(items.get(position));
             if (bytes != null) {
                 try { thumbnail.setImageBitmap(PhotoLibrary.decode(bytes, 320)); }
-                catch (Exception ignored) { thumbnail.setImageResource(R.drawable.ic_image); }
+                catch (Exception ignored) { placeholder(thumbnail); }
                 finally { Arrays.fill(bytes, (byte) 0); }
-            } else thumbnail.setImageResource(R.drawable.ic_image);
+            } else placeholder(thumbnail);
             return thumbnail;
+        }
+
+        // The stand-in picture is drawn in the color of text, so that it shows on the page in either look.
+        private void placeholder(ImageView thumbnail) {
+            thumbnail.setImageResource(R.drawable.ic_image);
+            thumbnail.setColorFilter(Ui.INK);
         }
     }
 

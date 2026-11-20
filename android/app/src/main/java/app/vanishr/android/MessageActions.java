@@ -59,7 +59,7 @@ final class MessageActions extends Dialog {
      */
     MessageActions(Context context, Ui design, View bubble, Rect bounds, boolean outgoing, List<String> reactions, String chosen,
                    Consumer<String> react, List<Item> items) {
-        super(context, R.style.Theme_Vanishr_MessageActions);
+        super(context, Ui.dark ? R.style.Theme_Vanishr_MessageActions_Dark : R.style.Theme_Vanishr_MessageActions);
         this.design = design;
         this.bounds = new Rect(bounds);
         this.outgoing = outgoing;

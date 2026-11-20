@@ -47,7 +47,10 @@ final class SwipeActions extends FrameLayout {
         private SwipeActions open, touching;
         private Object openKey;
         private int openSide = CLOSED;
-        private boolean claimed;
+        private boolean claimed, locked;
+
+        /** While chats are being selected the rows are not pulled: the actions of a row would sit under a selection of several. */
+        void lock(boolean locked) { this.locked = locked; if (locked) closeOpen(); }
 
         /** Called around the drawing of all the rows: an open row whose chat is no longer listed is forgotten. */
         void begin() { claimed = false; }
@@ -223,7 +226,7 @@ final class SwipeActions extends FrameLayout {
             case MotionEvent.ACTION_MOVE:
                 track(event);
                 if (phase == Phase.IDLE) follow(event);
-                return phase == Phase.DRAGGING;
+                return phase == Phase.DRAGGING || phase == Phase.SWALLOWING;
             case MotionEvent.ACTION_POINTER_DOWN:
                 if (phase == Phase.IDLE) phase = Phase.SCROLLING;
                 return false;
@@ -275,6 +278,8 @@ final class SwipeActions extends FrameLayout {
     private void follow(MotionEvent event) {
         float dx = event.getRawX() - downX, dy = event.getRawY() - downY;
         if (Math.abs(dx) < slop && Math.abs(dy) < slop) return;
+        // While chats are chosen nothing slides open, and a pull that goes sideways is not a tap on the row either.
+        if (group.locked) { phase = Math.abs(dx) > 1.5f * Math.abs(dy) ? Phase.SWALLOWING : Phase.SCROLLING; return; }
         // Mostly sideways is for this row; anything else is somebody scrolling.
         if (Math.abs(dx) <= 1.5f * Math.abs(dy)) { phase = Phase.SCROLLING; return; }
         phase = Phase.DRAGGING;

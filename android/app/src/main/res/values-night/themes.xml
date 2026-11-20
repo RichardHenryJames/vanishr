@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Before MainActivity has chosen its look (the window that is drawn first), the phone's dark mode gives the dark one. -->
+    <style name="Theme.Vanishr" parent="Theme.Vanishr.Dark" />
+</resources>

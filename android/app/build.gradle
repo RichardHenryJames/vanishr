@@ -35,6 +35,12 @@ android {
     }
     buildFeatures { buildConfig true }
     testBuildType providers.gradleProperty('testBuildType').getOrElse('debug')
+    testOptions {
+        unitTests.all {
+            // PaletteTest reads the theme files by path, so a change to them has to run the unit tests again.
+            inputs.files(fileTree('src/main/res/values'), fileTree('src/main/res/values-night')).withPropertyName('themeFiles')
+        }
+    }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_21
         targetCompatibility JavaVersion.VERSION_21

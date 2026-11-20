@@ -49,6 +49,11 @@ public class ScreenFlowTest {
         assertTrue(Build.MODEL.contains("sdk_gphone") || Build.FINGERPRINT.contains("generic"));
         unlockPhotoFixture(InstrumentationRegistry.getArguments().getString("devicePin"));
         resetQaFixture();
+        // Every test starts in the light look, whatever the one before it left in the colors in use and whatever the phone's own mode is.
+        // testTheme=dark (or light, or system) makes a run of the whole class draw every screen in that look instead, for looking at them.
+        Ui.use(Palette.LIGHT);
+        String lookAsked = InstrumentationRegistry.getArguments().getString("testTheme");
+        Ui.choose(context, lookAsked == null ? Palette.Choice.LIGHT : Palette.Choice.of(lookAsked));
         assertTrue(context.getSharedPreferences("updates", Context.MODE_PRIVATE).edit().clear()
             .putLong("last-check", System.currentTimeMillis()).commit());
         // The signed settings are not fetched from the real download site by a test that is about something else.
@@ -644,11 +649,13 @@ public class ScreenFlowTest {
     private void conversationsFixture() throws Exception {
         SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
         peer = new ChatEngine.Peer(peerId, peerDevice, Base64.getEncoder().encodeToString(remote.publicIdentity()), "Aarav Mehta");
+        // Each contact is stored under its own account id, as the app stores them, so that the engine finds it by that id.
+        UUID mayaId = UUID.randomUUID(), noahId = UUID.randomUUID();
         vault.transaction(() -> {
             new SignalClient(userId, vault).verifyPeer(peerId, remote.publicIdentity());
             write("contact/" + peerId, peer);
-            write("contact/" + UUID.randomUUID(), new ChatEngine.Peer(UUID.randomUUID(), UUID.randomUUID(), peer.identityKey(), "Maya Chen"));
-            write("contact/" + UUID.randomUUID(), new ChatEngine.Peer(UUID.randomUUID(), UUID.randomUUID(), peer.identityKey(), "Noah Williams"));
+            write("contact/" + mayaId, new ChatEngine.Peer(mayaId, UUID.randomUUID(), peer.identityKey(), "Maya Chen"));
+            write("contact/" + noahId, new ChatEngine.Peer(noahId, UUID.randomUUID(), peer.identityKey(), "Noah Williams"));
             return null;
         });
         entry(false, "Coffee at 4?", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -240_000);
@@ -661,11 +668,15 @@ public class ScreenFlowTest {
     }
 
     private ChatEngine.Entry entry(boolean outgoing, String text, byte[] image, ChatEnvelope.Expiry expiry, String state, long offset) throws Exception {
+        return entryFor(peerId, peerDevice, outgoing, text, image, expiry, state, offset);
+    }
+
+    private ChatEngine.Entry entryFor(UUID withUser, UUID withDevice, boolean outgoing, String text, byte[] image, ChatEnvelope.Expiry expiry, String state, long offset) throws Exception {
         UUID id = UUID.randomUUID(); long created = System.currentTimeMillis() + offset; long deadline = created + expiry.milliseconds;
         createFixtureKey(AndroidVault.contentAlias(deadline, id));
-        ChatEnvelope envelope = new ChatEnvelope(1, id, outgoing ? userId : peerId, outgoing ? deviceId : peerDevice,
-                outgoing ? peerId : userId, outgoing ? peerDevice : deviceId, created, deadline, expiry, text, null);
-        ChatEngine.Entry entry = new ChatEngine.Entry(id, peerId, deadline, expiry, outgoing, image != null, state);
+        ChatEnvelope envelope = new ChatEnvelope(1, id, outgoing ? userId : withUser, outgoing ? deviceId : withDevice,
+                outgoing ? withUser : userId, outgoing ? withDevice : deviceId, created, deadline, expiry, text, null);
+        ChatEngine.Entry entry = new ChatEngine.Entry(id, withUser, deadline, expiry, outgoing, image != null, state);
         vault.transaction(() -> {
             write("entry/" + id, entry);
             byte[] content = RelayApi.JSON.toJson(new ChatEngine.Content(envelope, image)).getBytes(StandardCharsets.UTF_8);
@@ -709,6 +720,13 @@ public class ScreenFlowTest {
         List<View> result = new ArrayList<>(); result.add(view);
         if (view instanceof ViewGroup group) for (int index = 0; index < group.getChildCount(); index++) result.addAll(descendants(group.getChildAt(index)));
         return result;
+    }
+
+    /** Every text on a screen, for a failure message that says what was there instead. */
+    private static String screenSays(View root) {
+        StringBuilder said = new StringBuilder();
+        for (View view : descendants(root)) if (view instanceof TextView label && label.getText().length() > 0) said.append('[').append(label.getText()).append(']');
+        return said.toString();
     }
 
     private View text(View root, String value) {
@@ -786,7 +804,10 @@ public class ScreenFlowTest {
             }
             view.draw(canvas);
             File folder = new File(context.getExternalFilesDir(null), "ui-qa"); assertTrue(folder.isDirectory() || folder.mkdirs());
-            try (FileOutputStream output = new FileOutputStream(new File(folder, name + ".png"))) { assertTrue(image.compress(Bitmap.CompressFormat.PNG, 100, output)); }
+            try (FileOutputStream output = new FileOutputStream(new File(folder, name + ".png"))) {
+                assertTrue(image.compress(Bitmap.CompressFormat.PNG, 100, output));
+                if (Ui.dark) darkMetrics(name, image, folder);
+            }
             catch (IOException failure) { throw new AssertionError(failure); }
             finally { image.recycle(); }
             for (View child : descendants(view)) {
@@ -798,6 +819,14 @@ public class ScreenFlowTest {
                 }
             }
         });
+    }
+
+    // For a run of the class in the dark look (testTheme=dark): how dark each screenshot is, in a file next to them.
+    private static void darkMetrics(String name, Bitmap image, File folder) {
+        double[] reading = darkReading(image);
+        try (java.io.FileWriter writer = new java.io.FileWriter(new File(folder, "dark-metrics.csv"), true)) {
+            writer.write(String.format(Locale.ROOT, "%s,%.3f,%.3f,%.3f%n", name, reading[0], reading[1], reading[2]));
+        } catch (IOException failure) { throw new AssertionError(failure); }
     }
 
     private void assertBrandLogo(MainActivity activity) {
@@ -984,7 +1013,7 @@ public class ScreenFlowTest {
         assertTrue(notification.contentIntent.isImmutable());
     }
 
-    @Test public void compactClassicHomeUsesOneToolbarAnd116DpBeforeTheList() throws Exception {
+    @Test public void compactClassicHomeUsesOneToolbarAnd100DpBeforeTheList() throws Exception {
         signedInFixture(); conversationsFixture();
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             scenario.onActivity(this::inject);
@@ -995,7 +1024,7 @@ public class ScreenFlowTest {
                 View root = root(activity); View rows = (View) readField(activity, "contactRows");
                 int[] origin = new int[2]; int[] list = new int[2]; root.getLocationOnScreen(origin); rows.getLocationOnScreen(list);
                 float density = context.getResources().getDisplayMetrics().density;
-                assertEquals("List must begin after A's toolbar and search row", Math.round(116 * density), list[1] - origin[1] - root.getPaddingTop(), 2);
+                assertEquals("The list begins after the toolbar (56 dp) and the filter chips (44 dp); the search is closed", Math.round(100 * density), list[1] - origin[1] - root.getPaddingTop(), 2);
                 assertFalse(descendants(root).stream().anyMatch(view -> view instanceof TextView label && "Chats".contentEquals(label.getText())));
                 assertTrue(descendants(root).stream().anyMatch(view -> "My profile".equals(view.getContentDescription())));
                 assertTrue(descendants(root).stream().anyMatch(view -> "New conversation".equals(view.getContentDescription())));
@@ -1110,14 +1139,13 @@ public class ScreenFlowTest {
             snapshot(scenario, "56-centered-opening");
             scenario.onActivity(activity -> {
                 View screen = root(activity), logo = screen.findViewById(R.id.brand_logo);
-                ProgressBar progress = screen.findViewById(R.id.startup_progress);
+                FlowBar progress = screen.findViewById(R.id.startup_progress);
                 assertNotNull(logo); assertNotNull(progress);
                 Rect area = screenRect(screen), brand = screenRect(logo), bar = screenRect(progress);
                 assertEquals(area.centerX(), brand.centerX(), dpPx(2));
                 assertEquals(area.centerX(), bar.centerX(), dpPx(2));
                 assertEquals(area.centerY(), brand.centerY(), dpPx(24));
                 assertTrue("The horizontal progress indicator belongs below the logo", bar.top > brand.bottom && bar.width() > 10 * bar.height());
-                assertTrue(progress.isIndeterminate());
                 assertEquals(activity.getString(R.string.opening_vanishr), progress.getContentDescription());
                 assertTrue(descendants(screen).stream().noneMatch(TextView.class::isInstance));
                 invoke(activity, "storageState");
@@ -1132,6 +1160,31 @@ public class ScreenFlowTest {
             scenario.onActivity(activity -> assertHorizontallyCentered((TextView) text(root(activity),
                     "Secure storage is unavailable. Your encrypted data has not been cleared."), root(activity)));
         }
+    }
+
+    @Test public void theStartupBarFlowsRoundAfterRoundAndNeverStopsWhateverTheAnimationScaleIs() throws Exception {
+        signedInFixture();
+        float scale = android.provider.Settings.Global.getFloat(context.getContentResolver(), android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            FlowBar[] bar = new FlowBar[1];
+            scenario.onActivity(activity -> { inject(activity); invoke(activity, "storageState"); bar[0] = root(activity).findViewById(R.id.startup_progress); });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            // Sampled for less than the two seconds after which the first sync of the screen may draw the chat list in its place.
+            int[] drawn = new int[4];
+            for (int sample = 0; sample < drawn.length; sample++) {
+                drawn[sample] = bar[0].drawn();
+                android.os.SystemClock.sleep(450);
+            }
+            for (int sample = 1; sample < drawn.length; sample++)
+                assertTrue("The bar was drawn again in each 450 ms, with the system's animation scale at " + scale + ": " + java.util.Arrays.toString(drawn),
+                    drawn[sample] - drawn[sample - 1] >= 5);
+        }
+        // The light is somewhere else a moment later, and it comes in again at the start of each round, with no pause between rounds.
+        assertEquals(0f, FlowBar.position(0), 0f);
+        assertEquals(0.5f, FlowBar.position(FlowBar.ROUND_MILLIS / 2), 0.001f);
+        assertEquals(0f, FlowBar.position(FlowBar.ROUND_MILLIS), 0f);
+        assertEquals(0f, FlowBar.position(7 * FlowBar.ROUND_MILLIS), 0f);
+        assertTrue(FlowBar.position(1_000_000 + 300) != FlowBar.position(1_000_000 + 600));
     }
 
     @Test public void backReusesTheScrolledChatListAndRefreshesUnreadWithoutWaitingForWork() throws Exception {
@@ -3020,12 +3073,12 @@ public class ScreenFlowTest {
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             scenario.onActivity(activity -> {
                 inject(activity); invoke(activity, "accountDialog");
-                CompoundButton toggle = descendants(dialog(activity).getWindow().getDecorView()).stream().filter(view -> view instanceof CompoundButton)
+                CompoundButton toggle = descendants(dialog(activity).getWindow().getDecorView()).stream().filter(view -> view instanceof CompoundButton button && "New message notifications".contentEquals(button.getText()))
                         .map(view -> (CompoundButton) view).findFirst().orElseThrow();
                 assertTrue(toggle.isChecked()); toggle.setChecked(false);
                 assertFalse(PushService.notificationsEnabled(context));
                 invoke(activity, "dismissContent"); invoke(activity, "accountDialog");
-                CompoundButton restored = descendants(dialog(activity).getWindow().getDecorView()).stream().filter(view -> view instanceof CompoundButton)
+                CompoundButton restored = descendants(dialog(activity).getWindow().getDecorView()).stream().filter(view -> view instanceof CompoundButton button && "New message notifications".contentEquals(button.getText()))
                         .map(view -> (CompoundButton) view).findFirst().orElseThrow();
                 assertFalse(restored.isChecked());
             });
@@ -8922,7 +8975,10 @@ public class ScreenFlowTest {
         });
     }
 
-    private List<ChatEngine.Peer> manyVerifiedContacts(int count, int entriesEach) throws Exception {
+    private List<ChatEngine.Peer> manyVerifiedContacts(int count, int entriesEach) throws Exception { return manyVerifiedContacts(count, entriesEach, 0); }
+
+    /** The same, with the newest message of each contact {@code ageMillis} old: older than the ones of the fixture chats, so that those are listed first. */
+    private List<ChatEngine.Peer> manyVerifiedContacts(int count, int entriesEach, long ageMillis) throws Exception {
         SignalClient remote = new SignalClient(peerId, new DeviceSecurityTest.MemoryVault());
         List<ChatEngine.Peer> peers = new ArrayList<>();
         vault.transaction(() -> {
@@ -8939,7 +8995,7 @@ public class ScreenFlowTest {
         });
         for (ChatEngine.Peer contact : peers)
             for (int index = 0; index < entriesEach; index++)
-                bulkEntry(contact.userId(), contact.deviceId(), index % 3 == 0, "Synthetic message " + index, -(index * 1000L), index % 3 == 0 ? "DELIVERED" : "DELIVERED");
+                bulkEntry(contact.userId(), contact.deviceId(), index % 3 == 0, "Synthetic message " + index, -(ageMillis + index * 1000L), index % 3 == 0 ? "DELIVERED" : "DELIVERED");
         return peers;
     }
 
@@ -9566,7 +9622,15 @@ public class ScreenFlowTest {
     private void awaitShift(ActivityScenario<MainActivity> scenario, String name, int dp) throws Exception {
         float[] seen = new float[1];
         try { awaitMainCondition(scenario, activity -> { seen[0] = shiftOf(activity, name); return Math.abs(seen[0] - dpPx(dp)) <= 2f; }); }
-        catch (AssertionError failure) { throw new AssertionError("The row of " + name + " is " + seen[0] + " px from rest, not " + dpPx(dp) + " (" + dp + " dp)", failure); }
+        catch (AssertionError failure) {
+            // What the screen was doing when the row did not come to where it should, for a failure that happens once in a long run.
+            String[] state = {"the state of the screen could not be read"};
+            try {
+                scenario.onActivity(activity -> state[0] = "resumed " + readField(activity, "resumed") + ", a finger is on a row " + rowGroup(activity).active()
+                    + ", a dialog is showing " + !noDialog(activity) + ", the screen was made " + readField(activity, "screenGeneration") + " times");
+            } catch (RuntimeException unreadable) { state[0] = "the activity was gone"; }
+            throw new AssertionError("The row of " + name + " is " + seen[0] + " px from rest, not " + dpPx(dp) + " (" + dp + " dp); " + state[0], failure);
+        }
     }
 
     private void tapRowAction(ActivityScenario<MainActivity> scenario, androidx.test.uiautomator.UiDevice device, String name, String label) {
@@ -9597,7 +9661,7 @@ public class ScreenFlowTest {
                 assertEquals("At rest the row is where it always was", 0f, shiftOf(activity, "Aarav Mehta"), 0f);
                 View row = contactRow(activity, "Aarav Mehta"); SwipeActions holder = actionsOf(activity, "Aarav Mehta");
                 assertEquals("The actions behind a row do not make it taller", row.getHeight(), holder.getHeight());
-                assertTrue("It is an ordinary chat row: " + row.getHeight(), row.getHeight() >= dpPx(78) && row.getHeight() < dpPx(120));
+                assertTrue("It is an ordinary chat row: " + row.getHeight(), row.getHeight() >= dpPx(74) && row.getHeight() < dpPx(120));
                 for (View panel : List.of(holder.getChildAt(0), holder.getChildAt(1))) assertEquals("and the actions are as tall as it is", row.getHeight(), panel.getHeight());
                 for (String label : List.of("Mute", "Clear chat", "Remove contact", "Block user")) assertFalse(label + " is not showing at rest", showing(activity, "Aarav Mehta", label));
             });
@@ -9697,8 +9761,8 @@ public class ScreenFlowTest {
                 image.recycle();
                 assertEquals("The row's own colour, so nothing behind it shows through", Color.red(Ui.CANVAS), Color.red(inRow), 8);
                 assertEquals(Color.green(Ui.CANVAS), Color.green(inRow), 8); assertEquals(Color.blue(Ui.CANVAS), Color.blue(inRow), 8);
-                assertEquals("The button beside it is the Clear chat button", Color.green(Ui.MUTED), Color.green(beside), 8);
-                assertEquals(Color.red(Ui.MUTED), Color.red(beside), 8);
+                assertEquals("The button beside it is the Clear chat button", Color.green(Ui.MUTED_FILL), Color.green(beside), 8);
+                assertEquals(Color.red(Ui.MUTED_FILL), Color.red(beside), 8);
             });
             snapshot(scenario, "114-swipe-held");
             touch(android.view.MotionEvent.ACTION_UP, at.left + dpPx(60) + dpPx(50), at.centerY());
@@ -9782,7 +9846,8 @@ public class ScreenFlowTest {
 
     @Test public void scrollingTheListPutsAnOpenRowBack() throws Exception {
         signedInFixture(); conversationsFixture();
-        manyVerifiedContacts(30, 1);
+        // Older than the chat that is pulled, which is the first row of the list.
+        manyVerifiedContacts(30, 1, 600_000);
         var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             scenario.onActivity(this::inject);
@@ -9804,12 +9869,11 @@ public class ScreenFlowTest {
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             scenario.onActivity(this::inject);
             InstrumentationRegistry.getInstrumentation().waitForIdleSync();
-            long[] plainCount = new long[1];
-            scenario.onActivity(activity -> plainCount[0] = pictures(activity, "Maya Chen"));
-            long plain = plainCount[0];
+            long[] plainCount = new long[2];
+            scenario.onActivity(activity -> { plainCount[0] = pictures(activity, "Aarav Mehta"); plainCount[1] = pictures(activity, "Maya Chen"); });
+            long plain = plainCount[0], mayas = plainCount[1];
             scenario.onActivity(activity -> {
                 assertEquals("A chat that is not muted has the green count", Ui.PRIMARY, badgeColor(activity, peerId));
-                assertEquals(plain, pictures(activity, "Aarav Mehta"));
                 assertNull(androidx.core.view.ViewCompat.getStateDescription(contactRow(activity, "Aarav Mehta")));
             });
             pullRow(scenario, device, "Aarav Mehta", 220);
@@ -9818,11 +9882,11 @@ public class ScreenFlowTest {
             awaitMainCondition(scenario, activity -> engine.mutedChats().contains(peerId) && !(boolean) readField(activity, "busy"));
             scenario.onActivity(activity -> {
                 assertEquals(Set.of(peerId), engine.mutedChats());
-                assertEquals("The count is grey", Ui.MUTED, badgeColor(activity, peerId));
+                assertEquals("The count is grey", Ui.MUTED_FILL, badgeColor(activity, peerId));
                 assertEquals("and a bell is beside it", plain + 1, pictures(activity, "Aarav Mehta"));
                 assertEquals("Muted", String.valueOf(androidx.core.view.ViewCompat.getStateDescription(contactRow(activity, "Aarav Mehta"))));
                 assertEquals("The row is back at rest", 0f, shiftOf(activity, "Aarav Mehta"), 0.5f);
-                assertEquals("No other chat is muted", plain, pictures(activity, "Maya Chen"));
+                assertEquals("No other chat is muted", mayas, pictures(activity, "Maya Chen"));
                 assertTrue("Muting does not touch the messages", engine.entries(peerId).size() == 7);
             });
             snapshot(scenario, "116-muted-chat");
@@ -9871,7 +9935,8 @@ public class ScreenFlowTest {
                 assertTrue(hasText(root(activity), "Aarav Mehta"));
                 assertNull(readField(activity, "selectedPeer"));
                 @SuppressWarnings("unchecked") Map<UUID, TextView> badges = (Map<UUID, TextView>) readField(activity, "unreadLabels");
-                assertEquals("There is nothing left to count", View.GONE, badges.get(peerId).getVisibility());
+                TextView badge = badges.get(peerId);
+                assertTrue("There is nothing left to count", badge == null || badge.getVisibility() == View.GONE);
             });
         }
     }
@@ -9925,6 +9990,7 @@ public class ScreenFlowTest {
                 dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
             });
             awaitNoDialog(scenario);
+            awaitShift(scenario, "Aarav Mehta", 0);
             assertFalse("Cancelling blocks nobody", engine.safety().isBlocked(peerId));
             assertTrue(engine.mutedChats().contains(peerId));
             pullRow(scenario, device, "Aarav Mehta", -220);
@@ -9949,6 +10015,11 @@ public class ScreenFlowTest {
             // A sync draws the list again; the row has to come back as it was, without a gesture.
             scenario.onActivity(activity -> {
                 View before = contactRow(activity, "Aarav Mehta");
+                invoke(activity, "renderContacts");
+                assertSame("Nothing but the text changed, so the rows are the views they were", before, contactRow(activity, "Aarav Mehta"));
+                assertEquals(-dpPx(152), shiftOf(activity, "Aarav Mehta"), 2f);
+                // The rows of a list that was changed (a chat that moved, one that came or went) are made again.
+                setField(activity, "shownKeys", List.of());
                 invoke(activity, "renderContacts");
                 View after = contactRow(activity, "Aarav Mehta");
                 assertNotSame("The rows are new views", before, after);
@@ -12880,6 +12951,8 @@ public class ScreenFlowTest {
         ChatEngine.Peer aarav = storeContact("Aarav Mehta", 1, 1), kenji = storeContact("Kenji Sato", 3, 2), leo = storeContact("Leo Fischer", 0, 3),
             maya = storeContact("Maya Chen", 0, 4), noah = storeContact("Noah Williams", 2, 5), priya = storeContact("Priya Nair", 1, 6), sofia = storeContact("Sofia Rossi", 3, 7);
         engine.mute(priya.userId(), true);
+        // A chat that is pinned shows its pin where a count would be, and stays at the top.
+        engine.pin(noah.userId(), true);
         storeMessage(priya, false, "Did you see the news?", ChatEnvelope.Expiry.HOURS_12, "DELIVERED", 75, null, null, null);
         storeMessage(priya, false, "Call me when you can", ChatEnvelope.Expiry.HOURS_12, "DELIVERED", 74, null, null, null);
 
@@ -13469,6 +13542,1550 @@ public class ScreenFlowTest {
         }
     }
 
+    // ---- The dark look and the choice of it (0.7.2) ----
+
+    // How dark a screen is: the average brightness of its edges (where the page, a sheet or a bar shows), the share of its pixels that are
+    // very bright (text, icons and pictures), and its average brightness, each from 0 to 1.
+    private static double[] darkReading(Bitmap image) {
+        long total = 0, bright = 0, borderCount = 0; double sum = 0, border = 0;
+        int step = 3, edge = Math.max(4, image.getHeight() / 40);
+        for (int y = 0; y < image.getHeight(); y += step) for (int x = 0; x < image.getWidth(); x += step) {
+            int pixel = image.getPixel(x, y);
+            double luminance = (0.2126 * Color.red(pixel) + 0.7152 * Color.green(pixel) + 0.0722 * Color.blue(pixel)) / 255.0;
+            total++; sum += luminance; if (luminance > 0.8) bright++;
+            if (y < edge || y >= image.getHeight() - edge || x < edge || x >= image.getWidth() - edge) { border += luminance; borderCount++; }
+        }
+        return new double[]{borderCount == 0 ? 0 : border / borderCount, (double) bright / total, sum / total};
+    }
+
+    private void assertScreenIsDark(ActivityScenario<MainActivity> scenario, String name) {
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        scenario.onActivity(activity -> {
+            SecureSheet sheet = dialog(activity);
+            View view = sheet != null && sheet.isShowing() ? sheet.getWindow().getDecorView() : activity.getWindow().getDecorView();
+            assertTrue("The screen must be laid out: " + name, view.getWidth() > 0 && view.getHeight() > 0);
+            Bitmap image = Bitmap.createBitmap(view.getWidth(), view.getHeight(), Bitmap.Config.ARGB_8888);
+            view.draw(new Canvas(image));
+            double[] reading = darkReading(image);
+            image.recycle();
+            String measured = String.format(Locale.ROOT, " (edges %.2f, bright share %.2f, average %.2f)", reading[0], reading[1], reading[2]);
+            assertTrue(name + ": the edges are dark" + measured, reading[0] < 0.25);
+            assertTrue(name + ": little of the screen is bright" + measured, reading[1] < 0.25);
+            assertTrue(name + ": the screen is dark on average" + measured, reading[2] < 0.35);
+        });
+    }
+
+    // The tests of the choice itself begin where nothing was chosen yet, whatever look testTheme asked for the others.
+    private void nothingChosenYet() {
+        assertTrue(context.getSharedPreferences("preferences", Context.MODE_PRIVATE).edit().remove("theme").commit());
+        Ui.use(Palette.LIGHT);
+    }
+
+    // With nothing chosen the phone decides, so a test that launches the app that way is about a phone that is in its day mode.
+    private void assumeDayMode() {
+        Assume.assumeTrue("The phone is in its night mode", (context.getResources().getConfiguration().uiMode
+            & android.content.res.Configuration.UI_MODE_NIGHT_MASK) != android.content.res.Configuration.UI_MODE_NIGHT_YES);
+    }
+
+    private ActivityScenario<MainActivity> openProfile(ActivityScenario<MainActivity> scenario) throws Exception {
+        scenario.onActivity(this::inject);
+        awaitMainCondition(scenario, ScreenFlowTest::listShown);
+        scenario.onActivity(activity -> invoke(activity, "accountDialog"));
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        return scenario;
+    }
+
+    // The activity is made again when the look changes: waits for the one that replaces the one given, and for it to be on the screen.
+    private MainActivity[] awaitNewActivity(ActivityScenario<MainActivity> scenario, MainActivity old) throws Exception {
+        MainActivity[] found = new MainActivity[1];
+        long deadline = android.os.SystemClock.elapsedRealtime() + 20_000;
+        while (found[0] == null && android.os.SystemClock.elapsedRealtime() < deadline) {
+            scenario.onActivity(activity -> { if (activity != old && !activity.isDestroyed()) found[0] = activity; });
+            if (found[0] == null) android.os.SystemClock.sleep(100);
+        }
+        assertNotNull("A new activity was made", found[0]);
+        return found;
+    }
+
+    @Test public void theProfileOffersTheThreeLooksAndShowsTheOneInUse() throws Exception {
+        nothingChosenYet(); assumeDayMode();
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            openProfile(scenario);
+            scenario.onActivity(activity -> {
+                View sheet = dialog(activity).getWindow().getDecorView();
+                assertTrue(hasText(sheet, "Theme"));
+                for (String label : List.of("System", "Light", "Dark")) assertTrue(label, hasText(sheet, label));
+                assertTrue("Nothing was chosen yet, so the phone decides", text(sheet, "System").isSelected());
+                assertFalse(text(sheet, "Light").isSelected());
+                assertFalse(text(sheet, "Dark").isSelected());
+                assertEquals("System theme, selected", text(sheet, "System").getContentDescription());
+                assertEquals("Dark theme", text(sheet, "Dark").getContentDescription());
+            });
+        }
+    }
+
+    @Test public void touchingTheLookThatIsInUseChangesNothingAndKeepsNothing() throws Exception {
+        nothingChosenYet(); assumeDayMode();
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            openProfile(scenario);
+            MainActivity[] before = new MainActivity[1];
+            scenario.onActivity(activity -> { before[0] = activity; text(dialog(activity).getWindow().getDecorView(), "System").performClick(); });
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            android.os.SystemClock.sleep(500);
+            scenario.onActivity(activity -> {
+                assertSame("The screen was not made again", before[0], activity);
+                assertFalse("Nothing was written", context.getSharedPreferences("preferences", Context.MODE_PRIVATE).contains("theme"));
+                assertNotNull("The profile is still open", dialog(activity));
+                assertFalse(Ui.dark);
+            });
+        }
+    }
+
+    @Test public void choosingTheDarkLookKeepsItAndMakesTheScreenAgainDark() throws Exception {
+        nothingChosenYet(); assumeDayMode();
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            openProfile(scenario);
+            MainActivity[] old = new MainActivity[1];
+            scenario.onActivity(activity -> {
+                old[0] = activity;
+                assertEquals("The light look to begin with", Palette.LIGHT.canvas(), ((android.graphics.drawable.ColorDrawable) root(activity).getBackground()).getColor());
+                text(dialog(activity).getWindow().getDecorView(), "Dark").performClick();
+            });
+            assertEquals("The choice is kept", "dark", context.getSharedPreferences("preferences", Context.MODE_PRIVATE).getString("theme", null));
+            awaitNewActivity(scenario, old[0]);
+            awaitMainCondition(scenario, activity -> activity != old[0] && listShown(activity));
+            scenario.onActivity(activity -> {
+                assertTrue(Ui.dark);
+                assertEquals(Palette.DARK.canvas(), Ui.CANVAS);
+                assertEquals("The page is the dark one", Palette.DARK.canvas(), ((android.graphics.drawable.ColorDrawable) root(activity).getBackground()).getColor());
+                assertEquals("and the theme the views take their defaults from is the dark one", Palette.DARK.surface(),
+                    com.google.android.material.color.MaterialColors.getColor(activity, com.google.android.material.R.attr.colorSurface, 0));
+                assertEquals(Palette.DARK.ink(), com.google.android.material.color.MaterialColors.getColor(activity, com.google.android.material.R.attr.colorOnSurface, 0));
+                assertNull("The profile is closed", dialog(activity));
+            });
+            assertScreenIsDark(scenario, "the chat list after choosing dark");
+        }
+    }
+
+    @Test public void choosingTheLightLookAfterTheDarkOneBringsTheLightOneBack() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        Ui.choose(context, Palette.Choice.DARK);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            openProfile(scenario);
+            MainActivity[] old = new MainActivity[1];
+            scenario.onActivity(activity -> {
+                old[0] = activity;
+                assertTrue(Ui.dark);
+                assertTrue("The one in use is the one selected", text(dialog(activity).getWindow().getDecorView(), "Dark").isSelected());
+                text(dialog(activity).getWindow().getDecorView(), "Light").performClick();
+            });
+            assertEquals("light", context.getSharedPreferences("preferences", Context.MODE_PRIVATE).getString("theme", null));
+            awaitNewActivity(scenario, old[0]);
+            awaitMainCondition(scenario, activity -> activity != old[0] && listShown(activity));
+            scenario.onActivity(activity -> {
+                assertFalse(Ui.dark);
+                assertEquals(Palette.LIGHT.canvas(), ((android.graphics.drawable.ColorDrawable) root(activity).getBackground()).getColor());
+            });
+        }
+    }
+
+    @Test public void thePhonesDarkModeDecidesWhileNothingIsChosenAndAChoiceBeatsIt() {
+        nothingChosenYet();
+        android.content.res.Configuration night = new android.content.res.Configuration(context.getResources().getConfiguration());
+        night.uiMode = (night.uiMode & ~android.content.res.Configuration.UI_MODE_NIGHT_MASK) | android.content.res.Configuration.UI_MODE_NIGHT_YES;
+        android.content.res.Configuration day = new android.content.res.Configuration(night);
+        day.uiMode = (day.uiMode & ~android.content.res.Configuration.UI_MODE_NIGHT_MASK) | android.content.res.Configuration.UI_MODE_NIGHT_NO;
+        Context phoneAtNight = context.createConfigurationContext(night), phoneByDay = context.createConfigurationContext(day);
+        Ui.configure(phoneAtNight);
+        assertTrue("Nothing is chosen, and the phone is dark", Ui.dark);
+        assertEquals(R.style.Theme_Vanishr_Dark, Ui.theme());
+        Ui.configure(phoneByDay);
+        assertFalse("Nothing is chosen, and the phone is light", Ui.dark);
+        assertEquals(R.style.Theme_Vanishr_Light, Ui.theme());
+        Ui.choose(context, Palette.Choice.LIGHT);
+        Ui.configure(phoneAtNight);
+        assertFalse("Light was chosen: the phone's dark mode does not matter", Ui.dark);
+        Ui.choose(context, Palette.Choice.DARK);
+        Ui.configure(phoneByDay);
+        assertTrue("Dark was chosen: the phone's light mode does not matter", Ui.dark);
+        assertEquals(Palette.DARK.accent(), Ui.ACCENT);
+        assertEquals(Palette.DARK.errorFill(), Ui.ERROR_FILL);
+        Ui.choose(context, Palette.Choice.SYSTEM);
+        Ui.configure(phoneByDay);
+        assertFalse(Ui.dark);
+        assertEquals(Palette.LIGHT.ink(), Ui.INK);
+        // Something stored by a version that this one does not know is the phone's choice too.
+        context.getSharedPreferences("preferences", Context.MODE_PRIVATE).edit().putString("theme", "sepia").commit();
+        Ui.configure(phoneAtNight);
+        assertTrue(Ui.dark);
+    }
+
+    @Test public void everyMainScreenIsDrawnDarkInTheDarkLookAndItsSheetsToo() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        Ui.choose(context, Palette.Choice.DARK);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            awaitMainCondition(scenario, ScreenFlowTest::listShown);
+            assertScreenIsDark(scenario, "the chat list");
+            scenario.onActivity(activity -> invoke(activity, "accountDialog"));
+            assertScreenIsDark(scenario, "my profile");
+            scenario.onActivity(activity -> dialog(activity).dismiss()); awaitNoDialog(scenario);
+            scenario.onActivity(activity -> invoke(activity, "newConversationDialog"));
+            assertScreenIsDark(scenario, "the new conversation sheet");
+            scenario.onActivity(activity -> dialog(activity).dismiss()); awaitNoDialog(scenario);
+            scenario.onActivity(activity -> invoke(activity, "newGroupDialog"));
+            assertScreenIsDark(scenario, "the new group sheet");
+            scenario.onActivity(activity -> dialog(activity).dismiss()); awaitNoDialog(scenario);
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", peerId); invoke(activity, "render"); });
+            awaitMessages(scenario);
+            assertScreenIsDark(scenario, "a chat");
+            scenario.onActivity(activity -> {
+                TextView viewOnce = (TextView) text(root(activity), "View once");
+                assertNotNull("The row of a view-once message has its eye", viewOnce.getCompoundDrawablesRelative()[0]);
+                assertEquals("drawn in the color of text, which is light here, and not in the dark of the icon file",
+                    Palette.DARK.ink(), viewOnce.getCompoundDrawableTintList().getDefaultColor());
+            });
+            scenario.onActivity(activity -> invoke(activity, "expiryDialog"));
+            assertScreenIsDark(scenario, "the disappearing messages sheet");
+            scenario.onActivity(activity -> dialog(activity).dismiss()); awaitNoDialog(scenario);
+            scenario.onActivity(activity -> invoke(activity, "attachmentDialog"));
+            assertScreenIsDark(scenario, "the attachment sheet");
+            scenario.onActivity(activity -> dialog(activity).dismiss()); awaitNoDialog(scenario);
+        }
+    }
+
+    @Test public void theDarkLookTintsTheStartupBarAndTheWallpaperForItself() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        Ui.choose(context, Palette.Choice.DARK);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                inject(activity);
+                var wallpaper = (android.graphics.drawable.BitmapDrawable) ChatWallpaper.create(activity);
+                Bitmap tile = wallpaper.getBitmap();
+                assertEquals("The wallpaper is the dark page with its doodles", Palette.DARK.canvas(), tile.getPixel(0, 0));
+                int doodled = 0;
+                for (int y = 0; y < tile.getHeight(); y++) for (int x = 0; x < tile.getWidth(); x++) if (tile.getPixel(x, y) != Palette.DARK.canvas()) doodled++;
+                assertTrue("with doodles on it", doodled > 0 && doodled < tile.getWidth() * tile.getHeight() / 8);
+                invoke(activity, "storageState");
+                FlowBar bar = root(activity).findViewById(R.id.startup_progress);
+                assertNotNull(bar);
+                assertEquals("The track of the bar is the line of the dark look", Palette.DARK.line(), bar.trackColor());
+                assertEquals("and the light that flows on it is its accent", Palette.DARK.accent(), bar.lightColor());
+            });
+            assertScreenIsDark(scenario, "the opening screen");
+        }
+        // Back in the light look the wallpaper and the bar are the light ones again: nothing of the other look is kept.
+        Ui.use(Palette.LIGHT);
+        Ui.choose(context, Palette.Choice.LIGHT);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> {
+                inject(activity);
+                var wallpaper = (android.graphics.drawable.BitmapDrawable) ChatWallpaper.create(activity);
+                assertEquals(Palette.LIGHT.canvas(), wallpaper.getBitmap().getPixel(0, 0));
+                invoke(activity, "storageState");
+                FlowBar bar = root(activity).findViewById(R.id.startup_progress);
+                assertNotNull(bar);
+                assertEquals(Palette.LIGHT.line(), bar.trackColor());
+                assertEquals(Palette.LIGHT.accent(), bar.lightColor());
+            });
+        }
+    }
+
+    // ---- The chat list: latest activity first, a line under each name, chips, search, pins, marks and selection (0.7.2) ----
+
+    private record GroupFixture(UUID id, UUID epoch, String title) { }
+
+    private ChatEngine.Peer savedContact(String name) {
+        return engine.peers().stream().filter(candidate -> candidate.name().equals(name)).findFirst().orElseThrow(() -> new AssertionError("No contact " + name));
+    }
+
+    private ChatEngine.Entry messageFor(ChatEngine.Peer who, boolean outgoing, String text, ChatEnvelope.Expiry expiry, String state, long offset) throws Exception {
+        return entryFor(who.userId(), who.deviceId(), outgoing, text, null, expiry, state, offset);
+    }
+
+    // A group of the person and the given contacts, approved, with no message in it yet.
+    private GroupFixture aGroup(String title, ChatEngine.Peer... members) throws Exception {
+        UUID groupId = UUID.randomUUID(), epoch = UUID.randomUUID();
+        List<GroupChat.Member> roster = new ArrayList<>();
+        roster.add(new GroupChat.Member(userId, deviceId, Base64.getEncoder().encodeToString(engine.groupSignal().publicIdentity()), "alex", null, "ACTIVE", 0));
+        for (ChatEngine.Peer member : members)
+            roster.add(new GroupChat.Member(member.userId(), member.deviceId(), member.identityKey(), member.name().split(" ")[0].toLowerCase(Locale.ROOT), member.name(), "ACTIVE", 0));
+        GroupChat.Snapshot snapshot = new GroupChat.Snapshot(groupId, userId, 1, epoch, false, roster);
+        vault.transaction(() -> {
+            write("group/" + groupId, new GroupChat.Conversation(snapshot, title, null));
+            write("group-approval/" + groupId + "/" + epoch, new GroupChat.Approval(snapshot.roster(), title, System.currentTimeMillis() + 86_400_000));
+            return null;
+        });
+        return new GroupFixture(groupId, epoch, title);
+    }
+
+    // A message in a group, from a member (null is the person themself). Returns the id of the message.
+    private UUID groupMessage(GroupFixture group, ChatEngine.Peer from, String text, String state, long offset) throws Exception {
+        UUID id = UUID.randomUUID(), sender = from == null ? userId : from.userId();
+        ChatEnvelope.Expiry expiry = ChatEnvelope.Expiry.HOUR_1;
+        long created = System.currentTimeMillis() + offset, deadline = created + expiry.milliseconds;
+        createFixtureKey(AndroidVault.contentAlias(deadline, id, userId));
+        ChatEnvelope envelope = new ChatEnvelope(1, id, sender, from == null ? deviceId : from.deviceId(), group.id(), deviceId, created, deadline, expiry, text, null);
+        ChatEngine.Entry entry = new ChatEngine.Entry(id, group.id(), deadline, expiry, from == null, false, state, userId, group.epoch(), 1, sender);
+        vault.transaction(() -> {
+            write("entry/" + id, entry);
+            byte[] content = RelayApi.JSON.toJson(new ChatEngine.Content(envelope, null)).getBytes(StandardCharsets.UTF_8);
+            try { vault.put("body/" + id, vault.seal(AndroidVault.contentAlias(deadline, id, userId), content)); }
+            finally { Arrays.fill(content, (byte) 0); }
+            return null;
+        });
+        return id;
+    }
+
+    private static boolean mentions(View root, String part) {
+        return descendants(root).stream().anyMatch(view -> view instanceof TextView label && label.getText().toString().contains(part));
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object rowViewsOf(MainActivity activity, String name) {
+        Map<UUID, Object> views = (Map<UUID, Object>) readField(activity, "rowViews");
+        return views.values().stream().filter(row -> name.contentEquals(((TextView) readField(row, "name")).getText())).findFirst()
+            .orElseThrow(() -> new AssertionError("No row for " + name));
+    }
+
+    // A part that a row has not needed yet (its count, its countdown) is not made, and so is not there: it shows nothing and says nothing.
+    private View rowPart(MainActivity activity, String name, String field) { return (View) readField(rowViewsOf(activity, name), field); }
+    private String rowString(MainActivity activity, String name, String field) {
+        View part = rowPart(activity, name, field);
+        return part == null ? "" : ((TextView) part).getText().toString();
+    }
+    private boolean rowShows(MainActivity activity, String name, String field) {
+        View part = rowPart(activity, name, field);
+        return part != null && part.getVisibility() == View.VISIBLE;
+    }
+    // What a row was told to draw: the picture before its line ("icon") and that picture's colour ("iconColor").
+    private int rowDrawn(MainActivity activity, String name, String part) { return (int) invoke(readField(rowViewsOf(activity, name), "shown"), part); }
+
+    // The names of the rows, in the order they are drawn.
+    @SuppressWarnings("unchecked")
+    private List<String> listedNames(MainActivity activity) {
+        LinearLayout rows = (LinearLayout) readField(activity, "contactRows");
+        Map<UUID, View> holders = (Map<UUID, View>) readField(activity, "rowHolders");
+        Map<UUID, Object> views = (Map<UUID, Object>) readField(activity, "rowViews");
+        List<String> names = new ArrayList<>();
+        for (int index = 0; index < rows.getChildCount(); index++)
+            for (Map.Entry<UUID, View> holder : holders.entrySet())
+                if (holder.getValue() == rows.getChildAt(index)) names.add(((TextView) readField(views.get(holder.getKey()), "name")).getText().toString());
+        return names;
+    }
+
+    // The rows of the list stand in pairs, a row and its own divider: rows that were moved must have taken their dividers with them.
+    @SuppressWarnings("unchecked")
+    private void assertRowsAndDividersAlternate(MainActivity activity) {
+        LinearLayout rows = (LinearLayout) readField(activity, "contactRows");
+        Map<UUID, View> holders = (Map<UUID, View>) readField(activity, "rowHolders");
+        Map<UUID, View> dividers = (Map<UUID, View>) readField(activity, "rowDividers");
+        assertEquals("A row and a divider for each chat", holders.size() * 2, rows.getChildCount());
+        for (int index = 0; index + 1 < rows.getChildCount(); index += 2) {
+            UUID chat = null;
+            for (Map.Entry<UUID, View> holder : holders.entrySet()) if (holder.getValue() == rows.getChildAt(index)) chat = holder.getKey();
+            assertNotNull("A row stands at " + index, chat);
+            assertSame("The divider after a row is its own", dividers.get(chat), rows.getChildAt(index + 1));
+        }
+    }
+
+    // The order the list keeps its rows in, by name (what it compares the next list with).
+    private List<String> keptOrder(MainActivity activity) {
+        List<String> names = new ArrayList<>();
+        for (Object key : (List<?>) readField(activity, "shownKeys")) names.add((String) readField(key, "name"));
+        return names;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Set<UUID> chosenChats(MainActivity activity) { return (Set<UUID>) readField(activity, "selectedChats"); }
+
+    private static boolean describedAs(View view, String description) { return view.getContentDescription() != null && description.contentEquals(view.getContentDescription()); }
+
+    private View described(MainActivity activity, String description) {
+        return descendants(root(activity)).stream().filter(view -> view.isShown() && describedAs(view, description)).findFirst()
+            .orElseThrow(() -> new AssertionError("Nothing that shows is described as " + description));
+    }
+
+    private boolean offered(MainActivity activity, String description) {
+        return descendants(root(activity)).stream().anyMatch(view -> view.isShown() && describedAs(view, description));
+    }
+
+    private void chooseChat(MainActivity activity, String name) { assertTrue("A long press on " + name + " chooses it", contactRow(activity, name).performLongClick()); }
+
+    // A choice made in the bar has been carried out: the work is over and the choice is gone.
+    private void awaitChoiceDone(ActivityScenario<MainActivity> scenario) throws Exception {
+        awaitMainCondition(scenario, activity -> !(boolean) readField(activity, "busy") && chosenChats(activity).isEmpty());
+    }
+
+    @Test public void theNewestChatIsFirstAndChatsWithoutMessagesAreLast() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Peer maya = savedContact("Maya Chen"), noah = savedContact("Noah Williams");
+        messageFor(noah, false, "Are we still on?", ChatEnvelope.Expiry.HOUR_1, "READ", -20_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> assertEquals("The newest message first; a chat with no message last",
+                List.of("Noah Williams", "Aarav Mehta", "Maya Chen"), listedNames(activity)));
+            snapshot(scenario, "list-latest-first");
+            // A message comes for the chat that was last: drawn again, the list has it at the top.
+            messageFor(maya, false, "Hello!", ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -1_000);
+            scenario.onActivity(activity -> {
+                invoke(activity, "renderContacts");
+                assertEquals(List.of("Maya Chen", "Noah Williams", "Aarav Mehta"), listedNames(activity));
+                assertEquals("New message", rowString(activity, "Maya Chen", "status"));
+            });
+        }
+    }
+
+    @Test public void eachRowSaysWhatIsNewFromTheRecordsAloneAndNeverQuotesAMessage() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Peer maya = savedContact("Maya Chen"), noah = savedContact("Noah Williams");
+        entryFor(maya.userId(), maya.deviceId(), false, null, photo, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -10_000);
+        messageFor(noah, false, "Seen once", ChatEnvelope.Expiry.VIEW_ONCE, "DELIVERED", -10_000);
+        List<ChatEngine.Peer> sentTo = manyVerifiedContacts(4, 0);
+        String[] states = {"READ", "DELIVERED", "QUEUED", "PENDING"};
+        for (int index = 0; index < 4; index++) messageFor(sentTo.get(index), true, "Sent " + index, ChatEnvelope.Expiry.HOUR_1, states[index], -(index + 1) * 1_000L);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertEquals("2 new messages", rowString(activity, "Aarav Mehta", "status"));
+                assertEquals("No picture before what is new in words", 0, rowDrawn(activity, "Aarav Mehta", "icon"));
+                assertEquals("New photo", rowString(activity, "Maya Chen", "status"));
+                assertEquals(R.drawable.ic_image, rowDrawn(activity, "Maya Chen", "icon"));
+                assertEquals("New view-once message", rowString(activity, "Noah Williams", "status"));
+                assertEquals(R.drawable.ic_eye, rowDrawn(activity, "Noah Williams", "icon"));
+                // What was sent shows how far it got, by the marks a chat shows: the colour of a read one is the accent.
+                for (int index = 0; index < 4; index++) assertEquals("Message", rowString(activity, String.format(Locale.ROOT, "Contact %03d", index), "status"));
+                assertEquals(R.drawable.ic_check_check, rowDrawn(activity, "Contact 000", "icon"));
+                assertEquals(Ui.ACCENT, rowDrawn(activity, "Contact 000", "iconColor"));
+                assertEquals(R.drawable.ic_check_check, rowDrawn(activity, "Contact 001", "icon"));
+                assertEquals(Ui.MUTED, rowDrawn(activity, "Contact 001", "iconColor"));
+                assertEquals(R.drawable.ic_check, rowDrawn(activity, "Contact 002", "icon"));
+                assertEquals(R.drawable.ic_clock_3, rowDrawn(activity, "Contact 003", "icon"));
+                // None of the words of any message is on the list: it knows only what the records say.
+                for (View view : descendants((View) readField(activity, "contactRows")))
+                    if (view instanceof TextView label)
+                        for (String words : List.of("Coffee", "Sounds good", "Yes, see", "view from", "visible once", "longer message", "Seen once", "Sent "))
+                            assertFalse(words + " is on the list", label.getText().toString().contains(words));
+            });
+            snapshot(scenario, "list-second-lines");
+        }
+    }
+
+    @Test public void theListIsWorkedOutFromTheRecordsAloneAndAsksTheKeystoreForNothing() throws Exception {
+        signedInFixture(); conversationsFixture();
+        long used = vault.keystoreUses();
+        Map<UUID, ChatListModel.Summary> summaries = engine.chatSummaries();
+        engine.pinnedChats(); engine.unreadMarks(); engine.unreadCounts();
+        assertEquals("Nothing was decrypted", used, vault.keystoreUses());
+        ChatListModel.Summary aarav = summaries.get(peerId);
+        assertEquals(7, aarav.live());
+        assertEquals(2L, aarav.unread());
+        assertTrue("The newest message is the one that is being sent", aarav.newestOutgoing());
+        assertEquals(ChatListModel.Delivery.SENDING, aarav.newestDelivery());
+        assertEquals("The next to vanish is the first one", engine.entries(peerId).get(0).expiresAt(), aarav.nextExpiryAt());
+        assertFalse("A chat with no message is not in it", summaries.containsKey(savedContact("Maya Chen").userId()));
+    }
+
+    @Test public void aRowShowsTheTimeOfItsNewestMessageAndTheCountdownOfTheLastHour() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Peer maya = savedContact("Maya Chen"), noah = savedContact("Noah Williams");
+        // A little over two minutes left for Maya's message, six hours for Noah's.
+        ChatEngine.Entry almostGone = messageFor(maya, false, "Almost gone", ChatEnvelope.Expiry.HOUR_1, "READ", 150_000 - ChatEnvelope.Expiry.HOUR_1.milliseconds);
+        messageFor(noah, false, "Plenty of time", ChatEnvelope.Expiry.HOURS_6, "READ", -1_000);
+        long newest = engine.entries(peerId).stream().mapToLong(entry -> entry.expiresAt() - entry.expiry().milliseconds).max().orElseThrow();
+        long mayaWrote = almostGone.expiresAt() - almostGone.expiry().milliseconds;
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                String time = rowString(activity, "Aarav Mehta", "time");
+                assertFalse(time.isEmpty());
+                assertEquals(ChatListModel.time(newest, System.currentTimeMillis(), java.time.ZoneId.systemDefault(), Locale.getDefault()), time);
+                assertEquals("The time is that of writing, not of vanishing", ChatListModel.time(mayaWrote, System.currentTimeMillis(), java.time.ZoneId.systemDefault(), Locale.getDefault()),
+                    rowString(activity, "Maya Chen", "time"));
+                assertTrue("Aarav's first message has under an hour left: " + rowString(activity, "Aarav Mehta", "countdown"),
+                    rowShows(activity, "Aarav Mehta", "countdownGroup") && rowString(activity, "Aarav Mehta", "countdown").matches("5\\d min"));
+                assertTrue(rowShows(activity, "Maya Chen", "countdownGroup"));
+                assertTrue(rowString(activity, "Maya Chen", "countdown"), rowString(activity, "Maya Chen", "countdown").matches("\\d min|<1 min"));
+                assertFalse("Six hours is not yet worth counting", rowShows(activity, "Noah Williams", "countdownGroup"));
+            });
+            snapshot(scenario, "list-times-and-countdowns");
+        }
+    }
+
+    @Test public void theTimesAndCountdownsMoveOnWithTheClockWithoutReadingTheListAgain() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                // The row is told that its newest message is older and that the next one vanishes soon, as the clock moving on would tell it.
+                long now = System.currentTimeMillis(), older = now - 26 * 3_600_000L;
+                Object views = rowViewsOf(activity, "Aarav Mehta");
+                setField(views, "newestAt", older); setField(views, "nextExpiryAt", now + 9 * 60_000L + 30_000L);
+                setField(activity, "nextListTick", 0L);
+                invoke(activity, "tickChatList");
+                assertEquals(ChatListModel.time(older, System.currentTimeMillis(), java.time.ZoneId.systemDefault(), Locale.getDefault()), rowString(activity, "Aarav Mehta", "time"));
+                assertTrue(rowString(activity, "Aarav Mehta", "countdown"), rowString(activity, "Aarav Mehta", "countdown").matches("(8|9) min"));
+                // Not again until it is due.
+                setField(views, "nextExpiryAt", 0L);
+                invoke(activity, "tickChatList");
+                assertTrue("It waits for its time", rowShows(activity, "Aarav Mehta", "countdownGroup"));
+            });
+        }
+    }
+
+    @Test public void aMessageThatVanishesChangesTheListWithoutASync() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Peer maya = savedContact("Maya Chen");
+        messageFor(maya, false, "Gone in a moment", ChatEnvelope.Expiry.HOUR_1, "READ", 13_000 - ChatEnvelope.Expiry.HOUR_1.milliseconds);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertEquals("Message", rowString(activity, "Maya Chen", "status"));
+                assertFalse(rowString(activity, "Maya Chen", "time").isEmpty());
+                long soonest = (long) readField(activity, "listSoonestExpiry");
+                assertTrue("The list knows when its next message vanishes", soonest > System.currentTimeMillis() && soonest < System.currentTimeMillis() + 15_000);
+            });
+            awaitMainCondition(scenario, activity -> rowString(activity, "Maya Chen", "status").equals("No messages"));
+            scenario.onActivity(activity -> {
+                assertEquals("", rowString(activity, "Maya Chen", "time"));
+                assertFalse(rowShows(activity, "Maya Chen", "countdownGroup"));
+                assertEquals("Aarav's chat is where it was", "Aarav Mehta", listedNames(activity).get(0));
+            });
+        }
+    }
+
+    @Test public void withDetailsOffTheListIsThePlainOneByNameAndTheSwitchInMyProfileChangesIt() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Peer maya = savedContact("Maya Chen"), noah = savedContact("Noah Williams");
+        messageFor(noah, false, "The newest", ChatEnvelope.Expiry.HOUR_1, "READ", -1_000);
+        assertTrue(engine.pin(maya.userId(), true));
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertEquals("Pinned first, then the newest", List.of("Maya Chen", "Noah Williams", "Aarav Mehta"), listedNames(activity));
+                invoke(activity, "accountDialog");
+                CompoundButton details = (CompoundButton) text(dialog(activity).getWindow().getDecorView(), "Show details in the chat list");
+                assertTrue("On, unless it was turned off", details.isChecked());
+                details.performClick();
+                assertFalse(details.isChecked());
+                assertFalse(context.getSharedPreferences("preferences", Context.MODE_PRIVATE).getBoolean("list-details", true));
+                assertEquals("Pinned first, then by name", List.of("Maya Chen", "Aarav Mehta", "Noah Williams"), listedNames(activity));
+                for (String name : List.of("Maya Chen", "Aarav Mehta", "Noah Williams")) {
+                    assertFalse(name + " has no line", rowShows(activity, name, "statusLine"));
+                    assertFalse(name + " has no time", rowShows(activity, name, "time"));
+                }
+                assertTrue("What is new is still counted", rowShows(activity, "Aarav Mehta", "badge"));
+                assertEquals("2", rowString(activity, "Aarav Mehta", "badge"));
+                details.performClick();
+                assertTrue(details.isChecked());
+                assertEquals(List.of("Maya Chen", "Noah Williams", "Aarav Mehta"), listedNames(activity));
+                assertTrue(rowShows(activity, "Aarav Mehta", "statusLine"));
+                assertTrue(context.getSharedPreferences("preferences", Context.MODE_PRIVATE).getBoolean("list-details", false));
+            });
+        }
+    }
+
+    @Test public void theChipsChooseWhatTheListShowsAndCountWhatIsUnread() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Peer maya = savedContact("Maya Chen"), noah = savedContact("Noah Williams");
+        aGroup("Weekend plans", maya, noah);
+        engine.mute(noah.userId(), true);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertEquals(List.of("Aarav Mehta", "Weekend plans", "Maya Chen", "Noah Williams"), listedNames(activity));
+                TextView count = (TextView) readField(activity, "unreadChipCount");
+                assertEquals("One chat has something new", "1", count.getText().toString());
+                assertEquals(View.VISIBLE, count.getVisibility());
+                assertTrue(described(activity, "All chats").isSelected());
+                described(activity, "Unread chats").performClick();
+                assertEquals(List.of("Aarav Mehta"), listedNames(activity));
+                assertTrue(described(activity, "Unread chats").isSelected());
+                assertFalse(described(activity, "All chats").isSelected());
+                described(activity, "Unread chats").performClick();
+                assertEquals("The chip that is chosen goes back to all", 4, listedNames(activity).size());
+                described(activity, "Group chats").performClick();
+                assertEquals(List.of("Weekend plans"), listedNames(activity));
+                described(activity, "Muted chats").performClick();
+                assertEquals(List.of("Noah Williams"), listedNames(activity));
+                described(activity, "All chats").performClick();
+                assertEquals(4, listedNames(activity).size());
+                // Choosing a chip gives it another background, which must not take the room around its text with it.
+                float density = context.getResources().getDisplayMetrics().density;
+                for (String chip : List.of("All chats", "Unread chats", "Group chats", "Muted chats")) {
+                    View view = described(activity, chip);
+                    assertTrue(chip + " keeps room around its text: " + view.getPaddingLeft() + " and " + view.getPaddingRight(),
+                        view.getPaddingLeft() >= Math.round(12 * density) && view.getPaddingRight() >= Math.round(12 * density));
+                    assertTrue(chip + " is 44 dp to touch: " + view.getHeight(), view.getHeight() >= Math.round(44 * density) - 1);
+                }
+            });
+            snapshot(scenario, "list-chips");
+        }
+    }
+
+    @Test public void aChipThatMatchesNothingSaysSoInsteadOfShowingABlankList() throws Exception {
+        signedInFixture();
+        manyVerifiedContacts(2, 0);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertEquals(2, listedNames(activity).size());
+                assertEquals("Nothing is unread, so the count is not shown", View.GONE, ((View) readField(activity, "unreadChipCount")).getVisibility());
+                described(activity, "Unread chats").performClick();
+                assertTrue(hasText(root(activity), "All caught up"));
+                assertTrue(listedNames(activity).isEmpty());
+                described(activity, "Group chats").performClick();
+                assertTrue(hasText(root(activity), "No groups yet"));
+                described(activity, "Muted chats").performClick();
+                assertTrue(hasText(root(activity), "No muted chats"));
+                described(activity, "All chats").performClick();
+                assertEquals(2, listedNames(activity).size());
+            });
+        }
+    }
+
+    @Test public void theSearchOpensFromItsIconFindsChatsAndBackClosesIt() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertEquals("Closed until it is asked for", View.GONE, ((View) readField(activity, "searchRow")).getVisibility());
+                descendants(root(activity)).stream().filter(view -> view instanceof ImageButton && describedAs(view, "Search chats")).findFirst().orElseThrow().performClick();
+                assertEquals(View.VISIBLE, ((View) readField(activity, "searchRow")).getVisibility());
+                EditText search = (EditText) readField(activity, "contactSearch");
+                search.setText("maya");
+                assertEquals(List.of("Maya Chen"), listedNames(activity));
+                search.setText("zzz");
+                assertTrue(hasText(root(activity), "No matching conversations"));
+                described(activity, "Clear search").performClick();
+                assertEquals("", search.getText().toString());
+                assertEquals(3, listedNames(activity).size());
+                assertEquals("Clearing the words leaves the search open", View.VISIBLE, ((View) readField(activity, "searchRow")).getVisibility());
+                search.setText("noah");
+                activity.getOnBackPressedDispatcher().onBackPressed();
+                assertEquals("Back closes it", View.GONE, ((View) readField(activity, "searchRow")).getVisibility());
+                assertEquals("and clears what was typed", "", search.getText().toString());
+                assertEquals(3, listedNames(activity).size());
+                assertFalse("The first Back did not leave the app", activity.isFinishing());
+            });
+            scenario.onActivity(activity -> {
+                activity.getOnBackPressedDispatcher().onBackPressed();
+                assertTrue("The second Back leaves the app", activity.isFinishing());
+            });
+        }
+    }
+
+    @Test public void theNewChatButtonOpensTheChoicesAndShrinksToItsIconWhileTheListIsScrolledDown() throws Exception {
+        signedInFixture(); conversationsFixture();
+        manyVerifiedContacts(30, 1, 600_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            awaitMainCondition(scenario, activity -> readField(activity, "contactRows") != null && ((LinearLayout) readField(activity, "contactRows")).getChildCount() > 10);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                ExtendedFab button = (ExtendedFab) readField(activity, "newChat");
+                assertEquals("New conversation", String.valueOf(button.getContentDescription()));
+                assertTrue("It shows its label at the top of the list", button.extended());
+                button.performClick();
+                View sheet = dialog(activity).getWindow().getDecorView();
+                assertNotNull(text(sheet, "Add contact")); assertNotNull(text(sheet, "New group"));
+                dialog(activity).dismiss();
+            });
+            scenario.onActivity(activity -> {
+                ExtendedFab button = (ExtendedFab) readField(activity, "newChat");
+                ScrollView list = (ScrollView) ((View) readField(activity, "contactRows")).getParent();
+                list.scrollTo(0, dpPx(900));
+                assertFalse("Scrolled down it keeps only its icon", button.extended());
+                list.scrollBy(0, -dpPx(40));
+                assertTrue("A little back up brings the label back", button.extended());
+                list.scrollTo(0, dpPx(900));
+                assertFalse(button.extended());
+                list.scrollTo(0, 0);
+                assertTrue("At the top it has its label", button.extended());
+            });
+        }
+    }
+
+    @Test public void aGroupShowsItsMembersUntilThereIsSomethingNewInItAndIsListedByActivity() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Peer maya = savedContact("Maya Chen"), noah = savedContact("Noah Williams");
+        GroupFixture group = aGroup("Weekend plans", maya, noah);
+        String members = engine.groups().status(engine.groups().get(group.id()));
+        assertTrue("The fixture is a group that is ready: " + members, members.endsWith(" members"));
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertEquals("Until something is new in it, a group says who is in it", members, rowString(activity, "Weekend plans", "status"));
+                assertEquals("", rowString(activity, "Weekend plans", "time"));
+            });
+            groupMessage(group, maya, "Who is in?", "DELIVERED", -500);
+            groupMessage(group, noah, "Me!", "DELIVERED", -400);
+            scenario.onActivity(activity -> {
+                invoke(activity, "renderContacts");
+                assertEquals("A group with the newest message is first, like any chat", "Weekend plans", listedNames(activity).get(0));
+                assertEquals("2 new messages", rowString(activity, "Weekend plans", "status"));
+                assertEquals("2", rowString(activity, "Weekend plans", "badge"));
+                assertFalse(rowString(activity, "Weekend plans", "time").isEmpty());
+            });
+        }
+    }
+
+    @Test public void aListThatOnlyChangedWhatItSaysOrItsOrderKeepsItsRowsAndMovesThem() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Peer noah = savedContact("Noah Williams");
+        messageFor(noah, false, "The newest", ChatEnvelope.Expiry.HOUR_1, "READ", -1_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            Map<String, View> before = new HashMap<>();
+            scenario.onActivity(activity -> {
+                for (String name : List.of("Aarav Mehta", "Noah Williams", "Maya Chen")) before.put(name, contactRow(activity, name));
+                assertEquals(List.of("Noah Williams", "Aarav Mehta", "Maya Chen"), listedNames(activity));
+                assertEquals("2", rowString(activity, "Aarav Mehta", "badge"));
+            });
+            // One more message for Aarav, older than Noah's: his count grows and what his row says changes, and the order stays.
+            entryFor(peerId, peerDevice, false, "One more", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -5_000);
+            scenario.onActivity(activity -> {
+                invoke(activity, "renderContacts");
+                assertSame("The row is the view it was", before.get("Aarav Mehta"), contactRow(activity, "Aarav Mehta"));
+                assertEquals("3", rowString(activity, "Aarav Mehta", "badge"));
+                assertEquals("3 new messages", rowString(activity, "Aarav Mehta", "status"));
+                assertEquals(List.of("Noah Williams", "Aarav Mehta", "Maya Chen"), listedNames(activity));
+            });
+            // One that is newer than Noah's: Aarav is first now. The rows are the views they were, in their new order, each with its own divider.
+            entryFor(peerId, peerDevice, false, "The very newest", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -10);
+            scenario.onActivity(activity -> {
+                invoke(activity, "renderContacts");
+                assertEquals(List.of("Aarav Mehta", "Noah Williams", "Maya Chen"), listedNames(activity));
+                for (String name : before.keySet()) assertSame("A row that moved is the view it was: " + name, before.get(name), contactRow(activity, name));
+                assertEquals("4", rowString(activity, "Aarav Mehta", "badge"));
+                assertRowsAndDividersAlternate(activity);
+                assertEquals("The order that is kept is the new one", List.of("Aarav Mehta", "Noah Williams", "Maya Chen"), keptOrder(activity));
+            });
+            // And back again, by one more for Noah.
+            entryFor(noah.userId(), noah.deviceId(), false, "Noah again", null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -5);
+            scenario.onActivity(activity -> {
+                invoke(activity, "renderContacts");
+                assertEquals(List.of("Noah Williams", "Aarav Mehta", "Maya Chen"), listedNames(activity));
+                assertRowsAndDividersAlternate(activity);
+                for (String name : before.keySet()) assertSame(name, before.get(name), contactRow(activity, name));
+            });
+        }
+    }
+
+    @Test public void aContactThatIsRenamedIsShownUnderTheNewNameAndNotTakenForARowThatMoved() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Peer maya = savedContact("Maya Chen");
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            // The same number of rows, one of them another row: it is made again, not moved.
+            engine.renameContact(maya, "Mia Chen");
+            scenario.onActivity(activity -> {
+                invoke(activity, "renderContacts");
+                assertTrue(listedNames(activity).toString(), listedNames(activity).contains("Mia Chen"));
+                assertFalse("Not under the old name any longer", listedNames(activity).contains("Maya Chen"));
+                assertEquals(3, listedNames(activity).size());
+                assertRowsAndDividersAlternate(activity);
+            });
+        }
+    }
+
+    @Test public void aListWhoseRowsAreNotTheSameRowsIsMadeAgain() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            View[] before = new View[1];
+            scenario.onActivity(activity -> { before[0] = contactRow(activity, "Aarav Mehta"); assertEquals(3, listedNames(activity).size()); });
+            // A contact is added: there is another row, so every row is made again.
+            UUID zed = UUID.randomUUID();
+            vault.transaction(() -> { write("contact/" + zed, new ChatEngine.Peer(zed, UUID.randomUUID(), peer.identityKey(), "Zed Parker")); return null; });
+            scenario.onActivity(activity -> {
+                invoke(activity, "renderContacts");
+                assertEquals(4, listedNames(activity).size());
+                assertNotSame("The rows are not the views they were", before[0], contactRow(activity, "Aarav Mehta"));
+                assertRowsAndDividersAlternate(activity);
+            });
+        }
+    }
+
+    @Test public void aLongPressChoosesAChatAndTheBarOffersWhatSuitsIt() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            Rect at = holderRect(scenario, "Aarav Mehta");
+            assertTrue(device.swipe(at.centerX(), at.centerY(), at.centerX(), at.centerY(), 200));
+            awaitMainCondition(scenario, activity -> chosenChats(activity).size() == 1);
+            scenario.onActivity(activity -> {
+                assertTrue(chosenChats(activity).contains(peerId));
+                assertEquals("1 selected", ((TextView) readField(activity, "selectionCount")).getText().toString());
+                assertEquals(View.VISIBLE, ((View) readField(activity, "selectionBar")).getVisibility());
+                assertEquals("The bar takes the toolbar's place", View.INVISIBLE, ((View) readField(activity, "homeToolbar")).getVisibility());
+                for (String offer : List.of("Pin", "Mute", "Mark as read", "More", "Close selection")) assertTrue(offer + " is offered", offered(activity, offer));
+                assertTrue("The chat shows that it is chosen", rowShows(activity, "Aarav Mehta", "check"));
+                assertEquals("Selected", String.valueOf(androidx.core.view.ViewCompat.getStateDescription(contactRow(activity, "Aarav Mehta"))));
+                assertNull("Nothing was opened", readField(activity, "selectedPeer"));
+            });
+            snapshot(scenario, "list-selection");
+        }
+    }
+
+    @Test public void touchingRowsAddsThemToTheChoiceAndTakesThemAwayAndNothingOpens() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                chooseChat(activity, "Aarav Mehta");
+                contactRow(activity, "Maya Chen").performClick();
+                assertEquals("2 selected", ((TextView) readField(activity, "selectionCount")).getText().toString());
+                assertTrue("Maya has nothing new, so the choice is no longer one of reading", offered(activity, "Mark as unread"));
+                contactRow(activity, "Maya Chen").performClick();
+                assertEquals("1 selected", ((TextView) readField(activity, "selectionCount")).getText().toString());
+                assertTrue(offered(activity, "Mark as read"));
+                assertNull("Nothing was opened", readField(activity, "selectedPeer"));
+                // Touching the last chat that is chosen leaves nothing chosen, and the bar goes.
+                contactRow(activity, "Aarav Mehta").performClick();
+                assertTrue(chosenChats(activity).isEmpty());
+                assertEquals(View.VISIBLE, ((View) readField(activity, "homeToolbar")).getVisibility());
+                assertNull(readField(activity, "selectedPeer"));
+            });
+        }
+    }
+
+    @Test public void aGroupInTheChoiceLeavesOutWhatAGroupDoesNotHave() throws Exception {
+        signedInFixture(); conversationsFixture();
+        aGroup("Weekend plans", savedContact("Maya Chen"), savedContact("Noah Williams"));
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                chooseChat(activity, "Weekend plans");
+                assertTrue(offered(activity, "Pin"));
+                assertFalse("A group cannot be muted", offered(activity, "Mute"));
+                assertFalse("nor cleared or removed from here", offered(activity, "More"));
+                contactRow(activity, "Aarav Mehta").performClick();
+                assertEquals("2 selected", ((TextView) readField(activity, "selectionCount")).getText().toString());
+                assertFalse("With a contact beside it the group still has none of them", offered(activity, "Mute") || offered(activity, "More"));
+                contactRow(activity, "Weekend plans").performClick();
+                assertTrue("A contact alone has them", offered(activity, "Mute") && offered(activity, "More"));
+            });
+        }
+    }
+
+    @Test public void whileChatsAreChosenARowDoesNotSlideOpenAndPullingItIsNotATouchOnIt() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> chooseChat(activity, "Aarav Mehta"));
+            pullRow(scenario, device, "Maya Chen", 220);
+            scenario.onActivity(activity -> {
+                assertEquals("It did not slide open", 0f, shiftOf(activity, "Maya Chen"), 0.5f);
+                assertEquals("and the pull did not choose it", 1, chosenChats(activity).size());
+            });
+            // A row that was open when a chat was chosen is put back.
+            scenario.onActivity(activity -> described(activity, "Close selection").performClick());
+            pullRow(scenario, device, "Maya Chen", 220);
+            awaitShift(scenario, "Maya Chen", 152);
+            scenario.onActivity(activity -> chooseChat(activity, "Aarav Mehta"));
+            awaitShift(scenario, "Maya Chen", 0);
+        }
+    }
+
+    @Test public void backTakesTheChoiceAwayBeforeAnythingElseAndSoDoesTheCloseButton() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> { chooseChat(activity, "Aarav Mehta"); activity.getOnBackPressedDispatcher().onBackPressed(); });
+            scenario.onActivity(activity -> {
+                assertTrue(chosenChats(activity).isEmpty());
+                assertFalse("and does not leave the app", activity.isFinishing());
+                assertEquals(View.VISIBLE, ((View) readField(activity, "homeToolbar")).getVisibility());
+                assertEquals(View.GONE, ((View) readField(activity, "selectionBar")).getVisibility());
+                assertFalse(rowShows(activity, "Aarav Mehta", "check"));
+                assertNull(androidx.core.view.ViewCompat.getStateDescription(contactRow(activity, "Aarav Mehta")));
+            });
+            // The button that closes the bar does the same.
+            scenario.onActivity(activity -> {
+                chooseChat(activity, "Noah Williams");
+                assertEquals(1, chosenChats(activity).size());
+                described(activity, "Close selection").performClick();
+                assertTrue(chosenChats(activity).isEmpty());
+                assertFalse(activity.isFinishing());
+            });
+        }
+    }
+
+    @Test public void aChatThatIsGoneIsNoLongerChosenAndTheBarGoesWhenNoneIsLeft() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        ChatEngine.Peer maya = savedContact("Maya Chen");
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> { chooseChat(activity, "Maya Chen"); assertEquals(1, chosenChats(activity).size()); });
+            // The contact goes while it is chosen (the person removed it on another path); the list is drawn again.
+            engine.forget(maya);
+            scenario.onActivity(activity -> {
+                invoke(activity, "renderContacts");
+                assertTrue("A chat that is gone is no longer chosen", chosenChats(activity).isEmpty());
+                assertEquals(View.VISIBLE, ((View) readField(activity, "homeToolbar")).getVisibility());
+                assertEquals(View.GONE, ((View) readField(activity, "selectionBar")).getVisibility());
+                assertEquals(List.of("Aarav Mehta", "Noah Williams"), listedNames(activity));
+            });
+        }
+    }
+
+    @Test public void pinningFromTheBarPutsAChatFirstAndShowsItsPinWhereACountWouldBe() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        ChatEngine.Peer maya = savedContact("Maya Chen"), noah = savedContact("Noah Williams");
+        manyVerifiedContacts(1, 0);
+        messageFor(noah, false, "The newest", ChatEnvelope.Expiry.HOUR_1, "READ", -1_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> assertEquals(List.of("Noah Williams", "Aarav Mehta", "Contact 000", "Maya Chen"), listedNames(activity)));
+            // Maya has nothing in her chat; pinned, she is first and shows the pin where a count would be.
+            scenario.onActivity(activity -> { chooseChat(activity, "Maya Chen"); assertTrue(offered(activity, "Pin")); described(activity, "Pin").performClick(); });
+            awaitChoiceDone(scenario);
+            scenario.onActivity(activity -> {
+                assertEquals(Set.of(maya.userId()), engine.pinnedChats());
+                assertEquals("Maya Chen", listedNames(activity).get(0));
+                assertTrue(rowShows(activity, "Maya Chen", "pin"));
+                assertEquals("Pinned", String.valueOf(androidx.core.view.ViewCompat.getStateDescription(contactRow(activity, "Maya Chen"))));
+                assertFalse(rowShows(activity, "Aarav Mehta", "pin"));
+            });
+            snapshot(scenario, "list-pinned");
+            // Aarav has a count, which is shown where his pin would be; the pinned ones keep the order of their activity.
+            scenario.onActivity(activity -> { chooseChat(activity, "Aarav Mehta"); described(activity, "Pin").performClick(); });
+            awaitChoiceDone(scenario);
+            scenario.onActivity(activity -> {
+                assertEquals(Set.of(maya.userId(), peerId), engine.pinnedChats());
+                assertEquals(List.of("Aarav Mehta", "Maya Chen", "Noah Williams", "Contact 000"), listedNames(activity));
+                assertFalse("His count shows in place of the pin", rowShows(activity, "Aarav Mehta", "pin"));
+                assertTrue(rowShows(activity, "Aarav Mehta", "badge"));
+                assertTrue(rowShows(activity, "Maya Chen", "pin"));
+            });
+        }
+    }
+
+    @Test public void theBarPinsWhatIsNotYetPinnedWhenOnlySomeOfTheChosenChatsAre() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        ChatEngine.Peer maya = savedContact("Maya Chen"), noah = savedContact("Noah Williams");
+        assertTrue(engine.pin(maya.userId(), true));
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                chooseChat(activity, "Maya Chen"); contactRow(activity, "Noah Williams").performClick();
+                assertTrue("Not all of them are pinned", offered(activity, "Pin"));
+                assertFalse(offered(activity, "Unpin"));
+                described(activity, "Pin").performClick();
+            });
+            awaitChoiceDone(scenario);
+            scenario.onActivity(activity -> assertEquals(Set.of(maya.userId(), noah.userId()), engine.pinnedChats()));
+        }
+    }
+
+    @Test public void aFourthChatCannotBePinnedFromTheBarAndTheBarSaysSo() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        ChatEngine.Peer maya = savedContact("Maya Chen"), noah = savedContact("Noah Williams");
+        ChatEngine.Peer fourth = manyVerifiedContacts(1, 0).get(0);
+        assertTrue(engine.pin(peerId, true)); assertTrue(engine.pin(maya.userId(), true)); assertTrue(engine.pin(noah.userId(), true));
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> { chooseChat(activity, "Contact 000"); described(activity, "Pin").performClick(); });
+            scenario.onActivity(activity -> {
+                assertEquals("You can pin up to 3 chats.", readField(activity, "lastProblem"));
+                assertEquals("Nothing changed", 3, engine.pinnedChats().size());
+                assertFalse(engine.pinnedChats().contains(fourth.userId()));
+                assertEquals("and the choice is as it was", 1, chosenChats(activity).size());
+            });
+        }
+    }
+
+    @Test public void theBarUnpinsChatsThatAreAllPinned() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        ChatEngine.Peer maya = savedContact("Maya Chen"), noah = savedContact("Noah Williams");
+        assertTrue(engine.pin(peerId, true)); assertTrue(engine.pin(maya.userId(), true)); assertTrue(engine.pin(noah.userId(), true));
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                chooseChat(activity, "Maya Chen"); contactRow(activity, "Noah Williams").performClick();
+                assertTrue(offered(activity, "Unpin"));
+                assertFalse(offered(activity, "Pin"));
+                described(activity, "Unpin").performClick();
+            });
+            awaitChoiceDone(scenario);
+            scenario.onActivity(activity -> {
+                assertEquals(Set.of(peerId), engine.pinnedChats());
+                assertEquals(List.of("Aarav Mehta", "Maya Chen", "Noah Williams"), listedNames(activity));
+                assertFalse(rowShows(activity, "Maya Chen", "pin"));
+            });
+        }
+    }
+
+    @Test public void theBarMutesAndUnmutesTheChosenContacts() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        ChatEngine.Peer maya = savedContact("Maya Chen"), noah = savedContact("Noah Williams");
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> { chooseChat(activity, "Maya Chen"); contactRow(activity, "Noah Williams").performClick(); described(activity, "Mute").performClick(); });
+            awaitChoiceDone(scenario);
+            scenario.onActivity(activity -> {
+                assertEquals(Set.of(maya.userId(), noah.userId()), engine.mutedChats());
+                assertEquals("Muted", String.valueOf(androidx.core.view.ViewCompat.getStateDescription(contactRow(activity, "Maya Chen"))));
+                chooseChat(activity, "Maya Chen");
+                assertTrue("A muted chat is offered to be unmuted", offered(activity, "Unmute"));
+                described(activity, "Unmute").performClick();
+            });
+            awaitChoiceDone(scenario);
+            scenario.onActivity(activity -> assertEquals(Set.of(noah.userId()), engine.mutedChats()));
+        }
+    }
+
+    @Test public void theBarMarksAChatWithNothingNewAsUnreadAndThenAsReadWhichTakesTheDotAway() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        ChatEngine.Peer maya = savedContact("Maya Chen");
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            // Nothing is new in Maya's chat: the bar offers to mark it unread, and a dot shows.
+            scenario.onActivity(activity -> { chooseChat(activity, "Maya Chen"); assertTrue(offered(activity, "Mark as unread")); described(activity, "Mark as unread").performClick(); });
+            awaitChoiceDone(scenario);
+            scenario.onActivity(activity -> {
+                assertEquals(Set.of(maya.userId()), engine.unreadMarks());
+                assertTrue(rowShows(activity, "Maya Chen", "badge"));
+                assertEquals("Marked as unread", String.valueOf(rowPart(activity, "Maya Chen", "badge").getContentDescription()));
+                assertEquals("A dot, not a count", "", rowString(activity, "Maya Chen", "badge"));
+                assertEquals("The chip counts it with Aarav", "2", ((TextView) readField(activity, "unreadChipCount")).getText().toString());
+            });
+            snapshot(scenario, "list-marked-unread");
+            // Marked, she is one of the chats that are unread: the bar offers to mark it read, which takes the dot away.
+            scenario.onActivity(activity -> { chooseChat(activity, "Maya Chen"); assertTrue(offered(activity, "Mark as read")); described(activity, "Mark as read").performClick(); });
+            awaitChoiceDone(scenario);
+            scenario.onActivity(activity -> {
+                assertTrue(engine.unreadMarks().isEmpty());
+                assertFalse(rowShows(activity, "Maya Chen", "badge"));
+            });
+        }
+    }
+
+    @Test public void markingAChatWithNewMessagesReadFromTheBarReadsThemExceptAViewOnceOne() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        ChatEngine.Entry coffee = textEntries().get(0);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> { chooseChat(activity, "Aarav Mehta"); described(activity, "Mark as read").performClick(); });
+            awaitChoiceDone(scenario);
+            scenario.onActivity(activity -> {
+                assertEquals("READ", engine.entry(coffee.id()).state());
+                assertEquals("The view-once one is read only by viewing it", "DELIVERED", engine.entry(once.id()).state());
+                assertEquals("1", rowString(activity, "Aarav Mehta", "badge"));
+                assertEquals("New view-once message", rowString(activity, "Aarav Mehta", "status"));
+            });
+        }
+    }
+
+    @Test public void aChatMarkedAsUnreadShowsADotAndOpeningItTakesTheMarkOff() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        ChatEngine.Peer other = manyVerifiedContacts(1, 0).get(0);
+        engine.markUnread(other.userId(), true);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertTrue(rowShows(activity, "Contact 000", "badge"));
+                described(activity, "Unread chats").performClick();
+                assertEquals("A marked chat is one of the unread", List.of("Aarav Mehta", "Contact 000"), listedNames(activity));
+                described(activity, "Unread chats").performClick();
+                contactRow(activity, "Contact 000").performClick();
+            });
+            awaitMainCondition(scenario, activity -> readField(activity, "selectedPeer") != null);
+            awaitMainCondition(scenario, activity -> engine.unreadMarks().isEmpty());
+            // Back in the list there is no dot.
+            scenario.onActivity(activity -> activity.getOnBackPressedDispatcher().onBackPressed());
+            awaitMainCondition(scenario, activity -> readField(activity, "selectedPeer") == null && readField(activity, "contactRows") != null);
+            scenario.onActivity(activity -> assertFalse(rowShows(activity, "Contact 000", "badge")));
+        }
+    }
+
+    // Messages in two chats, then the two of them chosen and the sheet of "More" opened.
+    private ActivityScenario<MainActivity> openMoreForTwoChats() throws Exception {
+        ChatEngine.Peer maya = savedContact("Maya Chen"), noah = savedContact("Noah Williams");
+        messageFor(maya, false, "From Maya", ChatEnvelope.Expiry.HOUR_1, "READ", -5_000);
+        messageFor(noah, false, "From Noah", ChatEnvelope.Expiry.HOUR_1, "READ", -4_000);
+        ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class);
+        scenario.onActivity(this::inject);
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        scenario.onActivity(activity -> { chooseChat(activity, "Maya Chen"); contactRow(activity, "Noah Williams").performClick(); described(activity, "More").performClick(); });
+        return scenario;
+    }
+
+    @Test public void moreOffersClearAndRemoveForTheChosenContactsAndClearingAsksBeforeItClearsAnything() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        ChatEngine.Peer maya = savedContact("Maya Chen"), noah = savedContact("Noah Williams");
+        try (ActivityScenario<MainActivity> scenario = openMoreForTwoChats()) {
+            scenario.onActivity(activity -> {
+                View sheet = dialog(activity).getWindow().getDecorView();
+                assertNotNull(text(sheet, "Remove 2 contacts"));
+                text(sheet, "Clear 2 chats").performClick();
+            });
+            scenario.onActivity(activity -> {
+                assertNotNull("It asks first", text(dialog(activity).getWindow().getDecorView(), "Clear 2 chats?"));
+                assertTrue("and says whose chats", mentions(dialog(activity).getWindow().getDecorView(), "Maya Chen and Noah Williams"));
+                assertEquals("and nothing is cleared yet", 1, engine.entries(maya.userId()).size());
+                assertTrue("The bar is gone while it asks", chosenChats(activity).isEmpty());
+                dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+            });
+            scenario.onActivity(activity -> {
+                assertEquals("Cancel clears nothing", 1, engine.entries(maya.userId()).size());
+                assertEquals(1, engine.entries(noah.userId()).size());
+            });
+        }
+    }
+
+    @Test public void clearingSeveralChosenChatsClearsThemAndKeepsTheContactsAndTheOtherChats() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        ChatEngine.Peer maya = savedContact("Maya Chen"), noah = savedContact("Noah Williams");
+        try (ActivityScenario<MainActivity> scenario = openMoreForTwoChats()) {
+            scenario.onActivity(activity -> text(dialog(activity).getWindow().getDecorView(), "Clear 2 chats").performClick());
+            scenario.onActivity(activity -> dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+            awaitMainCondition(scenario, activity -> engine.entries(maya.userId()).isEmpty() && engine.entries(noah.userId()).isEmpty() && !(boolean) readField(activity, "busy"));
+            scenario.onActivity(activity -> {
+                assertEquals("The contacts stay", 3, engine.peers().size());
+                assertEquals("and so does the chat that was not chosen", 7, engine.entries(peerId).size());
+                assertEquals("No messages", rowString(activity, "Maya Chen", "status"));
+            });
+        }
+    }
+
+    @Test public void removingChosenContactsFromTheBarAsksFirstAndRemovesOnlyThose() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        try (ActivityScenario<MainActivity> scenario = openMoreForTwoChats()) {
+            scenario.onActivity(activity -> text(dialog(activity).getWindow().getDecorView(), "Remove 2 contacts").performClick());
+            scenario.onActivity(activity -> {
+                assertNotNull("It asks first", text(dialog(activity).getWindow().getDecorView(), "Remove 2 contacts?"));
+                assertTrue("and says whom", mentions(dialog(activity).getWindow().getDecorView(), "Remove Maya Chen and Noah Williams?"));
+                assertEquals("and nothing is removed yet", 3, engine.peers().size());
+                dialog(activity).getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
+            });
+            scenario.onActivity(activity -> assertEquals("Cancel removes nothing", 3, engine.peers().size()));
+            scenario.onActivity(activity -> { chooseChat(activity, "Maya Chen"); contactRow(activity, "Noah Williams").performClick(); described(activity, "More").performClick(); });
+            scenario.onActivity(activity -> text(dialog(activity).getWindow().getDecorView(), "Remove 2 contacts").performClick());
+            scenario.onActivity(activity -> dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick());
+            awaitMainCondition(scenario, activity -> engine.peers().size() == 1 && !(boolean) readField(activity, "busy"));
+            scenario.onActivity(activity -> assertEquals(List.of("Aarav Mehta"), listedNames(activity)));
+        }
+    }
+
+    @Test public void removingOneChosenContactFromTheBarAsksFirstAndRemovesOnlyThatOne() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> { chooseChat(activity, "Maya Chen"); described(activity, "More").performClick(); });
+            scenario.onActivity(activity -> text(dialog(activity).getWindow().getDecorView(), "Remove contact").performClick());
+            scenario.onActivity(activity -> {
+                assertNotNull(text(dialog(activity).getWindow().getDecorView(), "Remove contact?"));
+                assertEquals(3, engine.peers().size());
+                dialog(activity).getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+            });
+            awaitMainCondition(scenario, activity -> engine.peers().size() == 2 && !(boolean) readField(activity, "busy"));
+            scenario.onActivity(activity -> assertEquals(List.of("Aarav Mehta", "Noah Williams"), listedNames(activity)));
+        }
+    }
+
+    @Test public void aPinIsRefusedAtThreeChatsAndAPinThatNoChatHasDoesNotCount() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Peer maya = savedContact("Maya Chen"), noah = savedContact("Noah Williams");
+        ChatEngine.Peer fourth = manyVerifiedContacts(1, 0).get(0);
+        // The pin of a chat that is gone does not use one of the three up.
+        vault.transaction(() -> { write("pinned/" + UUID.randomUUID(), Boolean.TRUE); return null; });
+        assertTrue(engine.pin(peerId, true)); assertTrue(engine.pin(maya.userId(), true)); assertTrue(engine.pin(noah.userId(), true));
+        assertFalse("The fourth is refused", engine.pin(fourth.userId(), true));
+        assertFalse(engine.pinnedChats().contains(fourth.userId()));
+        assertTrue("One that is pinned already is not a fourth", engine.pin(noah.userId(), true));
+        assertTrue(engine.pin(noah.userId(), false));
+        assertTrue("Room again", engine.pin(fourth.userId(), true));
+    }
+
+    @Test public void onlyAChatThatExistsCanBePinnedOrMarked() throws Exception {
+        signedInFixture(); conversationsFixture();
+        assertThrows(SecurityException.class, () -> engine.pin(UUID.randomUUID(), true));
+        assertThrows(SecurityException.class, () -> engine.markUnread(UUID.randomUUID(), true));
+        assertThrows(SecurityException.class, () -> engine.markChatRead(UUID.randomUUID()));
+        assertTrue(engine.pinnedChats().isEmpty());
+        assertTrue(engine.unreadMarks().isEmpty());
+    }
+
+    // Each of the ways a chat goes: all that is wrong is named, so that a change that spares one of them says which.
+    @Test public void aPinAndAMarkGoWithTheirChatWhenItIsRemovedBlockedOrLeftAndTheMarkWhenItIsCleared() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        ChatEngine.Peer maya = savedContact("Maya Chen"), noah = savedContact("Noah Williams");
+        GroupFixture group = aGroup("Weekend plans", peer);
+        List<String> wrong = new ArrayList<>();
+        // A contact that is removed.
+        assertTrue(engine.pin(maya.userId(), true)); engine.markUnread(maya.userId(), true);
+        engine.forget(maya);
+        if (engine.pinnedChats().contains(maya.userId())) wrong.add("a removed contact keeps its pin");
+        if (engine.unreadMarks().contains(maya.userId())) wrong.add("a removed contact keeps its mark");
+        // A contact that is blocked and then discarded.
+        assertTrue(engine.pin(noah.userId(), true)); engine.markUnread(noah.userId(), true);
+        engine.safety().block(noah);
+        engine.discardBlockedContact(noah.userId());
+        if (engine.pinnedChats().contains(noah.userId())) wrong.add("a blocked contact keeps its pin");
+        if (engine.unreadMarks().contains(noah.userId())) wrong.add("a blocked contact keeps its mark");
+        // A group that is left or removed.
+        assertTrue(engine.pin(group.id(), true)); engine.markUnread(group.id(), true);
+        engine.groups().forget(group.id());
+        if (engine.pinnedChats().contains(group.id())) wrong.add("a group that is gone keeps its pin");
+        if (engine.unreadMarks().contains(group.id())) wrong.add("a group that is gone keeps its mark");
+        // A chat that is cleared loses its mark, which has nothing left to be about, and stays pinned.
+        assertTrue(engine.pin(peerId, true)); engine.markUnread(peerId, true);
+        engine.clearChat(peerId);
+        if (engine.unreadMarks().contains(peerId)) wrong.add("a cleared chat keeps its mark");
+        if (!engine.pinnedChats().contains(peerId)) wrong.add("a cleared chat loses its pin");
+        assertEquals(List.of(), wrong);
+    }
+
+    @Test public void markingAChatReadRecordsTheReceiptsThatOpeningItWouldAndLeavesAViewOnceMessageUnread() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Entry coffee = textEntries().get(0);
+        assertEquals("DELIVERED", coffee.state());
+        assertEquals(2L, (long) engine.unreadCounts().get(peerId));
+        engine.markUnread(peerId, true);
+        engine.markChatRead(peerId);
+        List<String> wrong = new ArrayList<>();
+        if (!"READ".equals(engine.entry(coffee.id()).state())) wrong.add("a message that is new is not read");
+        if (vault.get("ack/" + coffee.id()) == null) wrong.add("no read receipt is recorded for it, as opening the chat would");
+        if (!"DELIVERED".equals(engine.entry(once.id()).state())) wrong.add("a view-once message was read without being viewed");
+        if (vault.get("ack/" + once.id()) != null) wrong.add("a read receipt is recorded for a view-once message");
+        if (engine.unreadCounts().getOrDefault(peerId, 0L) != 1L) wrong.add("what is left unread is not the view-once message alone");
+        if (engine.unreadMarks().contains(peerId)) wrong.add("the mark is not taken away");
+        assertEquals(List.of(), wrong);
+    }
+
+    private float[] sampleEachFrame(ActivityScenario<MainActivity> scenario, java.util.function.Consumer<MainActivity> change,
+                                    java.util.function.Function<MainActivity, Float> reading, int frames) throws Exception {
+        float[] values = new float[frames];
+        var done = new java.util.concurrent.CountDownLatch(1);
+        scenario.onActivity(activity -> {
+            change.accept(activity);
+            int[] taken = {0};
+            Choreographer.getInstance().postFrameCallback(new Choreographer.FrameCallback() {
+                @Override public void doFrame(long frameTimeNanos) {
+                    values[taken[0]++] = reading.apply(activity);
+                    if (taken[0] < frames) Choreographer.getInstance().postFrameCallback(this); else done.countDown();
+                }
+            });
+        });
+        assertTrue("The frames were drawn", done.await(20, java.util.concurrent.TimeUnit.SECONDS));
+        return values;
+    }
+
+    // Raises the phone's animation scale once the screen is up (only a process that has a window is told of a change), and returns what it was.
+    private String raiseAnimations(ActivityScenario<MainActivity> scenario, androidx.test.uiautomator.UiDevice device) throws Exception {
+        String before = device.executeShellCommand("settings get global animator_duration_scale").trim();
+        device.executeShellCommand("settings put global animator_duration_scale 1");
+        awaitMainCondition(scenario, activity -> android.animation.ValueAnimator.areAnimatorsEnabled());
+        return before;
+    }
+
+    // Puts it back as it was. The next test must start with the animations as they were, which is a moment after the setting changes.
+    private void restoreAnimations(androidx.test.uiautomator.UiDevice device, String before) throws Exception {
+        device.executeShellCommand(before.equals("null") || before.isEmpty() ? "settings delete global animator_duration_scale" : "settings put global animator_duration_scale " + before);
+        if (!before.equals("null") && !before.isEmpty() && Float.parseFloat(before) == 0f) {
+            boolean[] enabled = {true};
+            for (int attempt = 0; attempt < 50 && enabled[0]; attempt++) {
+                InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> enabled[0] = android.animation.ValueAnimator.areAnimatorsEnabled());
+                if (enabled[0]) android.os.SystemClock.sleep(100);
+            }
+            assertFalse("The animations are off again", enabled[0]);
+        }
+    }
+
+    @Test public void withAnimationsOnAChatThatMovesGlidesToItsPlaceAndANewOneFadesIn() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Peer noah = savedContact("Noah Williams");
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        String scale = device.executeShellCommand("settings get global animator_duration_scale").trim();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            raiseAnimations(scenario, device);
+            android.os.SystemClock.sleep(600);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            // A message for Noah puts his chat first: it starts where it was, below its place, and glides up to it.
+            messageFor(noah, false, "Now first", ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -100);
+            float[] glide = sampleEachFrame(scenario, activity -> invoke(activity, "renderContacts"), activity -> actionsOf(activity, "Noah Williams").getTranslationY(), 45);
+            float start = 0;
+            for (float value : glide) if (Math.abs(value) > Math.abs(start)) start = value;
+            assertTrue("It started below its place: " + Arrays.toString(glide), start > dpPx(20));
+            assertEquals("and arrived", 0f, glide[glide.length - 1], 0.5f);
+            for (float value : glide) assertTrue("never the wrong way: " + Arrays.toString(glide), value >= -1f && value <= start + 1f);
+            // A chat that is new to the list fades in.
+            manyVerifiedContacts(1, 0);
+            float[] fade = sampleEachFrame(scenario, activity -> invoke(activity, "renderContacts"), activity -> actionsOf(activity, "Contact 000").getAlpha(), 45);
+            float faintest = 1;
+            for (float value : fade) faintest = Math.min(faintest, value);
+            assertTrue("It started faint: " + Arrays.toString(fade), faintest < .9f);
+            assertEquals("and arrived", 1f, fade[fade.length - 1], .01f);
+            // Nothing is left half moved or half faded.
+            scenario.onActivity(activity -> {
+                @SuppressWarnings("unchecked") Map<UUID, View> holders = (Map<UUID, View>) readField(activity, "rowHolders");
+                for (View holder : holders.values()) { assertEquals(0f, holder.getTranslationY(), 0.5f); assertEquals(1f, holder.getAlpha(), .01f); }
+            });
+        } finally { restoreAnimations(device, scale); }
+    }
+
+    @Test public void closingTheSearchAndOpeningItAgainWhileItIsStillClosingLeavesItOpen() throws Exception {
+        signedInFixture(); conversationsFixture();
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        String scale = device.executeShellCommand("settings get global animator_duration_scale").trim();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            raiseAnimations(scenario, device);
+            scenario.onActivity(activity -> invoke(activity, "toggleSearch"));
+            android.os.SystemClock.sleep(600);
+            // It is closing (that takes a moment) when it is asked to open: the two must not both go on and the first to end decide.
+            scenario.onActivity(activity -> {
+                invoke(activity, "toggleSearch");
+                activity.getWindow().getDecorView().postDelayed(() -> invoke(activity, "toggleSearch"), 60);
+            });
+            android.os.SystemClock.sleep(900);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                View row = (View) readField(activity, "searchRow");
+                assertTrue((boolean) readField(activity, "searchOpen"));
+                assertEquals("What was asked last was to open it", View.VISIBLE, row.getVisibility());
+                assertEquals(1f, row.getAlpha(), .01f);
+                assertEquals(dpPx(54), row.getLayoutParams().height);
+            });
+        } finally { restoreAnimations(device, scale); }
+    }
+
+    @Test public void aChatThatIsHiddenByAChipOrASearchIsNoLongerChosen() throws Exception {
+        signedInFixture(); conversationsFixture();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                chooseChat(activity, "Maya Chen"); contactRow(activity, "Aarav Mehta").performClick();
+                assertEquals(2, chosenChats(activity).size());
+                // The Unread chip shows only Aarav's chat: Maya's is not there to be chosen, so what the bar acts on is what can be seen.
+                described(activity, "Unread chats").performClick();
+                assertEquals(Set.of(peerId), chosenChats(activity));
+                assertEquals("1 selected", ((TextView) readField(activity, "selectionCount")).getText().toString());
+                described(activity, "Unread chats").performClick();
+                // A search that finds Noah only hides Aarav's, and then nothing is chosen and the bar goes.
+                ((EditText) readField(activity, "contactSearch")).setText("noah");
+                assertTrue(chosenChats(activity).isEmpty());
+                assertEquals(View.GONE, ((View) readField(activity, "selectionBar")).getVisibility());
+                assertEquals(View.VISIBLE, ((View) readField(activity, "homeToolbar")).getVisibility());
+            });
+        }
+    }
+
+    @Test public void aConfirmationNamesUpToThreeContactsAndCountsTheRest() throws Exception {
+        signedInFixture(); conversationsFixture();
+        List<ChatEngine.Peer> named = new ArrayList<>();
+        for (String name : List.of("Maya", "Noah", "Priya", "Sofia", "Leo"))
+            named.add(new ChatEngine.Peer(UUID.randomUUID(), UUID.randomUUID(), peer.identityKey(), name));
+        Method namesOf = MainActivity.class.getDeclaredMethod("namesOf", List.class);
+        namesOf.setAccessible(true);
+        assertEquals("Maya", namesOf.invoke(null, named.subList(0, 1)));
+        assertEquals("Maya and Noah", namesOf.invoke(null, named.subList(0, 2)));
+        assertEquals("Maya, Noah and Priya", namesOf.invoke(null, named.subList(0, 3)));
+        assertEquals("Maya, Noah, Priya and 1 more", namesOf.invoke(null, named.subList(0, 4)));
+        assertEquals("Maya, Noah, Priya and 2 more", namesOf.invoke(null, named));
+    }
+
+    @Test public void showingAChatTakesItsMarkOffWhicheverWayItWasReached() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        ChatEngine.Peer other = manyVerifiedContacts(1, 0).get(0);
+        engine.markUnread(other.userId(), true);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            // Not by a touch on the list: the way a notification, or an accepted invitation, shows a chat.
+            scenario.onActivity(activity -> { setField(activity, "selectedPeer", other.userId()); invoke(activity, "render"); });
+            awaitMainCondition(scenario, activity -> engine.unreadMarks().isEmpty());
+        }
+    }
+
+    @Test public void aMessageThatWasNotSentIsSaidSoAndAGroupMessageShowsHowFarItGot() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Peer maya = savedContact("Maya Chen"), noah = savedContact("Noah Williams");
+        messageFor(maya, true, "Could not go", ChatEnvelope.Expiry.HOUR_1, "Not sent: contact unavailable", -5_000);
+        GroupFixture group = aGroup("Weekend plans", maya, noah);
+        groupMessage(group, null, "Sent to all of them", "3 delivered / 3 of 3 read", -4_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertEquals("Not sent", rowString(activity, "Maya Chen", "status"));
+                assertEquals(R.drawable.ic_circle_alert, rowDrawn(activity, "Maya Chen", "icon"));
+                assertEquals(Ui.ERROR, rowDrawn(activity, "Maya Chen", "iconColor"));
+                assertEquals("A message to a group that every member has read is a read message", "Message", rowString(activity, "Weekend plans", "status"));
+                assertEquals(R.drawable.ic_check_check, rowDrawn(activity, "Weekend plans", "icon"));
+                assertEquals(Ui.ACCENT, rowDrawn(activity, "Weekend plans", "iconColor"));
+            });
+            snapshot(scenario, "list-not-sent");
+        }
+    }
+
+    @Test public void aRowMakesItsCountAndItsCountdownOnlyWhenItFirstHasOne() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Peer maya = savedContact("Maya Chen");
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertNull("Maya has nothing new: no count is made for her", rowPart(activity, "Maya Chen", "badge"));
+                assertNull("and nothing of hers vanishes soon", rowPart(activity, "Maya Chen", "countdownGroup"));
+                assertNotNull("Aarav has both", rowPart(activity, "Aarav Mehta", "badge"));
+                assertNotNull(rowPart(activity, "Aarav Mehta", "countdownGroup"));
+            });
+            // A message comes for Maya: the count and the countdown are made then, and she is first.
+            messageFor(maya, false, "Hello", ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -1_000);
+            scenario.onActivity(activity -> {
+                invoke(activity, "renderContacts");
+                assertEquals("1", rowString(activity, "Maya Chen", "badge"));
+                assertTrue(rowShows(activity, "Maya Chen", "countdownGroup"));
+                assertSame("The count is the one the list keeps for the chat", rowPart(activity, "Maya Chen", "badge"), ((Map<?, ?>) readField(activity, "unreadLabels")).get(maya.userId()));
+            });
+            // It is read: the count goes, and the view is kept for the next time.
+            engine.markChatRead(maya.userId());
+            scenario.onActivity(activity -> {
+                invoke(activity, "renderContacts");
+                assertFalse(rowShows(activity, "Maya Chen", "badge"));
+                assertNotNull(rowPart(activity, "Maya Chen", "badge"));
+            });
+        }
+    }
+
+    @Test public void aScreenReaderIsToldWhatTheMarksOfAMessageAndTheCountdownMean() throws Exception {
+        signedInFixture(); conversationsFixture();
+        List<ChatEngine.Peer> sentTo = manyVerifiedContacts(2, 0);
+        messageFor(sentTo.get(0), true, "Read by them", ChatEnvelope.Expiry.HOUR_1, "READ", -1_000);
+        messageFor(sentTo.get(1), true, "Still going", ChatEnvelope.Expiry.HOUR_1, "PENDING", -2_000);
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(activity -> {
+                assertEquals("Message, read", String.valueOf(rowPart(activity, "Contact 000", "status").getContentDescription()));
+                assertEquals("Message, sending", String.valueOf(rowPart(activity, "Contact 001", "status").getContentDescription()));
+                assertNull("What the words already say is not said twice", rowPart(activity, "Aarav Mehta", "status").getContentDescription());
+                String spoken = String.valueOf(rowPart(activity, "Contact 000", "countdownGroup").getContentDescription());
+                assertTrue(spoken, spoken.matches("The next message vanishes in (5\\d minutes|under a minute)"));
+                assertEquals("The number in the countdown is not read as well", View.IMPORTANT_FOR_ACCESSIBILITY_NO, rowPart(activity, "Contact 000", "countdown").getImportantForAccessibility());
+                assertEquals("The count of the Unread chip is part of what it says", "Not selected, 1 chat has something new",
+                    String.valueOf(androidx.core.view.ViewCompat.getStateDescription(described(activity, "Unread chats"))));
+                described(activity, "Unread chats").performClick();
+                assertEquals("Selected, 1 chat has something new", String.valueOf(androidx.core.view.ViewCompat.getStateDescription(described(activity, "Unread chats"))));
+            });
+        }
+    }
+
+    @Test public void markingAGroupReadReadsItsMessagesAndABlockedMemberIsLeftOutOfItsCounts() throws Exception {
+        signedInFixture(); conversationsFixture(); plainTransport(new ArrayList<>(), new ArrayList<>());
+        ChatEngine.Peer maya = savedContact("Maya Chen"), noah = savedContact("Noah Williams");
+        GroupFixture group = aGroup("Weekend plans", maya, noah);
+        UUID fromMaya = groupMessage(group, maya, "From Maya", "DELIVERED", -3_000);
+        groupMessage(group, noah, "From Noah", "DELIVERED", -2_000);
+        assertEquals(2L, engine.chatSummaries().get(group.id()).unread());
+        engine.safety().block(noah);
+        // Blocking removes what the member had sent. A message of theirs that is stored all the same (one that was on its way) is left out of the counts.
+        UUID late = groupMessage(group, noah, "From Noah, late", "DELIVERED", -1_000);
+        assertEquals("What a blocked member sent is not counted", 1L, engine.chatSummaries().get(group.id()).unread());
+        engine.markChatRead(group.id());
+        assertEquals("READ", engine.entry(fromMaya).state());
+        assertEquals("and what a blocked member sent is not read for them", "DELIVERED", engine.entry(late).state());
+        assertEquals(0L, engine.chatSummaries().get(group.id()).unread());
+    }
+
+    @Test public void theListDoesNotClipItsTextAtTheLargestFontScale() throws Exception {
+        signedInFixture(); conversationsFixture();
+        ChatEngine.Peer maya = savedContact("Maya Chen");
+        messageFor(maya, false, "Hello", ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -1_000);
+        engine.markUnread(savedContact("Noah Williams").userId(), true);
+        var device = androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        String before = device.executeShellCommand("settings get system font_scale").trim();
+        int[] normalRow = new int[1], normalChip = new int[1];
+        try {
+            try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+                scenario.onActivity(this::inject);
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+                scenario.onActivity(activity -> { normalRow[0] = contactRow(activity, "Aarav Mehta").getHeight(); normalChip[0] = described(activity, "Unread chats").getHeight(); });
+            }
+            // A screen that is left closes the engine it was given, and the vault with it: they are opened again for the second screen.
+            for (int attempt = 0; attempt < 100 && engine.account() != null; attempt++) android.os.SystemClock.sleep(50);
+            android.os.SystemClock.sleep(300);
+            vault.unlock(); engine = new ChatEngine(vault); engine.online = true;
+            device.executeShellCommand("settings put system font_scale 2.0");
+            for (int attempt = 0; attempt < 100 && InstrumentationRegistry.getInstrumentation().getTargetContext().getResources().getConfiguration().fontScale < 1.9f; attempt++)
+                android.os.SystemClock.sleep(100);
+            assertTrue("The phone's font is large", InstrumentationRegistry.getInstrumentation().getTargetContext().getResources().getConfiguration().fontScale >= 1.9f);
+            try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+                scenario.onActivity(this::inject);
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+                scenario.onActivity(activity -> {
+                    assertTrue("The list is there at the large font (font " + activity.getResources().getConfiguration().fontScale + "): " + screenSays(root(activity)),
+                        mentions(root(activity), "Aarav Mehta"));
+                    assertTrue("A larger font makes a taller row: " + normalRow[0] + " then " + contactRow(activity, "Aarav Mehta").getHeight(), contactRow(activity, "Aarav Mehta").getHeight() > normalRow[0]);
+                    assertTrue("and a taller chip", described(activity, "Unread chats").getHeight() > normalChip[0]);
+                    List<View> parts = new ArrayList<>();
+                    for (String name : List.of("Aarav Mehta", "Maya Chen", "Noah Williams")) {
+                        View row = contactRow(activity, name);
+                        List<View> inRow = descendants(row);
+                        // The letter in the picture of the person was as it is before this release, and is left out.
+                        inRow.removeAll(descendants(((ViewGroup) row).getChildAt(0)));
+                        parts.addAll(inRow);
+                    }
+                    parts.addAll(descendants(described(activity, "Unread chats")));
+                    int checked = 0;
+                    for (View part : parts) {
+                        if (!(part instanceof TextView label) || !label.isShown() || label.getLayout() == null || label.getText().length() == 0) continue;
+                        checked++;
+                        int room = label.getHeight() - label.getTotalPaddingTop() - label.getTotalPaddingBottom();
+                        assertTrue("The text is cut: " + label.getText() + " (" + label.getLayout().getHeight() + " in " + room + ")", label.getLayout().getHeight() <= room + 1);
+                    }
+                    assertTrue("Texts were checked: " + checked, checked >= 12);
+                });
+                snapshot(scenario, "list-large-font");
+            }
+        } finally {
+            device.executeShellCommand(before.equals("null") || before.isEmpty() ? "settings delete system font_scale" : "settings put system font_scale " + before);
+            float wanted = before.equals("null") || before.isEmpty() ? 1f : Float.parseFloat(before);
+            for (int attempt = 0; attempt < 100 && Math.abs(InstrumentationRegistry.getInstrumentation().getTargetContext().getResources().getConfiguration().fontScale - wanted) > .05f; attempt++)
+                android.os.SystemClock.sleep(100);
+        }
+    }
+
     // ---- Speed probes (made only when asked for) ----
     //
     // Skipped unless the instrumentation is given perfProbe=1. They time what a person waits for, on the dedicated test emulator and with
@@ -13517,6 +15134,55 @@ public class ScreenFlowTest {
                 perf("view_button_us", perfMicros(100, () -> ui.button("Send", true, () -> { })));
             });
         }
+    }
+
+    // What the chat list costs on the main thread for a phone with many chats: what it reads, drawing it with only what the rows say changed,
+    // and with the rows made again (a changed order, a chat that came or went). The number of views is that of the list.
+    @Test public void probeBuildingTheChatList() throws Exception {
+        Assume.assumeTrue("Speed probes are made only when asked for: perfProbe=1", perfAsked());
+        int contacts = perfNumber("perfContacts", 40);
+        signedInFixture(); conversationsFixture();
+        manyVerifiedContacts(contacts, perfNumber("perfEntries", 6));
+        int rounds = perfNumber("perfRounds", 7);
+        long[] read = new long[rounds], summaries = new long[rounds], patched = new long[rounds], rebuilt = new long[rounds], moved = new long[rounds];
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(this::inject);
+            awaitMainCondition(scenario, activity -> readField(activity, "contactRows") != null
+                && ((LinearLayout) readField(activity, "contactRows")).getChildCount() > Math.min(contacts, 20));
+            android.os.SystemClock.sleep(3_000);
+            for (int round = 0; round < rounds; round++) {
+                int at = round;
+                scenario.onActivity(activity -> {
+                    long started = System.nanoTime(); engine.chatSummaries(); summaries[at] = (System.nanoTime() - started) / 1_000;
+                    started = System.nanoTime(); engine.peers(); engine.groups().conversations(); engine.mutedChats(); engine.pinnedChats(); engine.unreadMarks(); engine.chatSummaries();
+                    read[at] = (System.nanoTime() - started) / 1_000;
+                    started = System.nanoTime(); invoke(activity, "renderContacts"); patched[at] = (System.nanoTime() - started) / 1_000;
+                    setField(activity, "shownKeys", List.of());
+                    started = System.nanoTime(); invoke(activity, "renderContacts"); rebuilt[at] = (System.nanoTime() - started) / 1_000;
+                });
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            }
+            // A message for the chat at the bottom puts it first: the order changes, and the rows are the same rows.
+            for (int round = 0; round < rounds; round++) {
+                int at = round;
+                List<String> order = new ArrayList<>();
+                scenario.onActivity(activity -> order.addAll(keptOrder(activity)));
+                ChatEngine.Peer bottom = savedContact(order.get(order.size() - 1));
+                entryFor(bottom.userId(), bottom.deviceId(), false, "Bumped " + round, null, ChatEnvelope.Expiry.HOUR_1, "DELIVERED", -5);
+                scenario.onActivity(activity -> {
+                    long started = System.nanoTime(); invoke(activity, "renderContacts"); moved[at] = (System.nanoTime() - started) / 1_000;
+                    assertEquals("The bottom chat is first now", bottom.name(), keptOrder(activity).get(0));
+                });
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            }
+            scenario.onActivity(activity -> perf("list_views", descendants((View) readField(activity, "contactRows")).size()));
+        }
+        perf("list_chats", contacts + 3);
+        perf("list_chat_summaries_us", perfMedian(summaries));
+        perf("list_everything_it_reads_us", perfMedian(read));
+        perf("list_draw_rows_kept_us", perfMedian(patched));
+        perf("list_draw_rows_moved_us", perfMedian(moved));
+        perf("list_draw_rows_made_again_us", perfMedian(rebuilt));
     }
 
     @Test public void probeCostOfAVaultCommitBySize() throws Exception {

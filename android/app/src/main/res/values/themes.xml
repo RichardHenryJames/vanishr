@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.Vanishr" parent="Theme.Material3.Light.NoActionBar">
+    <!-- The theme the app starts in: the light look, or the dark one when the phone is in its dark mode (values-night). MainActivity then sets
+         Theme.Vanishr.Light or Theme.Vanishr.Dark itself, from what the person chose in the profile. -->
+    <style name="Theme.Vanishr" parent="Theme.Vanishr.Light" />
+    <style name="Theme.Vanishr.Light" parent="Theme.Material3.Light.NoActionBar">
         <item name="android:fontFamily">@font/manrope</item>
         <item name="fontFamily">@font/manrope</item>
         <item name="colorPrimary">#146C58</item>
@@ -29,6 +32,37 @@
         <item name="materialAlertDialogTheme">@style/ThemeOverlay.Vanishr.Dialog</item>
         <item name="bottomSheetDialogTheme">@style/ThemeOverlay.Vanishr.BottomSheet</item>
     </style>
+    <!-- The dark look. Every color here is one of Palette.DARK; PaletteTest holds the pairs to their contrast. -->
+    <style name="Theme.Vanishr.Dark" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:fontFamily">@font/manrope</item>
+        <item name="fontFamily">@font/manrope</item>
+        <item name="colorPrimary">#4FC3A1</item>
+        <item name="colorOnPrimary">#00382B</item>
+        <item name="colorPrimaryContainer">#1A4235</item>
+        <item name="colorOnPrimaryContainer">#C8F0E2</item>
+        <item name="colorSecondary">#92AAF2</item>
+        <item name="colorSecondaryContainer">#1F2B4D</item>
+        <item name="colorSurface">#18221F</item>
+        <item name="colorSurfaceContainer">#18221F</item>
+        <item name="colorSurfaceContainerHigh">#18221F</item>
+        <item name="colorSurfaceContainerHighest">#0E1513</item>
+        <item name="android:fontVariationSettings">"'wght' 500"</item>
+        <item name="colorOnSurface">#E6EFEB</item>
+        <item name="colorOnSurfaceVariant">#A3B3AC</item>
+        <item name="colorOutline">#46564F</item>
+        <item name="colorError">#F08C9B</item>
+        <item name="android:colorBackground">#0E1513</item>
+        <item name="android:textColorHint">#8A9B94</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:navigationBarColor">#0E1513</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowBackground">#0E1513</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.Vanishr.Dialog.Dark</item>
+        <item name="bottomSheetDialogTheme">@style/ThemeOverlay.Vanishr.BottomSheet.Dark</item>
+    </style>
     <style name="Shape.Vanishr" parent="ShapeAppearance.Material3.Corner.Small">
         <item name="cornerSize">8dp</item>
     </style>
@@ -39,6 +73,13 @@
         <item name="android:windowMinWidthMajor">85%</item>
         <item name="android:windowMinWidthMinor">92%</item>
     </style>
+    <style name="ThemeOverlay.Vanishr.Dialog.Dark" parent="ThemeOverlay.Material3.MaterialAlertDialog">
+        <item name="shapeAppearance">@style/Shape.Vanishr</item>
+        <item name="shapeAppearanceCornerExtraLarge">@style/Shape.Vanishr</item>
+        <item name="colorSurfaceContainerHigh">#18221F</item>
+        <item name="android:windowMinWidthMajor">85%</item>
+        <item name="android:windowMinWidthMinor">92%</item>
+    </style>
     <style name="ThemeOverlay.Vanishr.BottomSheet" parent="ThemeOverlay.Material3.BottomSheetDialog">
         <item name="bottomSheetStyle">@style/Widget.Vanishr.BottomSheet</item>
         <item name="elevationOverlayEnabled">false</item>
@@ -46,11 +87,35 @@
         <item name="android:windowLightNavigationBar">true</item>
         <item name="android:navigationBarColor">#FFFFFF</item>
     </style>
+    <style name="ThemeOverlay.Vanishr.BottomSheet.Dark" parent="ThemeOverlay.Material3.BottomSheetDialog">
+        <item name="bottomSheetStyle">@style/Widget.Vanishr.BottomSheet.Dark</item>
+        <item name="elevationOverlayEnabled">false</item>
+        <item name="android:backgroundDimAmount">0.5</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:navigationBarColor">#18221F</item>
+    </style>
     <style name="Widget.Vanishr.BottomSheet" parent="Widget.Material3.BottomSheet.Modal">
         <item name="shapeAppearance">@style/Shape.Vanishr</item>
         <item name="backgroundTint">#FFFFFF</item>
     </style>
+    <style name="Widget.Vanishr.BottomSheet.Dark" parent="Widget.Material3.BottomSheet.Modal">
+        <item name="shapeAppearance">@style/Shape.Vanishr</item>
+        <item name="backgroundTint">#18221F</item>
+    </style>
     <style name="Theme.Vanishr.MessageActions" parent="Theme.Material3.Light.NoActionBar">
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+    <style name="Theme.Vanishr.MessageActions.Dark" parent="Theme.Material3.Dark.NoActionBar">
         <item name="android:windowIsFloating">false</item>
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowBackground">@android:color/transparent</item>

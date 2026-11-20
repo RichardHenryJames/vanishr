@@ -19,22 +19,51 @@ import com.google.android.material.textfield.TextInputEditText;
 import com.google.android.material.textfield.TextInputLayout;
 
 final class Ui {
-    static final int INK = Color.rgb(24, 39, 36);
-    static final int PRIMARY = Color.rgb(20, 108, 88);
-    static final int MUTED = Color.rgb(103, 117, 111);
-    static final int CANVAS = Color.rgb(245, 248, 246);
-    static final int SURFACE = Color.WHITE;
-    static final int LINE = Color.rgb(226, 232, 228);
-    static final int TINT = Color.rgb(221, 241, 233);
-    static final int BLUE = Color.rgb(53, 92, 190);
-    static final int BLUE_TINT = Color.rgb(232, 237, 250);
-    static final int ERROR = Color.rgb(166, 63, 80);
-    static final int ERROR_TINT = Color.rgb(252, 238, 240);
-    static final int WARM = Color.rgb(137, 107, 25);
+    // The colors in use, set by use() from Palette: the light look until configure() has been told what the phone and the person want. They
+    // are read when a view is built, so a change of look is a new activity (see MainActivity.chooseTheme), never a repaint of views already made.
+    static int INK, MUTED, CANVAS, SURFACE, LINE, OUTLINE, RIPPLE;
+    /** PRIMARY is a fill that carries white; ACCENT is the same green as text or an icon on the page, the bubbles and the sheets. */
+    static int PRIMARY, ACCENT, TINT;
+    static int BLUE, BLUE_TINT, ERROR, ERROR_TINT, WARM, WARM_TINT;
+    /** Fills that carry white, which the text colors above are not in the dark look. */
+    static int MUTED_FILL, BLUE_FILL, ERROR_FILL, WARM_FILL;
+    static int DOODLES, QUOTE_TINT, QUOTE_SURFACE, SNIPPET;
+    static boolean dark;
+    static { use(Palette.LIGHT); }
     private final Context context;
     private final Typeface face;
     private final android.util.SparseArray<Typeface> fonts = new android.util.SparseArray<>();
     record Field(TextInputLayout layout, TextInputEditText input, LinearLayout view) { }
+
+    static void use(Palette.Colors colors) {
+        dark = colors.dark();
+        INK = colors.ink(); MUTED = colors.muted(); CANVAS = colors.canvas(); SURFACE = colors.surface(); LINE = colors.line();
+        OUTLINE = colors.outline(); RIPPLE = colors.ripple();
+        PRIMARY = colors.primary(); ACCENT = colors.accent(); TINT = colors.tint();
+        BLUE = colors.blue(); BLUE_TINT = colors.blueTint(); ERROR = colors.error(); ERROR_TINT = colors.errorTint();
+        WARM = colors.warm(); WARM_TINT = colors.warmTint();
+        MUTED_FILL = colors.mutedFill(); BLUE_FILL = colors.blueFill(); ERROR_FILL = colors.errorFill(); WARM_FILL = colors.warmFill();
+        DOODLES = colors.doodles(); QUOTE_TINT = colors.quoteTint(); QUOTE_SURFACE = colors.quoteSurface(); SNIPPET = colors.snippet();
+    }
+
+    /** What the person chose in the profile (until they choose, the phone decides). */
+    static Palette.Choice choice(Context context) {
+        return Palette.Choice.of(context.getSharedPreferences("preferences", Context.MODE_PRIVATE).getString("theme", null));
+    }
+
+    static void choose(Context context, Palette.Choice choice) {
+        context.getSharedPreferences("preferences", Context.MODE_PRIVATE).edit().putString("theme", choice.stored()).apply();
+    }
+
+    /** Works out which look is in use for this screen and makes it the one that every view built from now on takes its colors from. */
+    static void configure(Context context) {
+        boolean phoneIsDark = (context.getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+            == android.content.res.Configuration.UI_MODE_NIGHT_YES;
+        use(Palette.colors(Palette.dark(choice(context), phoneIsDark)));
+    }
+
+    /** The theme of an activity or a sheet in the look that is in use. */
+    static int theme() { return dark ? R.style.Theme_Vanishr_Dark : R.style.Theme_Vanishr_Light; }
 
     Ui(Context context) { this.context = context; this.face = context.getResources().getFont(R.font.manrope); }
 
@@ -76,7 +105,7 @@ final class Ui {
     }
 
     RippleDrawable feedback(int color, int radius) {
-        return new RippleDrawable(ColorStateList.valueOf(0x14146C58), background(color, radius, 0), background(Color.WHITE, radius, 0));
+        return new RippleDrawable(ColorStateList.valueOf(RIPPLE), background(color, radius, 0), background(Color.WHITE, radius, 0));
     }
 
     MaterialButton button(String label, boolean primary, Runnable action) {
@@ -96,10 +125,10 @@ final class Ui {
         button.setBackgroundTintList(new ColorStateList(new int[][]{new int[]{-android.R.attr.state_enabled}, new int[]{android.R.attr.state_checked}, new int[]{}},
             new int[]{LINE, TINT, primary ? PRIMARY : SURFACE}));
         ColorStateList foreground = new ColorStateList(new int[][]{new int[]{-android.R.attr.state_enabled}, new int[]{}},
-            new int[]{MUTED, primary ? Color.WHITE : PRIMARY});
+            new int[]{MUTED, primary ? Color.WHITE : ACCENT});
         button.setTextColor(foreground);
         button.setIconTint(foreground);
-        if (!primary) { button.setStrokeWidth(dp(1)); button.setStrokeColor(ColorStateList.valueOf(LINE)); }
+        if (!primary) { button.setStrokeWidth(dp(1)); button.setStrokeColor(ColorStateList.valueOf(OUTLINE)); }
         button.setElevation(0);
         button.setStateListAnimator(null);
         button.setLayoutParams(new LinearLayout.LayoutParams(-1, -2));
@@ -160,14 +189,14 @@ final class Ui {
         String initials = trimmed.isEmpty() ? "?" : trimmed.substring(0, trimmed.offsetByCodePoints(0, 1)).toUpperCase(java.util.Locale.ROOT);
         TextView avatar = text(initials, size >= 64 ? 25 : size <= 40 ? 13 : 16, 800, color);
         avatar.setGravity(Gravity.CENTER);
-        avatar.setBackground(background(color == BLUE ? BLUE_TINT : color == ERROR ? ERROR_TINT : color == WARM ? Color.rgb(247, 239, 214) : TINT, size / 2, 0));
+        avatar.setBackground(background(color == BLUE ? BLUE_TINT : color == ERROR ? ERROR_TINT : color == WARM ? WARM_TINT : TINT, size / 2, 0));
         avatar.setLayoutParams(new LinearLayout.LayoutParams(dp(size), dp(size)));
         avatar.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         return avatar;
     }
 
     int avatarColor(java.util.UUID id) {
-        return switch (Math.floorMod(id.hashCode(), 4)) { case 0 -> PRIMARY; case 1 -> BLUE; case 2 -> ERROR; default -> WARM; };
+        return switch (Math.floorMod(id.hashCode(), 4)) { case 0 -> ACCENT; case 1 -> BLUE; case 2 -> ERROR; default -> WARM; };
     }
 
     ImageView groupAvatar(int size, int color) {
@@ -203,9 +232,9 @@ final class Ui {
         wrapper.setBoxBackgroundMode(TextInputLayout.BOX_BACKGROUND_OUTLINE);
         wrapper.setBoxCornerRadii(dp(6), dp(6), dp(6), dp(6));
         wrapper.setBoxBackgroundColor(SURFACE);
-        wrapper.setBoxStrokeColor(PRIMARY);
+        wrapper.setBoxStrokeColor(ACCENT);
         wrapper.setDefaultHintTextColor(ColorStateList.valueOf(MUTED));
-        wrapper.setHintTextColor(ColorStateList.valueOf(PRIMARY));
+        wrapper.setHintTextColor(ColorStateList.valueOf(ACCENT));
         wrapper.setTypeface(font(500));
         wrapper.setSaveEnabled(false);
         TextInputEditText input = new TextInputEditText(wrapper.getContext());
@@ -233,7 +262,7 @@ final class Ui {
         wrapper.setEndIconDrawable(R.drawable.ic_check);
         wrapper.setEndIconCheckable(false);
         wrapper.setEndIconContentDescription(name);
-        wrapper.setEndIconTintList(ColorStateList.valueOf(PRIMARY));
+        wrapper.setEndIconTintList(ColorStateList.valueOf(ACCENT));
         wrapper.setEndIconMinSize(dp(48));
         wrapper.setEndIconOnClickListener(view -> action.run());
         View button = wrapper.findViewById(com.google.android.material.R.id.text_input_end_icon);

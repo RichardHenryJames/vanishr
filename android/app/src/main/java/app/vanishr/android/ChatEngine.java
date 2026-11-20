@@ -539,6 +539,8 @@ final class ChatEngine implements AutoCloseable {
             if (entry == null) continue;
             if (entry.groupEpoch() == null && peerId.equals(entry.peerId())) erase(entry, null);
         }
+        // What was marked unread has nothing left to be unread about.
+        vault.transaction(() -> { vault.remove("unread-mark/" + peerId); return null; });
     }
 
     /**
@@ -563,6 +565,79 @@ final class ChatEngine implements AutoCloseable {
         });
     }
 
+    /**
+     * What the chat list knows about every chat, from the stored message records alone: whether something is new and of what kind, the time of
+     * the newest message, how far an outgoing one got, when the next one vanishes. One pass over the records the list already reads to count
+     * unread messages; nothing is decrypted, so it costs no Keystore call and tells nothing of what a message says.
+     */
+    Map<UUID, ChatListModel.Summary> chatSummaries() {
+        Map<UUID, ChatListModel.Builder> builders = new HashMap<>();
+        visitLiveEntries(null, entry -> builders.computeIfAbsent(entry.peerId(), id -> new ChatListModel.Builder()).add(new ChatListModel.Message(
+            entry.expiresAt() - entry.expiry().milliseconds, entry.expiresAt(), entry.outgoing(), entry.image(),
+            entry.expiry() == ChatEnvelope.Expiry.VIEW_ONCE, entry.state())));
+        Map<UUID, ChatListModel.Summary> summaries = new HashMap<>();
+        builders.forEach((id, builder) -> summaries.put(id, builder.build()));
+        return summaries;
+    }
+
+    /**
+     * The chats the person pinned to the top of the list, and the chats they marked as unread. Like a mute, each is a preference kept on this
+     * phone in the encrypted store with the chat: never sent anywhere, not in the encrypted backup (a restored account has none), and
+     * removed with the chat when it is removed, blocked or left.
+     */
+    Set<UUID> pinnedChats() { return chatSet("pinned/"); }
+
+    Set<UUID> unreadMarks() { return chatSet("unread-mark/"); }
+
+    private Set<UUID> chatSet(String prefix) {
+        Set<UUID> chats = new HashSet<>();
+        for (String name : vault.names(prefix)) {
+            try { chats.add(UUID.fromString(name.substring(prefix.length()))); }
+            catch (IllegalArgumentException invalid) { /* not one of ours; it is left alone */ }
+        }
+        return chats;
+    }
+
+    private boolean chatExists(UUID chatId) { return peer(chatId) != null || groups.get(chatId) != null; }
+
+    /** Pins or unpins a chat. Returns false, and changes nothing, when it is to be pinned and three are pinned already. */
+    boolean pin(UUID chatId, boolean pinned) throws Exception {
+        if (account == null || !chatExists(chatId)) throw new SecurityException("Chat is unavailable");
+        return vault.transaction(() -> {
+            if (!pinned) { vault.remove("pinned/" + chatId); return true; }
+            Set<UUID> now = pinnedChats();
+            long existing = now.stream().filter(this::chatExists).count();
+            if (!ChatListModel.canPin((int) existing, now.contains(chatId))) return false;
+            write("pinned/" + chatId, Boolean.TRUE);
+            return true;
+        });
+    }
+
+    void markUnread(UUID chatId, boolean marked) throws Exception {
+        if (account == null || !chatExists(chatId)) throw new SecurityException("Chat is unavailable");
+        vault.transaction(() -> {
+            if (marked) write("unread-mark/" + chatId, Boolean.TRUE); else vault.remove("unread-mark/" + chatId);
+            return null;
+        });
+    }
+
+    /**
+     * Marks a chat read without opening it: what opening it would do, in one commit. The mark goes, and the messages that are new are read, which
+     * sends their read receipts as opening the chat does. A view-once message is read only by viewing it, so it stays as it is.
+     */
+    void markChatRead(UUID chatId) throws Exception {
+        if (account == null || !chatExists(chatId)) throw new SecurityException("Chat is unavailable");
+        List<Entry> unread = new ArrayList<>();
+        visitLiveEntries(chatId, entry -> {
+            if (!entry.outgoing() && !entry.state().equals("READ") && entry.expiry() != ChatEnvelope.Expiry.VIEW_ONCE) unread.add(entry);
+        });
+        vault.transaction(() -> {
+            markRead(unread);
+            vault.remove("unread-mark/" + chatId);
+            return null;
+        });
+    }
+
     void forget(Peer peer) throws Exception {
         PhotoSharingService.endFor(account.userId(), peer.userId());
         for (Entry entry : entries(peer.userId())) erase(entry, "delete");
@@ -572,6 +647,8 @@ final class ChatEngine implements AutoCloseable {
             vault.remove("contact/" + peer.userId());
             vault.remove("contact-name/" + peer.userId());
             vault.remove("muted/" + peer.userId());
+            vault.remove("pinned/" + peer.userId());
+            vault.remove("unread-mark/" + peer.userId());
             onboarding.dismiss(peer.userId());
             return null;
         });
@@ -602,6 +679,8 @@ final class ChatEngine implements AutoCloseable {
             vault.remove("contact/" + peerId);
             vault.remove("contact-name/" + peerId);
             vault.remove("muted/" + peerId);
+            vault.remove("pinned/" + peerId);
+            vault.remove("unread-mark/" + peerId);
             onboarding.dismiss(peerId);
             groups.discardBlockedControls(peerId);
             return null;

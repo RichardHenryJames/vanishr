@@ -202,7 +202,7 @@ final class EmojiPanel extends LinearLayout {
 
     private LayerDrawable underline() {
         GradientDrawable bar = new GradientDrawable();
-        bar.setColor(Ui.PRIMARY);
+        bar.setColor(Ui.ACCENT);
         LayerDrawable layers = new LayerDrawable(new GradientDrawable[]{bar});
         layers.setLayerInset(0, design.dp(10), design.dp(40), design.dp(10), 0);
         return layers;

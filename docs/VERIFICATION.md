@@ -1,14 +1,21 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-11-19 UTC. This is a development foundation,
+Evidence refreshed on Windows, 2026-11-20 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
-## Release 0.7.2 / A chat that opens at once (2026-11-19)
+## Release 0.7.2 / A chat that opens at once, a startup bar that keeps flowing and a dark look (2026-11-20)
 
-Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#the-words-of-messages-kept-in-memory-and-a-chat-that-opens-at-once-072) and
-[ARCHITECTURE.md](ARCHITECTURE.md#client-threading-and-the-open-vault). The owner, with 0.7.1 in hand, found one more slowness: when a chat has run for
-two or three pages, opening it takes a while, and it should be instant. **No relay change, no new permission, nothing new on the wire.** Version
-0.7.2 / code 54 in `build.gradle`.
+Design and limits: [THREAT-MODEL.md](THREAT-MODEL.md#the-words-of-messages-kept-in-memory-and-a-chat-that-opens-at-once-072),
+[THREAT-MODEL.md](THREAT-MODEL.md#the-look-of-the-app-and-the-startup-bar-072),
+[THREAT-MODEL.md](THREAT-MODEL.md#the-chat-list-latest-activity-first-a-line-under-each-name-pins-marks-and-selection-072),
+[ARCHITECTURE.md](ARCHITECTURE.md#client-threading-and-the-open-vault) and [ARCHITECTURE.md](ARCHITECTURE.md#the-chat-list-072). The owner, with 0.7.1 in hand, found one more slowness: when a chat has run for
+two or three pages, opening it takes a while, and it should be instant. Before 0.7.2 had been uploaded anywhere the owner asked for more, which went into
+the same release: that the bar under the logo while the app opens should flow on and never stop, a dark theme with a switch for it, right on every screen,
+and, after a mock-up was shown and approved, a redesigned chat list (the chat with the newest message first, a line under each name, filter chips, a search
+that opens from its icon, pins, unread marks and a long press that chooses chats for a bar of actions). **No relay change, no new permission, nothing new on
+the wire.** Version 0.7.2 / code 54 in `build.gradle`; no build of this
+version had been uploaded, so the version was kept. A first Play bundle made from the chat-open work alone (SHA-256 `f541dc1c…2701`) is superseded by
+the one that carries all four and must not be uploaded.
 
 - **What took the time, measured on 0.7.1.** A new probe (`probeOpeningALongChat`, run only when asked for) makes a chat of 157 messages (mostly short
   texts, some long ones, replies that quote, emoji, a photo about every thirteenth, a reaction on every seventh, the last 24 of the other side unread)
@@ -109,28 +116,231 @@ two or three pages, opening it takes a while, and it should be instant. **No rel
   | a stage does not take an album's older pictures | 1 test |
   | it takes them only when they are next to each other (the old rule) | 1 test, which counted 13 rows where 18 are right |
   | what is drawn already counts as work to do (a receipt is not one stage) | 1 test |
-- **The full emulator suite, twice.** On the dedicated emulator, wiped and started afresh for this work (error dialogs turned off, airplane mode on,
-  the Play store disabled), with the QA build made from the sources being released. **Run 1** (before the review's fixes), 426 tests in 23 minutes: 2
-  failed, 12 were skipped. **Run 2, on the final build, 433 tests in 21 minutes: 1 failed and 12 were skipped; every test that is not skipped passed
-  except `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`**, which is known and unchanged since 0.6.3 (a UiAutomator wait for a pop-up menu
-  entry; it fails the same way on the 0.7.1 build). The skips are nine speed probes and `storeListingScreenshots` (each asks for an option),
-  `vaultRejectsMissingDeviceCredentials` (needs a phone without a screen lock) and the signed-release test against the live relay. The other failure
-  of run 1 was `blockUserFromTheSwipeAsksFirstAndTakesTheMuteAndTheContactWithIt`: after the block was confirmed, the screen did not reach the
-  expected state in 15 s. **Its cause was not found**: the emulator's log had rolled over by the time it was noticed. It passed in all three runs
-  alone (together with the same gesture for "remove contact"), and in run 2, and it had passed in the 0.7.1 run; the 0.7.1 run's other eleven
-  failures were of this kind (a plain wait for something on the screen while the emulator slows), several of them gestures on the same list
-  (`touchingAnotherRowPutsTheOpenOneBackWithoutOpeningThatOneAndOnlyOneIsOpen`, `scrollingTheListPutsAnOpenRowBack`). Nothing in the code of the block
-  was changed by this release; what it calls, `erase` and the eviction of the blocked contact's messages, now also drop the words of what they
-  remove, and both are exercised by the tests above and by the rest of the suite. This is a judgement and not a finding: a second run that failed
-  on it again would have meant looking harder. `composerRemainsAccessibleWithKeyboardAndExpiryRemovesVisibleContent`, which failed on every
-  run of the 0.7.1 suite, passed in both runs of this one; why was not looked into.
+- **A startup bar that keeps flowing.** The owner asked that the bar under the logo while the app opens should not stop but flow on, like an animation,
+  whatever opening is doing. `FlowBar` (new; it replaces the Material `LinearProgressIndicator` in `MainActivity.storageState`, with the same view id, size,
+  place and description) draws a track and a light that crosses it in 1.2 s and comes in again at once. Where the light is comes from the clock at each frame
+  (`SystemClock.uptimeMillis`) and each draw asks for the next frame (`postInvalidateOnAnimation`), so there is no animator (which a phone that has its
+  animations switched off ends at once) and no pause between rounds: nothing in the animation settings can stop it, and it draws for as long as it is on the
+  screen. It shows no progress, only that the app is alive, which is what was asked. Three costs of that were accepted: it goes on moving when the person has
+  asked the phone to remove animations (a small bar, moving once in 1.2 s, only while the app opens); it always crosses from left to right, also in a
+  language that is written right to left; and a screen reader says "Opening Vanishr" and nothing else about it. Why the Material bar was seen to stop on
+  the owner's phone was **not established**, so nothing here claims to have found or removed that cause.
+- **A dark look, chosen in My profile.** The owner asked for a dark theme with a switch for it, and for everything to be right in it. My profile now has a
+  *Theme* control of three segments, System, Light and Dark. Until a choice is made the app follows the phone's dark mode, **which is a change**: the app was
+  always light before, so a phone that is in its dark mode now gets a dark app (the README says so). `Palette` (new, plain Java so that a JVM test can check
+  it) holds the colors of both looks; `Ui` takes the one in use (`Ui.configure`, the first thing `MainActivity.onCreate` and `RemotePhotosActivity.onCreate`
+  do, before any view is built); `themes.xml` has `Theme.Vanishr.Light` and `.Dark`, with a dark dialog, sheet and message-actions overlay each, and
+  `values-night` gives the window the phone's mode before the activity has chosen. A change of look closes the profile, keeps the choice (one word in the
+  plain `preferences` file) and recreates the activity, because every view takes its colors when it is built: nothing is repainted and no cache of colors can
+  go stale (the chat wallpaper's tile is the one cached drawing, one per look). The light look is what it was, color for color. Where the light look used one
+  color for two jobs the dark look has two when it must: text and icons (`accent`) against fills that carry white (`primary`, and the `*Fill` colors of the
+  unread count and the swipe buttons). The icons of view-once rows and photo rows, which were drawn in the dark of their files, and the placeholder of the
+  Remote Photos list are tinted with the text color. The website is unchanged. **What a change of look drops:** it is a restart of the screen, and pausing the
+  old one is what closes the engine and clears what is waiting to be sent, so a message that is still being sent, or that failed and waits for Retry, is
+  lost if the look is changed before it is sent, exactly as it is when the app is left and opened again. No guard was added against that. A person who
+  chose Dark on a phone in its light mode may see the light window for a moment as the app starts, and one who chose Light on a phone in its dark mode the
+  dark window (`values-night`); the keyboard and the system's dialogs follow the phone, not the choice.
+- **Tests added for the bar and the dark look.** JVM (8, total **167**), `PaletteTest`: every text and fill of the dark look reaches a contrast of at
+  least 4.5 to 1 against what it is drawn on; the light look is exactly what it was (two of its pairs were already under 4.5, muted on tint at 4.10 and warm
+  on its tint at 4.37: they are held where they were and not claimed); the dark look is dark; the choice (System follows the phone, Light and Dark do not,
+  anything unknown is System) and what is stored is read back; and `themes.xml` says what the palette says, for 17 attributes of each look and for what a
+  dialog, a bottom sheet and its navigation bar are filled with (the theme's `colorOnPrimary`, `colorOnPrimaryContainer` and hint color are not checked).
+  That test reads the theme files by path, which Gradle did not know, so an edit of `themes.xml` alone did not run it again; `build.gradle` now declares the
+  theme files as inputs of the unit-test tasks (shown: such an edit now fails the test by itself). Emulator (8, `ScreenFlowTest`): the bar is drawn again
+  and again, in three 450 ms windows one after the other with at least five draws in each, and its light is at its start at the start of every round (the
+  test reports the emulator's animation scale, 0.0 here, and does not enforce it); the profile offers the three looks and shows the one in use; touching
+  the one in use changes and keeps nothing; choosing Dark keeps the choice, makes a new activity, closes the profile, draws the chat list dark and makes
+  the theme that the views take their defaults from the dark one; choosing Light after Dark brings the light one back; the phone's dark mode decides while
+  nothing is chosen and a choice beats it (`Ui.configure` is given the configuration of a phone in each mode); the chat list, the profile, a chat, and the
+  new-conversation, new-group, disappearing-messages and attachment sheets are each drawn dark (measured: the average brightness of the screen and of its
+  edges, and the share of bright pixels), with the eye of a view-once row tinted for it; and the startup bar (its track and its light) and the wallpaper
+  take the dark look for themselves and give the light one back. The class starts each test with the choice pinned to Light, whatever the emulator's own
+  mode, and takes `-e testTheme dark|light|system` to draw the whole class in another, for looking at it (`snapshot` then also writes how dark each
+  screenshot is); the three tests that need nothing to be chosen are skipped on an emulator that is in its night mode. The startup test that looked for a
+  `ProgressBar` looks for the `FlowBar`. **What the measuring of a screen does not show** is that what is on it can be read: it shows that the screen is
+  dark (the page of a sheet is drawn on a transparent bitmap, so the transparent part above a sheet counts as black) and cannot see dark on dark, which is
+  the fault that looking found (the eye and the picture icon); the eye of a view-once row is the one icon with an assertion of its own.
+- **Mutation checks of the bar and the dark look**, each made, built, run and reverted (the source files that were changed are byte-identical to what
+  they were, by SHA-256). All fourteen were caught. Four were made together in one run (the bar, the wallpaper's tile, the eye of a view-once row, the Theme
+  control); the wallpaper's tile and the eye were then made again, one at a time, to see which test caught each, and the other ten were made one at a time
+  (the last four after the review below).
+
+  | change made | caught by |
+  |---|---|
+  | the bar is not asked to be drawn again after a draw | the bar test: the count of draws stayed at one, `[1, 1, 1, 1]` |
+  | the wallpaper's tile is kept whatever the look | 1 of 8 emulator tests run (`theDarkLookTintsTheStartupBarAndTheWallpaperForItself`) |
+  | the eye of a view-once row is not tinted | 1 of 8 (`everyMainScreenIsDrawnDarkInTheDarkLookAndItsSheetsToo`) |
+  | the Theme control is removed from the profile | 2 of 5 (the profile test, "Missing control: Dark", and the choosing-Dark test) |
+  | choosing a look does not recreate the screen | 2 of 2 run ("A new activity was made") |
+  | choosing a look does not keep the choice | 2 of 3 run |
+  | `Ui.configure` ignores the choice and follows the phone alone | 4 of 4 run |
+  | the activity does not set the theme of the look | 1 of 5 run (the theme the views take their defaults from) |
+  | a text color of the dark palette is made too dim (the quote's snippet, 1.45 to 1) | 1 JVM test (the contrast one) |
+  | a color of the dark theme in `themes.xml` is changed away from the palette's | 1 JVM test (`theThemeFilesSayWhatThePaletteSays`) |
+  | the bar's track takes the light look's color whatever the look | 1 of 4 emulator tests run (`theDarkLookTints…`, "The track of the bar is the line of the dark look") |
+  | the bar's moving light takes the light look's color whatever the look | 1 of 4 (the same test, "the light that flows on it is its accent") |
+  | the container color of the dark theme is one digit off the palette's | 1 JVM test (the same `themes.xml` test) |
+  | the dark sheet's fill in `themes.xml` is white | 1 JVM test (the same) |
+- **The dark screens were looked at, not only measured.** The whole `ScreenFlowTest` class (387 tests) was run once in the dark look (`-e testTheme
+  dark`). Its 95 screenshots were measured, and every one is within the limits of the test above (edges 0.08 to 0.13, bright share up to 0.13 on the
+  screens that hold a photograph, average 0.08 to 0.26). About 45 of them, those that differ from one another (sign-in, sign-up and the policy, the empty
+  list, adding a contact, the profile with its Theme control, the licenses, the group dialogs, the identity sheets, the swipe actions, the confirmations,
+  remote photos, the viewers, quotes and the reply strip, the message actions, the offline, keyboard and error states, the expiry, attachment and
+  send-photo sheets, the loader), and the eight screens of the store listing made in the dark look, were looked at in contact sheets: all legible and in step
+  with each other. What looking found, and was fixed: the eye of a view-once row and the picture icon of a photo row were invisible on the dark bubble, and
+  so was the placeholder of the Remote Photos list. Eight tests failed in that run: two asserted the light value of a button or a count
+  (`theRowCoversTheActionsBehindItWhileItIsBeingPulled`, `mutingAChatKeepsItsCountGreyShowsABellAndCanBeUndone`: they now read `MUTED_FILL`, which is
+  `MUTED` in the light look), four were the tests of the choice itself, which assumed that nothing was chosen (they now start from there), one is the known
+  `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount`, and one is a real-keyboard test (`withARealKeyboardUpTheEmojiButtonSwapsItForThePanelAndBack…`,
+  a timing assertion on the keyboard and the emoji panel: it passed in the light suite and failed in that one run; why was not looked into). The six that
+  were changed were run again, alone, in the dark look and in the light look, with the two swipe tests discussed below, and all eight passed in both.
+- **A review of the bar and the dark look** (a separate code review, read-only: it built and ran nothing, apart from recomputing the contrasts with a throwaway
+  script) found no defect in the app's code. It had read every color literal in the code and the resources and found what remains mode-independent (white on
+  fills, scrims, the black photo viewer, the online dot); every icon tinted; every text and ground of the dark look at 4.76 to 1 or better (the lowest is the
+  error text on the sender's bubble); no static that captures a color; the two themes' base styles to define the same attributes, so that setting a theme
+  over the manifest's leaks nothing either way; the engine and the dialogs handled as in a rotation; `FlowBar` to allocate nothing per frame and to stop
+  drawing when it is detached; and every window that shows content to keep `FLAG_SECURE`. What it found in the tests and the text was put right: (1) the text
+  said that the startup bar takes the dark look for itself and no test looked at the bar: the bar now has accessors for its two colors, the test asserts them
+  in both looks, and two mutations of it are caught; (2) "every test starts in the light look" was not true on an emulator in its night mode: the choice is
+  now pinned to Light for every test and the three tests that need nothing to be chosen are skipped on such an emulator; (3) the measuring of a screen is
+  weaker than it was described (said above, and in the README); (4) a test name promised more than it checked (`…WhateverThePhoneSays`, now
+  `choosingTheLightLookAfterTheDarkOneBringsTheLightOneBack`) and the text on the animation scale made the test sound as if it enforced it (it only reports
+  it); (5) "four" 450 ms windows are three; (6) `themes.xml` was checked for 11 attributes and is now checked for 17 and for the overlays, with the
+  two mutations above and the Gradle input; (7) the window that shows for a moment before a Light choice on a phone in its dark mode was not documented.
+  What it found of the design was written down and not changed: a change of look drops what is waiting to be sent, and the bar's direction, its ignoring
+  of "remove animations" and its screen-reader text (all above).
+- **The chat list, redrawn.** The owner asked for a better conversation list, with the feel of the apps they know; a before-and-after picture was shown and the
+  owner approved all of it, with a switch for the details and a bar for chats that are chosen. **What is new:** the chat with the newest message first, with
+  the time of that message; a line under each name, worked out from the stored message records alone ("2 new messages", "New photo", "New view-once
+  message", "Message", "Photo", "View once", how far one's own last message got, "Not sent", a group's members); a countdown in the last hour before a chat's
+  next message vanishes; the chips All, Unread (with its count), Groups and Muted in place of the funnel; a search that opens from its icon; a *New chat*
+  button that shrinks to its icon while the list is scrolled down; pins (at most three), unread marks, and a long press that chooses chats for a bar (Pin or
+  Unpin, Mute or Unmute, Mark as read or unread, and More: Clear chat and Remove contact, each asked about first); some motion that is off when the phone's
+  animations are; and *Show details in the chat list* in My profile, which brings back the plain list. New files: `ChatListModel` (plain Java),
+  `ListMotion`, `ExtendedFab` and four drawables; changed: `ChatEngine` (`chatSummaries`, `pin`, `markUnread`, `markChatRead`), `SwipeActions` (a lock while
+  chats are chosen) and, most of all, `MainActivity`.
+- **Tests of the list.** JVM: `ChatListModelTest`, 25 tests (the vocabulary of the lines, the times, including a day on which the clocks change
+  (Europe/Berlin, 2026-10-25), the countdowns and what is said for them, the order, the filters, the limit of pins, how far a message got). Emulator: 47 new
+  tests in `ScreenFlowTest`, each of one purpose so that a mutation maps to one test, and five older ones that the list touches (the bound on the height of
+  an ordinary row lowered from 78 to 74 dp; `compactClassicHomeUsesOneToolbarAnd100DpBeforeTheList`, renamed, for the toolbar that now holds the title, the
+  search and the profile; the two tests of an open row, which now check both the way the list is patched and the way it is built again; the profile
+  test): **all 52 pass in the light look and in the dark look** (`-e testTheme dark`). The fixture `conversationsFixture` had stored two of its contacts under
+  a random id that was not their own, so that `engine.peer(id)` returned nothing for them; fixed.
+- **Bugs found and fixed while testing, each with a test.** (1) A pull sideways on a row while chats were chosen still ended, when the finger lifted, as a
+  touch on the row (it chose or opened the chat): the swipe now swallows a sideways drag while the group is locked (`SwipeActions` `Phase.SWALLOWING`).
+  (2) The test of the animations could not raise the animator scale before the activity had a window (a process is told of a new scale only once it has a
+  window), so it tested nothing; the scale is now raised once the screen is up. (3) **The list was built again at every change of its order**, and with
+  chats in the order of their latest message that is every message that makes another chat the newest, going back to the list after sending a message
+  included, which is the move the owner had found slow in 0.7.0; the list of 0.7.1 never changed its order, so this would have been a step back. It was found
+  by reasoning about the flows, then measured (below) and fixed: rows that are the same rows in another order keep their views and are moved
+  (`MainActivity.sameRows`, `moveRows`), and a changed set of rows, a rename, a pin or a mute still builds them again, which
+  `aListWhoseRowsAreNotTheSameRowsIsMadeAgain` and `aContactThatIsRenamedIsShownUnderTheNewNameAndNotTakenForARowThatMoved` hold. (4) **A fix I made after the
+  review below broke the chips**: giving a chip an inset background (a 32 dp pill in a 44 dp touch target) makes the view take that drawable's padding for its
+  own, so the text touched the edges of its pill. A test of the largest font had passed; it was found by looking at the screenshot taken at that font, and
+  is fixed, with an assertion that every chip keeps its room and is 44 dp to touch. (5) A lint warning (`PluralsCandidate`) on "N selected": it is a
+  plural resource now. Two of my own new tests were wrong, and they were mended, not the code: one assumed that the messages of a member who is then
+  blocked stay stored (blocking removes them; the test now stores one that arrives after the block, which the list leaves out of its counts and
+  `markChatRead` leaves unread), and one reused an engine that its first screen had closed (a screen that is left closes the engine it was given, and its
+  vault; the test opens them again for the second).
+- **Speed of the list** (`probeBuildingTheChatList`, run only when asked for; dedicated emulator, QA build, the median of seven rounds). The emulator was
+  noisy: the same build's rebuild of 43 chats took 1.3, 1.5, 1.8 and 2.3 s on four runs, so only the sizes of the differences mean anything. **The old
+  list** (0.7.1's, measured in a scratch checkout of HEAD, which built its rows again at every change): 43 chats, 1,119 views, 722 ms; 153 chats, 3,979
+  views, 2,393 ms. **The new list**, 43 chats, 1,592 views: rows kept 42 ms, **rows moved to a new order 61 ms**, rows built again 1.3 s; 153 chats, 5,662
+  views: kept 139 ms, moved 155 ms, built again 4.5 s. Of the kept and the moved times, 40 and 106 ms are the one pass over the stored records
+  (`chatSummaries`, the same kind of pass that the unread counts made). So **a change of a count, a tick of the clock and a chat that moves to the top are
+  20 to 30 times cheaper than building the rows, and cheaper than every change of the old list; building the rows (the first drawing of the list, a
+  contact added or renamed, a pin or a mute) takes 1.8 to 3 times what the old list's did**, because a row has more in it (a line, a time, a countdown, a
+  count, a pin and a mark of selection: about 37 views against 26, with the count and the countdown made only for the rows that have one). On a phone these
+  numbers should be several times smaller (view creation costs about a millisecond a view on this emulator); that was not measured. The panels of the
+  swipe actions, about a third of a contact row's views, are made with every row as they were; making them on first use would save the most and was not
+  done.
+- **Mutation checks of the list**, each made, built, run and restored, the sources compared by SHA-256 with a backup afterwards: **66 mutants, all caught.**
+  Forty-eight were of the first version: in the model (the limit of pins, the line of a view-once message, the threshold of the countdown, unread
+  ignoring marks, one's own messages counted as unread, the label of yesterday, pinned chats ignored in the order, oldest first, the filter of groups
+  inverted); in the engine (stale pins counted, no check that a chat exists before it is pinned, a pin or a mark not removed on forgetting, discarding a
+  blocked contact, leaving a group or clearing, `markChatRead` reading a view-once message or keeping the mark or recording nothing, the time of a
+  summary taken from the expiry); and about twenty-five in the screen (the patch path never or always taken, the lines with details off, the limit of pins in the
+  screen, the pin toggle inverted, the order of Back, the swipe lock ignored, the tick, bulk clear and remove without asking, the button, the search text
+  kept, the mark not cleared on opening, the chip ignoring marks, a pin shown with a count, the state of a chosen row, mute inverted, Mute offered for a
+  group, a toggle that never removes, the dot hidden, `appear` skipped, a touch on a row while chats are chosen opening it, a chat that is gone staying
+  chosen, the swallow reverted, `ListMotion.enabled` false). Eighteen were of what was changed after the review below: the room around the text of a
+  chip; `moveRows` doing nothing; `moveRows` leaving the dividers behind; `sameRows` not comparing sets (a rename); the choice not cut to what is listed;
+  the mark not taken off when a chat is shown; `ListMotion.reveal` not stopping a `conceal` that is running; the count made for every row; the names left out
+  of a confirmation; a line without what is said for it; a countdown without what is said for it; the Unread chip without its count in its state; rows of a
+  fixed height at the largest font; and, in the model, "Not sent" mapped to nothing, the boundary of a group message read by everyone, a day taken as 24
+  hours instead of the calendar day (a day on which the clocks change), "Not sent" shown over what is new, and the plural of the countdown. The last five
+  were run against the JVM tests and the rest on the emulator, in batches of mutants that no other test in the batch would catch, each judged by the test it
+  was made for, and the reason for each failure was read.
+- **A review of the list** (a separate code review, read-only: it built and ran nothing). It found two medium issues and six smaller ones. All were
+  confirmed against the code and fixed, with tests:
+  1. *The choice kept chats that a chip or the search hid, and the confirmations named nobody.* The choice is cut to the rows that are listed every time they
+     are planned, and a confirmation names up to three contacts and counts the rest.
+  2. *Fixed heights around text that grows with the font* (rows, chips, counts, times) cut the text at a large font. They wrap their content now, with minimum
+     heights; a test sets the largest font scale and checks that no line of a row, a chip or a count is cut.
+  3. *An unread mark survived opening a chat from a notification or an invitation* (it was taken off only when a row was touched). It is taken off where a
+     chat is shown.
+  4. *Two animations of the search could end in the wrong state* (closed again while still opening). The one that is running is stopped first.
+  5. *A message that was not sent, and the progress of a group message, lost their marks.* They are said now ("Not sent", and delivered or read from the
+     group's counts).
+  6. *Smaller gaps for touch and for a screen reader:* the chips and the picture of the person were smaller than they had been (32 and 36 dp, against 44 and
+     40); the marks of delivery and the countdown were not spoken; the count of the Unread chip was not part of what the chip said. All changed.
+  7. *Two claims in the documents were too strong:* "nothing written to disk but the one word" (the pins and marks are in the encrypted store) and "Mark as
+     read does what opening does" (it also reads photos that were never drawn and messages that opening would not show, and sends their receipts).
+     Rewritten in the threat model and the README.
+  8. *Tests that could not fail or were narrow, and one that could be flaky* (a message that vanishes after ten seconds: now thirteen). Mended, and the
+     missing coverage added (the items above).
+  It also listed what it had checked and found sound: that no text of a message is read or logged for the list, that blocked senders are left out of the
+  counts, that the removal of pins and marks is complete, that the limit of three pins is enforced inside the store's transaction, and the threading.
+- **Lint** after the list: 0 errors and **17 warnings** (the 18 of 0.7.1, one `SetTextI18n` fewer).
+- **The full emulator suite, three times.** On the dedicated emulator, wiped and started afresh for this work (error dialogs turned off, airplane mode on,
+  the Play store disabled), with the QA build made from the sources being released. **Run 1** (the chat-open work before the review's fixes), 426 tests in
+  23 minutes: 2 failed, 12 were skipped. **Run 2** (the chat-open work as committed in `e60ffe2`), 433 tests in 21 minutes: 1 failed and 12 were skipped.
+  **Run 3, on the build that also has the bar and the dark look, 441 tests in 34 minutes: 2 failed and 12 were skipped; every test that is not skipped
+  passed except `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount` and `blockUserFromTheSwipeAsksFirstAndTakesTheMuteAndTheContactWithIt`.** The
+  first is known and unchanged since 0.6.3 (a UiAutomator wait for a pop-up menu entry; it fails the same way on the 0.7.1 build). The skips are nine
+  speed probes and `storeListingScreenshots` (each asks for an option), `vaultRejectsMissingDeviceCredentials` (needs a phone without a screen lock) and
+  the signed-release test against the live relay. Run 3 took longer than the others (34 minutes against 21 to 23) because the emulator was slower: after
+  it, one Keystore decryption took 27.7 ms in the probe, against 17 to 20 ms in the chat-open probes, and the probes of view building and of opening a long
+  chat, run then on the final build, show no slowdown of the app itself (the same 1, 85 and 8 Keystore calls; first rows at 407, 193 and 174 ms and all
+  rows at 3.8, 1.2 and 1.2 s, in line with the slower Keystore; the cost of building a view within the noise of the 0.7.1 figures).
+  **`blockUserFromTheSwipe…` failed in run 1 and in run 3, passed in run 2, and had passed in the 0.7.1 run, and the two failures are at different
+  steps.** In run 1 both pulls of the row had opened it and, after the block was confirmed, the screen did not reach the expected state in 15 s; in run 3
+  the first confirmation had been cancelled and the second pull of the row did not open it (the row stayed at rest for the 15 s of the wait). Run 1's log had
+  rolled over by the time it was noticed, and run 3's holds only the assertion. The text for run 1 said that a second failure would mean looking harder.
+  **Looked into:** the swipe code and the list's redraw paths show nothing that explains either failure (a redraw is held back while a finger is on a row,
+  and an open row comes back open); the read-ahead, the one thing this release added to what that screen does, takes no lock that a user action waits for
+  (from reading the code: the decryption holds none, and the store's snapshot lock is held for a map lookup only); and the test passed all 26 times it was
+  run on its own: twelve times alone, eight times after the twelve tests that come before it in the suite, and six times alone with the emulator's four cores
+  kept busy by four loops (it then takes twice as long). **The cause was not found.** What was found is that the test that does the same for "remove
+  contact" waits for the row to be back at rest after the cancelled confirmation before it pulls again, and this one did not: that wait was added, and the
+  wait for a row now says what the screen was doing when it fails (a finger on a row, a dialog showing, whether the screen was resumed, how many times it was
+  made). That is a hardening of the test and not a finding: a failure of it in a long run is not shown to be the test's alone. Nothing in the swipe was
+  changed by this release beyond the colors of its buttons; what the block calls, `erase` and the eviction of the blocked contact's messages, now also drop
+  the words of what they remove, and both are exercised by the tests above and by the rest of the suite. Of the 0.7.1 run's other eleven failures, which were
+  of this kind (a plain wait for something on the screen while the emulator slows), several were gestures on the same list
+  (`touchingAnotherRowPutsTheOpenOneBackWithoutOpeningThatOneAndOnlyOneIsOpen`, `scrollingTheListPutsAnOpenRowBack`).
+  `composerRemainsAccessibleWithKeyboardAndExpiryRemovesVisibleContent`, which failed on every run of the 0.7.1 suite, passed in all three runs of this
+  one; why was not looked into.
+- **The full emulator suite, a fourth time, on the build that has the redrawn list.** Same emulator and method. **489 tests in 32 minutes** (the three runs above
+  were 426, 433 and 441): **5 failed and 13 were skipped** (ten speed probes, `storeListingScreenshots`, `vaultRejectsMissingDeviceCredentials` and the
+  signed-release test against the live relay). Of the 5: `remotePhotosMenuIsAvailableOnlyForTheCurrentAdminAccount` is the known one, unchanged since 0.6.3 and
+  failing the same way (a UiAutomator wait for a pop-up menu entry); `withARealKeyboardUpTheEmojiButtonSwapsItForThePanelAndBack…` is the real-keyboard timing
+  test that failed in one of the runs above and in the 0.7.1 run (here a moment at which the emoji panel and the keyboard were both on the screen), and run
+  alone afterwards it passed twice and failed once, so it is flaky and was not shown to be better or worse for this change; and **three were tests that the
+  redrawn list had made out of date, not faults of the app**: `mutingAChatKeepsItsCountGreyShowsABellAndCanBeUndone` compared the number of pictures in
+  Aarav's row with those in Maya's, and Aarav's row now has a countdown with a picture of its own (it compares each row with itself now);
+  `profileNotificationSwitchDefaultsOnAndSavedOffSurvivesReopening` took the *first* switch of My profile for the notification switch, and *Show details in
+  the chat list* now comes before it (it looks for the switch by its text); and `clearChatFromTheSwipeAsksFirstAndKeepsTheContact` expected a hidden count
+  on the row of a chat that has been cleared, which now has no count view at all (a row makes its count when it first has something to count). These three
+  were mended and passed when run again, with the known one and the keyboard one, on the final build. **What I did not do** is run the whole suite a fifth
+  time after mending them: the mending is in three tests and no code. They had not been run before this suite, because the runs after the list was written
+  were of the tests that the list added and changed; running the whole class is what found them.
 - **Release gate** (`scripts\verify.ps1 -Android`, run on the final sources; what was changed after it is documentation). JVM: client-core 38 tests and
-  the relay 114 (2 skipped: the live-relay tests), build successful (the one "ERROR" line in the log is a relay test that makes a migration fail on
-  purpose). Android: `:crypto:test` (up to date), `:app:testDebugUnitTest` **159 tests, 0 failures**, `lintDebug` **0 errors, 18 warnings** (the same
-  eighteen as 0.7.1: `SetTextI18n` 8, `UnusedResources` 6, and one each of `InlinedApi`, `MonochromeLauncherIcon`, `ObsoleteSdkInt` and
-  `ViewConstructor`); then the Google release-configuration tests (21), the over-the-air settings tests (25), the admin identity tests (15) and the
-  checks of the committed signed settings file and admin certificate: all passed. **The signed settings file expires on 2026-12-01 at 06:28 UTC (11.4
-  days from the run) and has to be renewed before then.**
+  the relay 114 (2 skipped: the live-relay tests), build successful. Android: `:app:testDebugUnitTest` **192 tests, 0 failures** (the 167 of the build before the
+  list and the 25 of `ChatListModelTest`), `lintDebug` **0 errors, 17 warnings** (`SetTextI18n` 7, `UnusedResources` 6, and one each of `InlinedApi`,
+  `MonochromeLauncherIcon`, `ObsoleteSdkInt` and `ViewConstructor`: the eighteen of 0.7.1 less one `SetTextI18n`); then the Google release-configuration
+  tests (21), the over-the-air settings tests (25), the admin identity tests (15) and the checks of the committed signed settings file and admin
+  certificate: all passed. **The signed settings file expires on 2026-12-01 at 06:28 UTC (10.4 days from the run) and has to be renewed before then.**
 - **What this does not show.** Everything was measured on one emulator with a software-backed Keystore, in the QA build (debuggable, not minified), with made-up
   messages. No physical phone, no hardware-backed Keystore or StrongBox (a Keystore call costs more there, so memory should gain more; not measured), no
   Google Play install. The battery and heat cost of reading ahead (at most 28 Keystore calls each time the list is drawn, not more often than every
@@ -138,6 +348,11 @@ two or three pages, opening it takes a while, and it should be instant. **No rel
   removed, the rest of a chat's window still decrypts in the background after its first screen (2.5 to 3.2 s here), and a chat that was neither read ahead
   nor opened before still decrypts its first screen (13 calls, about 0.5 s here). The change to the first stage's thread priority was not measured on its
   own (the emulator's cores are all alike). The words in memory are Java strings that the app cannot overwrite, as the text in the chat's views already was.
+  **Of the list:** no physical phone and no real finger (the gestures are injected); no screen reader in use (what is said for the marks of a row is checked as
+  strings, not heard); no right-to-left language; sizes of font only the default and the largest that the emulator sets; the times above are the emulator's,
+  noisy, and say how the new list compares with the old, not how long anything takes on a phone; the first drawing of the list and every change of the set
+  of its rows cost more than the old list's did (1.8 to 3 times there), which only a phone can say whether a person would notice; the swipe panels are still
+  made with every row; and whether the times, the countdowns and the order are what the owner wants day to day is for the owner to say (the switch is there).
 
 ## Release 0.7.1 / A faster protected store and photos that arrive together (2026-11-19)
 

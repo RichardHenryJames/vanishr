@@ -23,9 +23,7 @@ import androidx.core.view.accessibility.AccessibilityNodeInfoCompat;
 @android.annotation.SuppressLint("ViewConstructor")
 final class QuoteBlock extends LinearLayout {
     static final String PHOTO = "Photo", VIEW_ONCE = "View-once message";
-    // A shade darker than the bubble it sits in, as a quote is in a chat app.
-    static final int ON_TINT = Color.rgb(205, 228, 218), ON_SURFACE = Color.rgb(238, 243, 240);
-    private static final int SNIPPET = Color.rgb(64, 82, 76);
+    // The ground of a quote is a shade away from the bubble it sits in (Ui.QUOTE_TINT, Ui.QUOTE_SURFACE), as a quote is in a chat app.
 
     private final Ui design;
     private final View bar;
@@ -45,10 +43,10 @@ final class QuoteBlock extends LinearLayout {
         LinearLayout column = new LinearLayout(context);
         column.setOrientation(VERTICAL);
         column.setPadding(design.dp(8), design.dp(6), design.dp(10), design.dp(6));
-        name = design.text("", 12, 700, Ui.PRIMARY);
+        name = design.text("", 12, 700, Ui.ACCENT);
         name.setSingleLine(true); name.setEllipsize(TextUtils.TruncateAt.END); name.setMaxWidth(limit);
         column.addView(name, new LayoutParams(-2, -2));
-        snippet = design.text("", 13, 500, SNIPPET);
+        snippet = design.text("", 13, 500, Ui.SNIPPET);
         snippet.setMaxLines(maxLines); snippet.setEllipsize(TextUtils.TruncateAt.END); snippet.setMaxWidth(limit);
         snippet.setCompoundDrawablePadding(design.dp(5));
         column.addView(snippet, new LayoutParams(-2, -2));
@@ -62,14 +60,14 @@ final class QuoteBlock extends LinearLayout {
     QuoteBlock opens(Runnable action) {
         setOnClickListener(view -> action.run());
         // Clipped to the rounded corners of the quote by the outline set in the constructor.
-        setForeground(new RippleDrawable(ColorStateList.valueOf(0x24146C58), null, new ColorDrawable(Color.WHITE)));
+        setForeground(new RippleDrawable(ColorStateList.valueOf(Ui.dark ? 0x2EFFFFFF : 0x24146C58), null, new ColorDrawable(Color.WHITE)));
         ViewCompat.replaceAccessibilityAction(this, AccessibilityNodeInfoCompat.AccessibilityActionCompat.ACTION_CLICK, "Go to the quoted message", null);
         return this;
     }
 
     /** {@code author} null leaves the name out (an older app's reply says nothing about who wrote what it quotes). */
     QuoteBlock show(String author, boolean mine, String text) {
-        int accent = mine ? Ui.PRIMARY : Ui.BLUE;
+        int accent = mine ? Ui.ACCENT : Ui.BLUE;
         bar.setBackgroundColor(accent);
         name.setVisibility(author == null ? GONE : VISIBLE);
         name.setText(author == null ? "" : author);
@@ -77,7 +75,7 @@ final class QuoteBlock extends LinearLayout {
         snippet.setText(text);
         int icon = PHOTO.equals(text) ? R.drawable.ic_image : VIEW_ONCE.equals(text) ? R.drawable.ic_eye : 0;
         Drawable symbol = icon == 0 ? null : ContextCompat.getDrawable(getContext(), icon).mutate();
-        if (symbol != null) { symbol.setTint(SNIPPET); symbol.setBounds(0, 0, design.dp(15), design.dp(15)); }
+        if (symbol != null) { symbol.setTint(Ui.SNIPPET); symbol.setBounds(0, 0, design.dp(15), design.dp(15)); }
         snippet.setCompoundDrawablesRelative(symbol, null, null, null);
         return this;
     }
