@@ -1,6 +1,6 @@
 # Verification and release gates
 
-Evidence refreshed on Windows, 2026-11-20 UTC. This is a development foundation,
+Evidence refreshed on Windows, 2026-11-21 UTC. This is a development foundation,
 not a production security assessment or independent audit.
 
 ## Release 0.7.2 / A chat that opens at once, a startup bar that keeps flowing and a dark look (2026-11-20)
@@ -14,7 +14,7 @@ the same release: that the bar under the logo while the app opens should flow on
 and, after a mock-up was shown and approved, a redesigned chat list (the chat with the newest message first, a line under each name, filter chips, a search
 that opens from its icon, pins, unread marks and a long press that chooses chats for a bar of actions). **No relay change, no new permission, nothing new on
 the wire.** Version 0.7.2 / code 54 in `build.gradle`; no build of this
-version had been uploaded, so the version was kept. A first Play bundle made from the chat-open work alone (SHA-256 `f541dc1c…2701`) is superseded by
+version had been uploaded anywhere while this work went on, so the version was kept. A first Play bundle made from the chat-open work alone (SHA-256 `f541dc1c…2701`) is superseded by
 the one that carries all four and must not be uploaded.
 
 - **What took the time, measured on 0.7.1.** A new probe (`probeOpeningALongChat`, run only when asked for) makes a chat of 157 messages (mostly short
@@ -350,8 +350,25 @@ the one that carries all four and must not be uploaded.
   service-account key, the deployment e-mail, the over-the-air and admin-authority key material) found nothing, and the over-the-air key list in it is the
   committed one. The R8 map holds the new classes (`Palette`, `FlowBar`, `ExtendedFab`, the nested classes of `ChatListModel`; `ListMotion` and the top of
   `ChatListModel` were inlined away). **It replaces the bundle of the chat-open work alone (`f541dc1c…2701`, from `e60ffe2`), which must not be uploaded.**
-  It has not been uploaded to Google Play: nothing is known of Play's review of it or of an install from Play. Nothing was published to the website or the
-  update feed.
+  It has not been uploaded to Google Play: nothing is known of Play's review of it or of an install from Play.
+- **The direct release, published** (the owner chose it after the bundle was final; no relay change, so no relay deployment). **APK**
+  `vanishr-0.7.2.apk`, made from the clean committed tree `ca31630` by `package-apk.ps1` (release lint included, signature verified):
+  **SHA-256 `26a4dd1f038d83d876fb39f7e11b4aa5dc0363f256b88764d797c9bbf64387d4`, 44,798,540 bytes** in the stage. **Stage** `vercel-download-0.7.2`, 36 files, 62,799,301
+  bytes (the limit is 99,000,000): the APK, the matching source ZIP, notices for 116 runtime components, the update feed and the pages. **Audit** (`audit-stage.ps1`, and
+  the inventory of every file's size and SHA-256 in `.tools\distribution-audit-0.7.2.json`): the feed's version, code, URL, size and SHA-256 are those of the
+  staged APK, which is the APK that was built; of the source ZIP's 532 entries, 314 source files are byte-for-byte the files of commit `ca31630`, the other 218
+  are dependency sources (16 dependencies have no published source artifact, as before), and 413 text entries and the stage's own files were scanned for key
+  and token patterns and for the nine private values on this machine (the APK's raw bytes as well): **no finding**. `vercel.json` is static-only, with no build
+  command, and holds the no-store header of the feed. **Deployment** to the approved Vanishr project and team by `vercel deploy --prod --yes --scope vanishr
+  --cwd <stage>` (deployment `dpl_6y3dkXdsFHUvyfNRqohPyJ9zb6Ec`, ready, 36 files); the CLI aliased only the team-scoped address, so the canonical alias
+  `vanishr-download.vercel.app` was moved to the new deployment by hand, as the deployment guide says it may have to be. **Public verification** at 2026-11-21 05:31 UTC
+  (`verify-public.ps1`, no login, recorded in `.tools\public-release-verification-0.7.2.json`): the feed serves 0.7.2 / code 54 with `Cache-Control: no-store`; the APK that
+  is served has the staged SHA-256 and size; its signing identity matches; all 35 public files answer 200 and 22 private paths answer 404; the security headers are
+  there; the signed settings file is the committed one, verifies under the key built into the app and has **10.0 days left** (it expires on 2026-12-01 at 06:28 UTC);
+  the admin certificate (sequence 3) verifies. **Not checked:** that a phone running 0.7.1 finds and installs the update (the feed is what it reads, and it is right,
+  but no phone was used), and an install of this APK on a physical phone. The website's screenshots, hero picture and social image were remade from the QA build
+  (clean status bar, made-up people) before the release, and the home page's caption and the security page now say what the list shows and that *Mark as read* sends
+  receipts.
 - **What this does not show.** Everything was measured on one emulator with a software-backed Keystore, in the QA build (debuggable, not minified), with made-up
   messages. No physical phone, no hardware-backed Keystore or StrongBox (a Keystore call costs more there, so memory should gain more; not measured), no
   Google Play install. The battery and heat cost of reading ahead (at most 28 Keystore calls each time the list is drawn, not more often than every
